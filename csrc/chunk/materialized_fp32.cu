@@ -504,6 +504,7 @@ void launch_materialized_chunk(
     torch::Tensor& transform,
     torch::Tensor& bias,
     torch::Tensor& boundary,
+    torch::Tensor* state_dot_a,
     float scale,
     cudaStream_t stream) {
   dispatch_build<io_t>(
@@ -549,6 +550,7 @@ void launch_materialized_chunk(
       a,
       b,
       output,
+      state_dot_a,
       scale,
       stream);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -572,6 +574,7 @@ void materialized_chunk_fp32_cuda(
     torch::Tensor transform,
     torch::Tensor bias,
     torch::Tensor boundary,
+    torch::Tensor state_dot_a,
     int64_t build_warps,
     int64_t stages,
     int64_t state_tile,
@@ -610,6 +613,7 @@ void materialized_chunk_fp32_cuda(
             transform,
             bias,
             boundary,
+            state_dot_a.defined() ? &state_dot_a : nullptr,
             static_cast<float>(scale),
             stream);
       });

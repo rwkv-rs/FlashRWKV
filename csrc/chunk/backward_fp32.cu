@@ -1,0 +1,376 @@
+// SPDX-License-Identifier: Apache-2.0
+// Chunk checkpoint/backstepping adapted from BlinkDL/RWKV-LM
+// RWKV-v7/train_temp/cuda/wkv7_cuda.cu at commit
+// 952102498e9ed367ea0a59ee64106916d474d30f.
+// Modified for canonical log_decay inputs, FP16/BF16/FP32 token I/O,
+// final-state upstream gradients, partial gradient outputs, and tail chunks.
+
+#include <ATen/ATen.h>
+#include <ATen/Dispatch.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+#include <torch/extension.h>
+
+namespace {
+
+constexpr int kHeadSize = 64;
+
+template <typename io_t>
+__device__ __forceinline__ float to_float(io_t value) {
+  return static_cast<float>(value);
+}
+
+template <typename io_t>
+__device__ __forceinline__ io_t from_float(float value) {
+  return static_cast<io_t>(value);
+}
+
+struct BackwardShared {
+  float r[kHeadSize];
+  float decay[kHeadSize];
+  float k[kHeadSize];
+  float v[kHeadSize];
+  float a[kHeadSize];
+  float b[kHeadSize];
+  float grad_output[kHeadSize];
+  float state_dot_a[kHeadSize];
+  float adjoint_dot_b[kHeadSize];
+  float state[kHeadSize][kHeadSize];
+  float adjoint[kHeadSize][kHeadSize];
+};
+
+template <typename io_t>
+__global__ __launch_bounds__(kHeadSize, 1)
+void chunk_backward_kernel(
+    int num_heads,
+    const int* __restrict__ sequence_chunk_offsets,
+    const int* __restrict__ chunk_token_starts,
+    const int* __restrict__ chunk_token_ends,
+    const float* __restrict__ final_state_ptr,
+    const io_t* __restrict__ r_ptr,
+    const io_t* __restrict__ log_decay_ptr,
+    const io_t* __restrict__ k_ptr,
+    const io_t* __restrict__ v_ptr,
+    const io_t* __restrict__ a_ptr,
+    const io_t* __restrict__ b_ptr,
+    const float* __restrict__ state_dot_a_ptr,
+    const io_t* __restrict__ grad_output_ptr,
+    const float* __restrict__ grad_final_state_ptr,
+    const float* __restrict__ boundary_ptr,
+    io_t* __restrict__ grad_r_ptr,
+    io_t* __restrict__ grad_log_decay_ptr,
+    io_t* __restrict__ grad_k_ptr,
+    io_t* __restrict__ grad_v_ptr,
+    io_t* __restrict__ grad_a_ptr,
+    io_t* __restrict__ grad_b_ptr,
+    float* __restrict__ grad_initial_state_ptr,
+    float scale) {
+  const int head_index = static_cast<int>(blockIdx.x);
+  const int sequence_index = static_cast<int>(blockIdx.y);
+  const int value_index = static_cast<int>(threadIdx.x);
+  __shared__ BackwardShared shared;
+
+  const int64_t state_base =
+      (static_cast<int64_t>(sequence_index) * num_heads + head_index) *
+      kHeadSize * kHeadSize;
+  float state[kHeadSize];
+  float adjoint[kHeadSize];
+#pragma unroll
+  for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+    state[key_index] =
+        final_state_ptr[
+            state_base + key_index * kHeadSize + value_index];
+    adjoint[key_index] =
+        grad_final_state_ptr == nullptr
+        ? 0.0f
+        : grad_final_state_ptr[
+              state_base + key_index * kHeadSize + value_index];
+  }
+
+  const int sequence_chunk_start =
+      sequence_chunk_offsets[sequence_index];
+  const int sequence_chunk_end =
+      sequence_chunk_offsets[sequence_index + 1];
+  for (int chunk_index = sequence_chunk_end - 1;
+       chunk_index >= sequence_chunk_start;
+       --chunk_index) {
+    if (chunk_index + 1 < sequence_chunk_end) {
+      const int64_t boundary_base =
+          (static_cast<int64_t>(chunk_index + 1) * num_heads + head_index) *
+          kHeadSize * kHeadSize;
+#pragma unroll
+      for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+        state[key_index] =
+            boundary_ptr[
+                boundary_base + key_index * kHeadSize + value_index];
+      }
+    }
+
+    const int token_start = chunk_token_starts[chunk_index];
+    const int token_end = chunk_token_ends[chunk_index];
+    for (int token_index = token_end - 1;
+         token_index >= token_start;
+         --token_index) {
+      const int64_t input_index =
+          (static_cast<int64_t>(token_index) * num_heads + head_index) *
+              kHeadSize +
+          value_index;
+      shared.r[value_index] = to_float(r_ptr[input_index]);
+      shared.decay[value_index] =
+          expf(to_float(log_decay_ptr[input_index]));
+      shared.k[value_index] = to_float(k_ptr[input_index]);
+      shared.v[value_index] = to_float(v_ptr[input_index]);
+      shared.a[value_index] = to_float(a_ptr[input_index]);
+      shared.b[value_index] = to_float(b_ptr[input_index]);
+      shared.grad_output[value_index] =
+          grad_output_ptr == nullptr
+          ? 0.0f
+          : to_float(grad_output_ptr[input_index]);
+      shared.state_dot_a[value_index] = state_dot_a_ptr[input_index];
+      __syncthreads();
+
+      const float output_adjoint = shared.grad_output[value_index];
+#pragma unroll
+      for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+        adjoint[key_index] = fmaf(
+            scale * shared.r[key_index],
+            output_adjoint,
+            adjoint[key_index]);
+        shared.state[key_index][value_index] = state[key_index];
+        shared.adjoint[key_index][value_index] = adjoint[key_index];
+      }
+      __syncthreads();
+
+      float grad_r = 0.0f;
+      float grad_k = 0.0f;
+      float grad_b = 0.0f;
+#pragma unroll
+      for (int other_value = 0;
+           other_value < kHeadSize;
+           ++other_value) {
+        grad_r = fmaf(
+            shared.state[value_index][other_value],
+            shared.grad_output[other_value],
+            grad_r);
+        grad_k = fmaf(
+            shared.adjoint[value_index][other_value],
+            shared.v[other_value],
+            grad_k);
+        grad_b = fmaf(
+            shared.adjoint[value_index][other_value],
+            shared.state_dot_a[other_value],
+            grad_b);
+      }
+
+      float grad_v = 0.0f;
+      float adjoint_dot_b = 0.0f;
+#pragma unroll
+      for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+        grad_v = fmaf(
+            adjoint[key_index],
+            shared.k[key_index],
+            grad_v);
+        adjoint_dot_b = fmaf(
+            adjoint[key_index],
+            shared.b[key_index],
+            adjoint_dot_b);
+        state[key_index] =
+            (
+                state[key_index] -
+                shared.k[key_index] * shared.v[value_index] -
+                shared.b[key_index] *
+                    shared.state_dot_a[value_index]
+            ) /
+            shared.decay[key_index];
+        shared.state[key_index][value_index] = state[key_index];
+      }
+      shared.adjoint_dot_b[value_index] = adjoint_dot_b;
+      __syncthreads();
+
+      float grad_log_decay = 0.0f;
+      float grad_a = 0.0f;
+#pragma unroll
+      for (int other_value = 0;
+           other_value < kHeadSize;
+           ++other_value) {
+        grad_log_decay = fmaf(
+            shared.adjoint[value_index][other_value],
+            shared.state[value_index][other_value],
+            grad_log_decay);
+        grad_a = fmaf(
+            shared.state[value_index][other_value],
+            shared.adjoint_dot_b[other_value],
+            grad_a);
+      }
+      grad_log_decay *= shared.decay[value_index];
+
+      if (grad_r_ptr != nullptr) {
+        grad_r_ptr[input_index] = from_float<io_t>(scale * grad_r);
+      }
+      if (grad_log_decay_ptr != nullptr) {
+        grad_log_decay_ptr[input_index] =
+            from_float<io_t>(grad_log_decay);
+      }
+      if (grad_k_ptr != nullptr) {
+        grad_k_ptr[input_index] = from_float<io_t>(grad_k);
+      }
+      if (grad_v_ptr != nullptr) {
+        grad_v_ptr[input_index] = from_float<io_t>(grad_v);
+      }
+      if (grad_a_ptr != nullptr) {
+        grad_a_ptr[input_index] = from_float<io_t>(grad_a);
+      }
+      if (grad_b_ptr != nullptr) {
+        grad_b_ptr[input_index] = from_float<io_t>(grad_b);
+      }
+
+#pragma unroll
+      for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+        adjoint[key_index] = fmaf(
+            shared.a[key_index],
+            adjoint_dot_b,
+            shared.decay[key_index] * adjoint[key_index]);
+      }
+      __syncthreads();
+    }
+  }
+
+  if (grad_initial_state_ptr != nullptr) {
+#pragma unroll
+    for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+      grad_initial_state_ptr[
+          state_base + key_index * kHeadSize + value_index] =
+          adjoint[key_index];
+    }
+  }
+}
+
+template <typename io_t>
+void launch_chunk_backward(
+    int num_sequences,
+    int num_heads,
+    const torch::Tensor& sequence_chunk_offsets,
+    const torch::Tensor& chunk_token_starts,
+    const torch::Tensor& chunk_token_ends,
+    const torch::Tensor& final_state,
+    const torch::Tensor& r,
+    const torch::Tensor& log_decay,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    const torch::Tensor& state_dot_a,
+    const torch::Tensor& grad_output,
+    const torch::Tensor& grad_final_state,
+    const torch::Tensor& boundary,
+    torch::Tensor& grad_r,
+    torch::Tensor& grad_log_decay,
+    torch::Tensor& grad_k,
+    torch::Tensor& grad_v,
+    torch::Tensor& grad_a,
+    torch::Tensor& grad_b,
+    torch::Tensor& grad_initial_state,
+    float scale,
+    cudaStream_t stream) {
+  chunk_backward_kernel<io_t>
+      <<<dim3(num_heads, num_sequences), kHeadSize, 0, stream>>>(
+          num_heads,
+          sequence_chunk_offsets.data_ptr<int>(),
+          chunk_token_starts.data_ptr<int>(),
+          chunk_token_ends.data_ptr<int>(),
+          final_state.data_ptr<float>(),
+          r.data_ptr<io_t>(),
+          log_decay.data_ptr<io_t>(),
+          k.data_ptr<io_t>(),
+          v.data_ptr<io_t>(),
+          a.data_ptr<io_t>(),
+          b.data_ptr<io_t>(),
+          state_dot_a.data_ptr<float>(),
+          grad_output.defined()
+              ? grad_output.data_ptr<io_t>()
+              : nullptr,
+          grad_final_state.defined()
+              ? grad_final_state.data_ptr<float>()
+              : nullptr,
+          boundary.data_ptr<float>(),
+          grad_r.defined() ? grad_r.data_ptr<io_t>() : nullptr,
+          grad_log_decay.defined()
+              ? grad_log_decay.data_ptr<io_t>()
+              : nullptr,
+          grad_k.defined() ? grad_k.data_ptr<io_t>() : nullptr,
+          grad_v.defined() ? grad_v.data_ptr<io_t>() : nullptr,
+          grad_a.defined() ? grad_a.data_ptr<io_t>() : nullptr,
+          grad_b.defined() ? grad_b.data_ptr<io_t>() : nullptr,
+          grad_initial_state.defined()
+              ? grad_initial_state.data_ptr<float>()
+              : nullptr,
+          scale);
+}
+
+}  // namespace
+
+void chunk_backward_fp32_cuda(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor final_state,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor state_dot_a,
+    torch::Tensor grad_output,
+    torch::Tensor grad_final_state,
+    torch::Tensor boundary,
+    torch::Tensor grad_r,
+    torch::Tensor grad_log_decay,
+    torch::Tensor grad_k,
+    torch::Tensor grad_v,
+    torch::Tensor grad_a,
+    torch::Tensor grad_b,
+    torch::Tensor grad_initial_state,
+    double scale) {
+  const c10::cuda::CUDAGuard device_guard(final_state.device());
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  const int num_sequences =
+      static_cast<int>(sequence_chunk_offsets.numel() - 1);
+  const int num_heads = static_cast<int>(final_state.size(1));
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      r.scalar_type(),
+      "flash_rwkv_chunk_backward_fp32",
+      [&] {
+        launch_chunk_backward<scalar_t>(
+            num_sequences,
+            num_heads,
+            sequence_chunk_offsets,
+            chunk_token_starts,
+            chunk_token_ends,
+            final_state,
+            r,
+            log_decay,
+            k,
+            v,
+            a,
+            b,
+            state_dot_a,
+            grad_output,
+            grad_final_state,
+            boundary,
+            grad_r,
+            grad_log_decay,
+            grad_k,
+            grad_v,
+            grad_a,
+            grad_b,
+            grad_initial_state,
+            static_cast<float>(scale),
+            stream);
+      });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}

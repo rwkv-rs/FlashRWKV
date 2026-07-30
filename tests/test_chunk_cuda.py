@@ -614,8 +614,13 @@ def test_chunk_rejects_unsupported_mode_and_size() -> None:
         )
 
 
-def test_chunk_rejects_gradients_until_backward_exists() -> None:
+def test_chunk_autograd_rejects_packed_inputs() -> None:
     inputs = list(_inputs(batch_size=1, sequence_length=17))
     inputs[0].requires_grad_(True)
-    with pytest.raises(RuntimeError, match="forward-only"):
-        rwkv7(*inputs, algorithm="chunk")
+    cu_seqlens = torch.tensor(
+        [0, 8, 17],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    with pytest.raises(RuntimeError, match="fixed-length"):
+        rwkv7(*inputs, algorithm="chunk", cu_seqlens=cu_seqlens)

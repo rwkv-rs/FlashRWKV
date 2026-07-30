@@ -10,6 +10,7 @@ setup(
             name="flash_rwkv._C",
             sources=[
                 "csrc/bindings.cpp",
+                "csrc/chunk/backward_fp32.cu",
                 "csrc/chunk/materialized_fp32.cu",
                 "csrc/chunk/recompute_fp32.cu",
                 "csrc/chunk/replay_fp32.cu",

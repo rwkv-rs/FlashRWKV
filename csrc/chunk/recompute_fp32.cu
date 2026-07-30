@@ -198,6 +198,7 @@ void launch_recompute_chunk(
       a,
       b,
       output,
+      nullptr,
       scale,
       stream);
   C10_CUDA_KERNEL_LAUNCH_CHECK();

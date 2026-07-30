@@ -18,5 +18,6 @@ void launch_chunk_replay_fp32(
     const torch::Tensor& a,
     const torch::Tensor& b,
     torch::Tensor& output,
+    torch::Tensor* state_dot_a,
     float scale,
     cudaStream_t stream);

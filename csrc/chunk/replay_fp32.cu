@@ -42,6 +42,7 @@ void emit_outputs_kernel(
     const io_t* __restrict__ a_ptr,
     const io_t* __restrict__ b_ptr,
     io_t* __restrict__ output_ptr,
+    float* __restrict__ state_dot_a_ptr,
     float scale) {
   const int linear_block = static_cast<int>(blockIdx.x);
   const int chunk_index = linear_block / num_heads;
@@ -84,6 +85,9 @@ void emit_outputs_kernel(
       state_dot_a =
           fmaf(shared.a[key_index], state[key_index], state_dot_a);
     }
+    if (state_dot_a_ptr != nullptr) {
+      state_dot_a_ptr[input_index] = state_dot_a;
+    }
 
     float output = 0.0f;
 #pragma unroll
@@ -117,6 +121,7 @@ void launch_replay(
     const torch::Tensor& a,
     const torch::Tensor& b,
     torch::Tensor& output,
+    torch::Tensor* state_dot_a,
     float scale,
     cudaStream_t stream) {
   emit_outputs_kernel<io_t>
@@ -132,6 +137,9 @@ void launch_replay(
           a.data_ptr<io_t>(),
           b.data_ptr<io_t>(),
           output.data_ptr<io_t>(),
+          state_dot_a == nullptr
+              ? nullptr
+              : state_dot_a->data_ptr<float>(),
           scale);
 }
 
@@ -150,6 +158,7 @@ void launch_chunk_replay_fp32(
     const torch::Tensor& a,
     const torch::Tensor& b,
     torch::Tensor& output,
+    torch::Tensor* state_dot_a,
     float scale,
     cudaStream_t stream) {
   AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -171,6 +180,7 @@ void launch_chunk_replay_fp32(
             a,
             b,
             output,
+            state_dot_a,
             scale,
             stream);
       });

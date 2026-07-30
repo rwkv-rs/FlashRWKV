@@ -7,6 +7,7 @@ import math
 import torch
 
 from . import _extension
+from ._autograd import rwkv7_chunk_autograd
 from .config import (
     ChunkConfig,
     chunk_tuning_key,
@@ -50,9 +51,10 @@ def rwkv7(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run RWKV-7 with an explicit numerical mode and algorithm family.
 
-    ``reference`` is the independent FP32 oracle. ``recurrent`` and ``chunk``
-    select explicit forward-only CUDA families and fail if their extension is
-    missing; no requested accelerated path silently falls back to the oracle.
+    ``reference`` is the independent FP32 oracle. ``recurrent`` is an explicit
+    forward-only CUDA family. ``chunk`` supports fixed-length autograd and
+    forward-only packed execution. No requested accelerated path silently
+    falls back to the oracle.
     """
 
     if mode not in {"fp32io16", "fp16"}:
@@ -244,21 +246,23 @@ def _rwkv7_chunk_cuda(
         raise ValueError(
             "algorithm='chunk' currently supports only mode='fp32io16'"
         )
-    _check_cuda_forward_only((r, log_decay, k, v, a, b, initial_state))
-
-    if initial_state is None:
-        working_state = torch.zeros(
-            (
-                layout.num_sequences,
-                layout.num_heads,
-                _HEAD_SIZE,
-                _HEAD_SIZE,
-            ),
-            dtype=torch.float32,
-            device=r.device,
+    requires_grad = any(
+        tensor is not None and tensor.requires_grad
+        for tensor in (r, log_decay, k, v, a, b, initial_state)
+    )
+    if requires_grad and layout.packed:
+        raise RuntimeError(
+            "algorithm='chunk' autograd currently supports fixed-length "
+            "inputs only"
         )
-    else:
-        working_state = initial_state.to(dtype=torch.float32).clone()
+    if (
+        requires_grad
+        and initial_state is not None
+        and initial_state.dtype != torch.float32
+    ):
+        raise TypeError(
+            "algorithm='chunk' autograd requires an FP32 initial_state"
+        )
 
     tuning_key = chunk_tuning_key(
         r,
@@ -280,6 +284,40 @@ def _rwkv7_chunk_cuda(
         chunk_token_ends,
         cuda_state_indices,
     ) = _cuda_chunk_metadata(layout, config.chunk_size, r.device)
+    if requires_grad:
+        output, final_state = rwkv7_chunk_autograd(
+            r,
+            log_decay,
+            k,
+            v,
+            a,
+            b,
+            initial_state=initial_state,
+            sequence_chunk_offsets=sequence_chunk_offsets,
+            chunk_token_starts=chunk_token_starts,
+            chunk_token_ends=chunk_token_ends,
+            state_indices=cuda_state_indices,
+            scale=float(scale),
+            build_warps=config.build_warps,
+            stages=config.stages,
+            state_tile=config.state_tile,
+        )
+        return output, final_state if output_final_state else None
+
+    if initial_state is None:
+        working_state = torch.zeros(
+            (
+                layout.num_sequences,
+                layout.num_heads,
+                _HEAD_SIZE,
+                _HEAD_SIZE,
+            ),
+            dtype=torch.float32,
+            device=r.device,
+        )
+    else:
+        working_state = initial_state.to(dtype=torch.float32).clone()
+
     num_chunks = chunk_token_starts.numel()
     workspace_shape = (
         num_chunks,
