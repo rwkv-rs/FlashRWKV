@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 
+from .config import ChunkConfig, enumerate_chunk_configs
 from .ops import (
     decay_logits_to_log_decay,
     rwkv7,
@@ -9,7 +10,9 @@ from .ops import (
 from .reference import rwkv7_reference
 
 __all__ = [
+    "ChunkConfig",
     "decay_logits_to_log_decay",
+    "enumerate_chunk_configs",
     "rwkv7",
     "rwkv7_from_decay_logits",
     "rwkv7_reference",

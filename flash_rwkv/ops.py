@@ -7,6 +7,12 @@ import math
 import torch
 
 from . import _extension
+from .config import (
+    ChunkConfig,
+    chunk_tuning_key,
+    select_algorithm,
+    select_chunk_config,
+)
 from .reference import rwkv7_reference
 from .validation import ValidatedLayout, validate_rwkv7_inputs
 
@@ -39,7 +45,8 @@ def rwkv7(
     state_indices: torch.Tensor | None = None,
     mode: str = "fp32io16",
     algorithm: str = "reference",
-    chunk_size: int = 16,
+    chunk_size: int | None = None,
+    chunk_config: ChunkConfig | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run RWKV-7 with an explicit numerical mode and algorithm family.
 
@@ -51,6 +58,26 @@ def rwkv7(
     if mode not in {"fp32io16", "fp16"}:
         raise ValueError(
             f"unsupported mode {mode!r}; supported modes: 'fp32io16', 'fp16'"
+        )
+    if algorithm == "auto":
+        layout = validate_rwkv7_inputs(
+            r,
+            log_decay,
+            k,
+            v,
+            a,
+            b,
+            scale=scale,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            state_indices=state_indices,
+        )
+        algorithm = select_algorithm(
+            algorithm,
+            mode=mode,
+            max_sequence_length=max(
+                end - start for start, end in layout.sequence_ranges
+            ),
         )
     if algorithm == "reference":
         if mode != "fp32io16":
@@ -103,10 +130,11 @@ def rwkv7(
             state_indices=state_indices,
             mode=mode,
             chunk_size=chunk_size,
+            chunk_config=chunk_config,
         )
     raise ValueError(
         f"unsupported algorithm {algorithm!r}; "
-        "supported algorithms: 'reference', 'recurrent', 'chunk'"
+        "supported algorithms: 'reference', 'recurrent', 'chunk', 'auto'"
     )
 
 
@@ -194,7 +222,8 @@ def _rwkv7_chunk_cuda(
     cu_seqlens: torch.Tensor | None,
     state_indices: torch.Tensor | None,
     mode: str,
-    chunk_size: int,
+    chunk_size: int | None,
+    chunk_config: ChunkConfig | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     layout = validate_rwkv7_inputs(
         r,
@@ -231,12 +260,26 @@ def _rwkv7_chunk_cuda(
     else:
         working_state = initial_state.to(dtype=torch.float32).clone()
 
+    tuning_key = chunk_tuning_key(
+        r,
+        mode=mode,
+        packed=layout.packed,
+        max_sequence_length=max(
+            end - start for start, end in layout.sequence_ranges
+        ),
+    )
+    selected_config = select_chunk_config(
+        tuning_key,
+        chunk_size=chunk_size,
+        config=chunk_config,
+    )
+    config = selected_config.config
     (
         sequence_chunk_offsets,
         chunk_token_starts,
         chunk_token_ends,
         cuda_state_indices,
-    ) = _cuda_chunk_metadata(layout, chunk_size, r.device)
+    ) = _cuda_chunk_metadata(layout, config.chunk_size, r.device)
     num_chunks = chunk_token_starts.numel()
     workspace_shape = (
         num_chunks,
@@ -267,6 +310,9 @@ def _rwkv7_chunk_cuda(
         transform,
         bias,
         boundary,
+        config.build_warps,
+        config.stages,
+        config.state_tile,
         float(scale),
     )
     output = output.reshape(v.shape)
@@ -401,7 +447,8 @@ def rwkv7_from_decay_logits(
     state_indices: torch.Tensor | None = None,
     mode: str = "fp32io16",
     algorithm: str = "reference",
-    chunk_size: int = 16,
+    chunk_size: int | None = None,
+    chunk_config: ChunkConfig | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run RWKV-7 after the differentiable RWKV-LM decay-logit transform."""
 
@@ -420,4 +467,5 @@ def rwkv7_from_decay_logits(
         mode=mode,
         algorithm=algorithm,
         chunk_size=chunk_size,
+        chunk_config=chunk_config,
     )

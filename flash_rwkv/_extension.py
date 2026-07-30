@@ -92,6 +92,9 @@ def materialized_chunk_fp32(
     transform: torch.Tensor,
     bias: torch.Tensor,
     boundary: torch.Tensor,
+    build_warps: int,
+    stages: int,
+    state_tile: int,
     scale: float,
 ) -> None:
     _load_extension().materialized_chunk_fp32(
@@ -110,5 +113,8 @@ def materialized_chunk_fp32(
         transform,
         bias,
         boundary,
+        build_warps,
+        stages,
+        state_tile,
         scale,
     )

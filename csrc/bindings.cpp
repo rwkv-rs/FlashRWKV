@@ -52,6 +52,9 @@ void materialized_chunk_fp32_cuda(
     torch::Tensor transform,
     torch::Tensor bias,
     torch::Tensor boundary,
+    int64_t build_warps,
+    int64_t stages,
+    int64_t state_tile,
     double scale);
 
 namespace {
@@ -279,6 +282,9 @@ void materialized_chunk_fp32(
     torch::Tensor transform,
     torch::Tensor bias,
     torch::Tensor boundary,
+    int64_t build_warps,
+    int64_t stages,
+    int64_t state_tile,
     double scale) {
   const auto dimensions = check_recurrent_layout(
       sequence_chunk_offsets,
@@ -338,6 +344,14 @@ void materialized_chunk_fp32(
       dimensions.num_sequences * dimensions.num_heads <=
           std::numeric_limits<int>::max(),
       "sequence/head grid must fit in int32");
+  TORCH_CHECK(
+      (build_warps == 2 && stages == 1) ||
+          (build_warps == 4 && (stages == 1 || stages == 2)),
+      "chunk build config must be (warps,stages) in "
+      "{(2,1),(4,1),(4,2)}");
+  TORCH_CHECK(
+      state_tile == 16 || state_tile == 32 || state_tile == 64,
+      "chunk state_tile must be 16, 32, or 64");
 
   for (const auto& item : {
            std::pair<const torch::Tensor*, const char*>{
@@ -366,6 +380,9 @@ void materialized_chunk_fp32(
       transform,
       bias,
       boundary,
+      build_warps,
+      stages,
+      state_tile,
       scale);
 }
 
@@ -421,5 +438,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       py::arg("transform"),
       py::arg("bias"),
       py::arg("boundary"),
+      py::arg("build_warps"),
+      py::arg("stages"),
+      py::arg("state_tile"),
       py::arg("scale"));
 }

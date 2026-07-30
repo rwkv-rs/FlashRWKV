@@ -9,7 +9,12 @@ import pytest
 import torch
 import torch.nn.functional as functional
 
-from flash_rwkv import rwkv7, rwkv7_reference
+from flash_rwkv import (
+    ChunkConfig,
+    enumerate_chunk_configs,
+    rwkv7,
+    rwkv7_reference,
+)
 
 
 HEAD_SIZE = 64
@@ -213,6 +218,92 @@ def test_packed_chunk_slot_mapping_matches_reference() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "config",
+    enumerate_chunk_configs(),
+    ids=lambda config: config.identifier,
+)
+def test_all_materialized_config_variants_match_reference(
+    config: ChunkConfig,
+) -> None:
+    inputs = _inputs(
+        batch_size=1,
+        sequence_length=65,
+        num_heads=1,
+        seed=401,
+    )
+    initial_state = 0.02 * torch.randn(
+        1,
+        1,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    expected_output, expected_state = rwkv7_reference(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+    )
+    actual_output, actual_state = rwkv7(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        algorithm="chunk",
+        chunk_config=config,
+    )
+    torch.cuda.synchronize()
+    _assert_relative_rmse(
+        actual_output,
+        expected_output,
+        threshold=TOLERANCE["output_relative_rmse"],
+    )
+    _assert_relative_rmse(
+        actual_state,
+        expected_state,
+        threshold=TOLERANCE["state_relative_rmse"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("sequence_length", "explicit_algorithm"),
+    [(16, "recurrent"), (17, "chunk")],
+)
+def test_auto_family_dispatch_matches_explicit_algorithm(
+    sequence_length: int,
+    explicit_algorithm: str,
+) -> None:
+    inputs = _inputs(
+        batch_size=1,
+        sequence_length=sequence_length,
+        num_heads=1,
+        seed=500 + sequence_length,
+    )
+    initial_state = 0.02 * torch.randn(
+        1,
+        1,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    auto_output, auto_state = rwkv7(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        algorithm="auto",
+    )
+    explicit_output, explicit_state = rwkv7(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        algorithm=explicit_algorithm,
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(auto_output, explicit_output)
+    assert torch.equal(auto_state, explicit_state)
+
+
 @pytest.mark.parametrize("chunk_size", [16, 32, 64])
 def test_fixed_chunk_matches_fla(chunk_size: int) -> None:
     from fla.ops.rwkv7 import chunk_rwkv7
@@ -316,6 +407,13 @@ def test_chunk_rejects_unsupported_mode_and_size() -> None:
         rwkv7(*inputs, algorithm="chunk", mode="fp16")
     with pytest.raises(ValueError, match="one of 16, 32, or 64"):
         rwkv7(*inputs, algorithm="chunk", chunk_size=8)
+    with pytest.raises(ValueError, match="either chunk_size or config"):
+        rwkv7(
+            *inputs,
+            algorithm="chunk",
+            chunk_size=16,
+            chunk_config=ChunkConfig(16, 2, 1, 64),
+        )
 
 
 def test_chunk_rejects_gradients_until_backward_exists() -> None:

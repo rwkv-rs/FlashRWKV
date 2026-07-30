@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "source": "FlashRWKV canonical-device offline autotuning",
+  "evidence_artifact": "20260730T222130Z-2579451/flash-rwkv-chunk-autotune.json",
+  "hardware": {
+    "compute_capability": "12.0",
+    "device_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "torch_cuda_version": "13.0",
+    "torch_version": "2.11.0+cu130"
+  },
+  "native_source_set_sha256": "54cae198290e9d7c5ccba78cec831e8fe9696e7d2797d3d45be311568c874ccb",
+  "entries": {
+    "sm120|bfloat16|fp32io16|fixed|long": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 64,
+        "stages": 1,
+        "state_tile": 32
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.20854400098323822,
+      "profile": "fixed_long"
+    },
+    "sm120|bfloat16|fp32io16|fixed|medium": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 16,
+        "stages": 1,
+        "state_tile": 32
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.08940800279378891,
+      "profile": "fixed_medium"
+    },
+    "sm120|bfloat16|fp32io16|fixed|very_long": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 64,
+        "stages": 1,
+        "state_tile": 64
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.6042559742927551,
+      "profile": "fixed_very_long"
+    },
+    "sm120|bfloat16|fp32io16|packed|long": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 32,
+        "stages": 1,
+        "state_tile": 64
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.292928010225296,
+      "profile": "packed_long"
+    },
+    "sm120|bfloat16|fp32io16|packed|medium": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 32,
+        "stages": 1,
+        "state_tile": 64
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.11004800349473953,
+      "profile": "packed_medium"
+    },
+    "sm120|bfloat16|fp32io16|packed|very_long": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 64,
+        "stages": 1,
+        "state_tile": 64
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.9884799718856812,
+      "profile": "packed_very_long"
+    },
+    "sm120|float16|fp32io16|fixed|long": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 64,
+        "stages": 1,
+        "state_tile": 32
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.2083200067281723,
+      "profile": "fixed_long"
+    },
+    "sm120|float16|fp32io16|fixed|medium": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 16,
+        "stages": 1,
+        "state_tile": 32
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.08940800279378891,
+      "profile": "fixed_medium"
+    },
+    "sm120|float16|fp32io16|fixed|very_long": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 64,
+        "stages": 1,
+        "state_tile": 64
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.605567991733551,
+      "profile": "fixed_very_long"
+    },
+    "sm120|float16|fp32io16|packed|long": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 32,
+        "stages": 1,
+        "state_tile": 64
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.2927359938621521,
+      "profile": "packed_long"
+    },
+    "sm120|float16|fp32io16|packed|medium": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 32,
+        "stages": 1,
+        "state_tile": 32
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.10992000252008438,
+      "profile": "packed_medium"
+    },
+    "sm120|float16|fp32io16|packed|very_long": {
+      "config": {
+        "build_warps": 4,
+        "chunk_size": 64,
+        "stages": 1,
+        "state_tile": 32
+      },
+      "correct_candidates": 27,
+      "p50_ms": 0.9876800179481506,
+      "profile": "packed_very_long"
+    }
+  }
+}

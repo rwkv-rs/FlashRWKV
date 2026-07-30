@@ -20,3 +20,6 @@ license = "MIT"
 
 [tool.setuptools]
 packages = ["flash_rwkv"]
+
+[tool.setuptools.package-data]
+flash_rwkv = ["chunk-tuning-v1.json"]
