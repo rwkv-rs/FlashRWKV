@@ -10,6 +10,7 @@ setup(
             name="flash_rwkv._C",
             sources=[
                 "csrc/bindings.cpp",
+                "csrc/chunk/materialized_fp32.cu",
                 "csrc/recurrent/recurrent_fp16.cu",
                 "csrc/recurrent/recurrent_fp32.cu",
             ],

@@ -277,7 +277,18 @@ def test_tolerance_fixture_is_versioned() -> None:
 
     assert fixture["schema_version"] == 1
     assert fixture["fp32io16_recurrent"]["output_relative_rmse"] == 0.002
-    assert fixture["fp16"]["report_only_until_task"] == "2.2"
+    fp16 = fixture["fp16"]
+    assert fp16["output_relative_rmse"] == 0.003
+    assert fp16["state_relative_rmse"] == 0.003
+    calibration = fp16["calibration"]
+    assert (
+        calibration["max_observed_output_relative_rmse"]
+        < fp16["output_relative_rmse"]
+    )
+    assert (
+        calibration["max_observed_state_relative_rmse"]
+        < fp16["state_relative_rmse"]
+    )
 
 
 def test_decay_logit_transform_matches_the_training_formula() -> None:

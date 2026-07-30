@@ -1,0 +1,325 @@
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+import torch
+import torch.nn.functional as functional
+
+from flash_rwkv import rwkv7, rwkv7_reference
+
+
+HEAD_SIZE = 64
+TOLERANCE = json.loads(
+    (Path(__file__).parent / "fixtures/tolerances-v1.json").read_text(
+        encoding="utf-8"
+    )
+)["fp32io16_chunk"]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def require_flash_rwkv_cuda() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    try:
+        from flash_rwkv import _C  # noqa: F401
+    except ImportError as error:
+        pytest.fail(f"FlashRWKV CUDA extension is unavailable: {error!r}")
+
+
+def _inputs(
+    *,
+    batch_size: int,
+    sequence_length: int,
+    num_heads: int = 2,
+    dtype: torch.dtype = torch.float16,
+    seed: int = 42,
+) -> tuple[torch.Tensor, ...]:
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    shape = (batch_size, sequence_length, num_heads, HEAD_SIZE)
+
+    def normal(scale: float) -> torch.Tensor:
+        return scale * torch.randn(
+            shape,
+            generator=generator,
+            device="cuda",
+            dtype=torch.float32,
+        )
+
+    direction = functional.normalize(normal(1.0), dim=-1)
+    strength = 0.1 * torch.rand(
+        shape,
+        generator=generator,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    log_decay = -0.05 - 0.15 * torch.rand(
+        shape,
+        generator=generator,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    tensors = (
+        normal(0.05),
+        log_decay,
+        normal(0.05),
+        normal(0.05),
+        -direction,
+        direction * strength,
+    )
+    return tuple(tensor.to(dtype).contiguous() for tensor in tensors)
+
+
+def _assert_relative_rmse(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    *,
+    threshold: float,
+) -> None:
+    error = (actual.float() - expected.float()).square().mean().sqrt()
+    baseline = expected.float().square().mean().sqrt().clamp_min(1e-8)
+    assert float(error / baseline) < threshold
+
+
+def _assert_chunk_matches_reference(
+    inputs: tuple[torch.Tensor, ...],
+    initial_state: torch.Tensor,
+    *,
+    chunk_size: int,
+    scale: float = 1.0,
+    cu_seqlens: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    expected_output, expected_state = rwkv7_reference(
+        *inputs,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+    )
+    actual_output, actual_state = rwkv7(
+        *inputs,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        algorithm="chunk",
+        chunk_size=chunk_size,
+    )
+    torch.cuda.synchronize()
+    assert actual_state is not None
+    _assert_relative_rmse(
+        actual_output,
+        expected_output,
+        threshold=TOLERANCE["output_relative_rmse"],
+    )
+    _assert_relative_rmse(
+        actual_state,
+        expected_state,
+        threshold=TOLERANCE["state_relative_rmse"],
+    )
+    return actual_output, actual_state
+
+
+@pytest.mark.parametrize("sequence_length", [1, 15, 16, 17, 31, 32, 33, 65])
+def test_fixed_chunk_matches_reference(sequence_length: int) -> None:
+    inputs = _inputs(
+        batch_size=2,
+        sequence_length=sequence_length,
+        seed=sequence_length,
+    )
+    initial_state = 0.02 * torch.randn(
+        2,
+        2,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    _assert_chunk_matches_reference(
+        inputs,
+        initial_state,
+        chunk_size=16,
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+def test_chunk_size_and_masked_tail_match_reference(
+    chunk_size: int,
+) -> None:
+    inputs = _inputs(
+        batch_size=1,
+        sequence_length=65,
+        dtype=torch.bfloat16,
+        seed=100 + chunk_size,
+    )
+    initial_state = 0.02 * torch.randn(
+        1,
+        2,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    _assert_chunk_matches_reference(
+        inputs,
+        initial_state,
+        chunk_size=chunk_size,
+        scale=0.125,
+    )
+
+
+def test_packed_chunk_slot_mapping_matches_reference() -> None:
+    sequence_lengths = (1, 16, 17, 33)
+    inputs = _inputs(
+        batch_size=1,
+        sequence_length=sum(sequence_lengths),
+        seed=71,
+    )
+    cu_seqlens = torch.tensor(
+        [0, 1, 17, 34, 67],
+        device="cuda",
+        dtype=torch.int64,
+    )
+    state_indices = torch.tensor(
+        [5, 1, 7, 3],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    state_pool = 0.02 * torch.randn(
+        9,
+        2,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    _, actual_pool = _assert_chunk_matches_reference(
+        inputs,
+        state_pool,
+        chunk_size=16,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+    )
+    untouched = torch.tensor([0, 2, 4, 6, 8], device="cuda")
+    assert torch.equal(
+        actual_pool.index_select(0, untouched),
+        state_pool.index_select(0, untouched),
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+def test_fixed_chunk_matches_fla(chunk_size: int) -> None:
+    from fla.ops.rwkv7 import chunk_rwkv7
+
+    inputs = _inputs(
+        batch_size=1,
+        sequence_length=65,
+        dtype=torch.bfloat16,
+        seed=200 + chunk_size,
+    )
+    initial_state = 0.02 * torch.randn(
+        1,
+        2,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    actual_output, actual_state = _assert_chunk_matches_reference(
+        inputs,
+        initial_state,
+        chunk_size=chunk_size,
+        scale=0.125,
+    )
+    with torch.no_grad():
+        fla_output, fla_state = chunk_rwkv7(
+            *inputs,
+            scale=0.125,
+            initial_state=initial_state,
+            output_final_state=True,
+            chunk_size=chunk_size,
+        )
+    torch.cuda.synchronize()
+    _assert_relative_rmse(
+        actual_output,
+        fla_output,
+        threshold=TOLERANCE["output_relative_rmse"],
+    )
+    _assert_relative_rmse(
+        actual_state,
+        fla_state,
+        threshold=TOLERANCE["state_relative_rmse"],
+    )
+
+
+def test_packed_chunk_matches_fla() -> None:
+    from fla.ops.rwkv7 import chunk_rwkv7
+
+    sequence_lengths = (3, 16, 17, 35)
+    inputs = _inputs(
+        batch_size=1,
+        sequence_length=sum(sequence_lengths),
+        dtype=torch.bfloat16,
+        seed=311,
+    )
+    cu_seqlens = torch.tensor(
+        [0, 3, 19, 36, 71],
+        device="cuda",
+        dtype=torch.int64,
+    )
+    cu_seqlens_cpu = cu_seqlens.cpu()
+    initial_state = 0.02 * torch.randn(
+        4,
+        2,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    actual_output, actual_state = _assert_chunk_matches_reference(
+        inputs,
+        initial_state,
+        chunk_size=16,
+        cu_seqlens=cu_seqlens,
+    )
+    with torch.no_grad():
+        fla_output, fla_state = chunk_rwkv7(
+            *inputs,
+            initial_state=initial_state,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            chunk_size=16,
+        )
+    torch.cuda.synchronize()
+    _assert_relative_rmse(
+        actual_output,
+        fla_output,
+        threshold=TOLERANCE["output_relative_rmse"],
+    )
+    _assert_relative_rmse(
+        actual_state,
+        fla_state,
+        threshold=TOLERANCE["state_relative_rmse"],
+    )
+
+
+def test_chunk_rejects_unsupported_mode_and_size() -> None:
+    inputs = _inputs(batch_size=1, sequence_length=17)
+    with pytest.raises(ValueError, match="only mode='fp32io16'"):
+        rwkv7(*inputs, algorithm="chunk", mode="fp16")
+    with pytest.raises(ValueError, match="one of 16, 32, or 64"):
+        rwkv7(*inputs, algorithm="chunk", chunk_size=8)
+
+
+def test_chunk_rejects_gradients_until_backward_exists() -> None:
+    inputs = list(_inputs(batch_size=1, sequence_length=17))
+    inputs[0].requires_grad_(True)
+    with pytest.raises(RuntimeError, match="forward-only"):
+        rwkv7(*inputs, algorithm="chunk")
