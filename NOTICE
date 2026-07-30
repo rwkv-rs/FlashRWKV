@@ -1,0 +1,10 @@
+FlashRWKV
+
+The files csrc/bindings.cpp, csrc/recurrent/recurrent_fp32.cu,
+csrc/recurrent/recurrent_fp16.cu, and benchmarks/benchmark_recurrent.py contain
+material adapted from the vLLM project and its RWKV/Albatross integration.
+Those files are licensed under the Apache License, Version 2.0 and retain their
+source revision in the file header. See LICENSES/Apache-2.0.txt.
+
+The remaining original FlashRWKV work is licensed under the repository's MIT
+license unless a file states otherwise.

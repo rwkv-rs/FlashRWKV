@@ -1,0 +1,234 @@
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+import torch
+
+from flash_rwkv import rwkv7, rwkv7_recurrent_stateful, rwkv7_reference
+
+
+HEAD_SIZE = 64
+TOLERANCES = json.loads(
+    (Path(__file__).parent / "fixtures/tolerances-v1.json").read_text(
+        encoding="utf-8"
+    )
+)
+RECURRENT_TOLERANCES = {
+    "fp32io16": TOLERANCES["fp32io16_recurrent"],
+    "fp16": TOLERANCES["fp16"],
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def require_flash_rwkv_cuda() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    try:
+        from flash_rwkv import _C  # noqa: F401
+    except ImportError as error:
+        pytest.skip(f"FlashRWKV CUDA extension is unavailable: {error!r}")
+
+
+def _inputs(
+    *,
+    batch_size: int,
+    sequence_length: int,
+    num_heads: int = 1,
+    seed: int = 42,
+) -> tuple[torch.Tensor, ...]:
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    shape = (batch_size, sequence_length, num_heads, HEAD_SIZE)
+    r = 0.1 * torch.randn(shape, generator=generator, device="cuda")
+    log_decay = -0.1 * torch.rand(shape, generator=generator, device="cuda")
+    k = 0.1 * torch.randn(shape, generator=generator, device="cuda")
+    v = 0.1 * torch.randn(shape, generator=generator, device="cuda")
+    a = 0.1 * torch.randn(shape, generator=generator, device="cuda")
+    b = 0.1 * torch.randn(shape, generator=generator, device="cuda")
+    return tuple(tensor.to(torch.float16) for tensor in (r, log_decay, k, v, a, b))
+
+
+def _assert_relative_rmse_close(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    *,
+    threshold: float,
+) -> None:
+    error = (actual.float() - expected.float()).square().mean().sqrt()
+    baseline = expected.float().square().mean().sqrt().clamp_min(1e-8)
+    assert float(error / baseline) < threshold
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["fp32io16", "fp16"],
+)
+@pytest.mark.parametrize("sequence_length", [1, 15, 16, 17, 65])
+def test_fixed_recurrent_matches_fp32_reference(
+    sequence_length: int,
+    mode: str,
+) -> None:
+    inputs = _inputs(batch_size=2, sequence_length=sequence_length, seed=sequence_length)
+    state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
+    initial_state = 0.01 * torch.randn(
+        2, 1, HEAD_SIZE, HEAD_SIZE, device="cuda", dtype=state_dtype
+    )
+
+    expected_output, expected_state = rwkv7_reference(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+    )
+    actual_output, actual_state = rwkv7(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        algorithm="recurrent",
+        mode=mode,
+    )
+    torch.cuda.synchronize()
+
+    tolerance = RECURRENT_TOLERANCES[mode]
+    _assert_relative_rmse_close(
+        actual_output,
+        expected_output,
+        threshold=tolerance["output_relative_rmse"],
+    )
+    _assert_relative_rmse_close(
+        actual_state,
+        expected_state,
+        threshold=tolerance["state_relative_rmse"],
+    )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["fp32io16", "fp16"],
+)
+def test_packed_slot_mapping_matches_reference_and_preserves_pool(
+    mode: str,
+) -> None:
+    sequence_lengths = (1, 4, 2)
+    inputs = _inputs(
+        batch_size=1,
+        sequence_length=sum(sequence_lengths),
+        num_heads=2,
+        seed=9,
+    )
+    cu_seqlens = torch.tensor([0, 1, 5, 7], device="cuda", dtype=torch.int32)
+    state_indices = torch.tensor([4, 1, 5], device="cuda", dtype=torch.int32)
+    state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
+    state_pool = 0.01 * torch.randn(
+        7, 2, HEAD_SIZE, HEAD_SIZE, device="cuda", dtype=state_dtype
+    )
+
+    expected_output, expected_pool = rwkv7_reference(
+        *inputs,
+        initial_state=state_pool,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+    )
+    actual_output, actual_pool = rwkv7(
+        *inputs,
+        initial_state=state_pool,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        algorithm="recurrent",
+        mode=mode,
+    )
+    torch.cuda.synchronize()
+
+    tolerance = RECURRENT_TOLERANCES[mode]
+    _assert_relative_rmse_close(
+        actual_output,
+        expected_output,
+        threshold=tolerance["output_relative_rmse"],
+    )
+    _assert_relative_rmse_close(
+        actual_pool,
+        expected_pool,
+        threshold=tolerance["state_relative_rmse"],
+    )
+    untouched = torch.tensor([0, 2, 3, 6], device="cuda")
+    assert torch.equal(
+        actual_pool.index_select(0, untouched),
+        state_pool.index_select(0, untouched),
+    )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["fp32io16", "fp16"],
+)
+def test_stateful_recurrent_updates_only_selected_rows(
+    mode: str,
+) -> None:
+    inputs = _inputs(batch_size=1, sequence_length=5, seed=19)
+    cu_seqlens = torch.tensor([0, 2, 5], device="cuda", dtype=torch.int32)
+    state_indices = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
+    state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
+    state_pool = 0.01 * torch.randn(
+        5, 1, HEAD_SIZE, HEAD_SIZE, device="cuda", dtype=state_dtype
+    )
+    initial_state = state_pool.clone()
+
+    expected_output, expected_pool = rwkv7_reference(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+    )
+    actual_output = rwkv7_recurrent_stateful(
+        *inputs,
+        state_pool=state_pool,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        mode=mode,
+    )
+    torch.cuda.synchronize()
+
+    tolerance = RECURRENT_TOLERANCES[mode]
+    _assert_relative_rmse_close(
+        actual_output,
+        expected_output,
+        threshold=tolerance["output_relative_rmse"],
+    )
+    _assert_relative_rmse_close(
+        state_pool,
+        expected_pool,
+        threshold=tolerance["state_relative_rmse"],
+    )
+    untouched = torch.tensor([0, 2, 4], device="cuda")
+    assert torch.equal(
+        state_pool.index_select(0, untouched),
+        initial_state.index_select(0, untouched),
+    )
+
+
+def test_duplicate_state_indices_fail_before_cuda_launch() -> None:
+    inputs = _inputs(batch_size=1, sequence_length=2)
+    with pytest.raises(ValueError, match="must be unique"):
+        rwkv7(
+            *inputs,
+            initial_state=torch.zeros(
+                2, 1, HEAD_SIZE, HEAD_SIZE, device="cuda", dtype=torch.float32
+            ),
+            cu_seqlens=torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32),
+            state_indices=torch.tensor([0, 0], device="cuda", dtype=torch.int32),
+            algorithm="recurrent",
+        )
+
+
+def test_fp16_mode_rejects_non_fp16_tokens_before_cuda_launch() -> None:
+    inputs = tuple(
+        tensor.float()
+        for tensor in _inputs(batch_size=1, sequence_length=1)
+    )
+    with pytest.raises(TypeError, match="requires fp16 token tensors"):
+        rwkv7(*inputs, algorithm="recurrent", mode="fp16")

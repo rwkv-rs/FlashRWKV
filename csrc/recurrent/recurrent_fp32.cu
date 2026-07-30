@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+// Adapted from vllm-rwkv rwkv7_wkv_fp32_v2 at commit
+// 6d683f9e49a2997e405c47edc147872c8609513b. The state load/store and update
+// are transposed to FlashRWKV's canonical [K,V] layout, and the kernel consumes
+// explicit log-decay rather than model-fused decay logits.
+
+#include <ATen/ATen.h>
+#include <ATen/Dispatch.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+#include <torch/extension.h>
+
+namespace {
+
+constexpr int kHeadSize = 64;
+
+template <typename io_t>
+__device__ __forceinline__ float to_float(io_t value) {
+  return static_cast<float>(value);
+}
+
+template <typename io_t>
+__device__ __forceinline__ io_t from_float(float value) {
+  return static_cast<io_t>(value);
+}
+
+template <typename io_t>
+__global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp32_kernel(
+    int num_heads,
+    const int* __restrict__ query_start_loc,
+    const int* __restrict__ state_indices,
+    float* __restrict__ state_ptr,
+    const io_t* __restrict__ r_ptr,
+    const io_t* __restrict__ log_decay_ptr,
+    const io_t* __restrict__ k_ptr,
+    const io_t* __restrict__ v_ptr,
+    const io_t* __restrict__ a_ptr,
+    const io_t* __restrict__ b_ptr,
+    io_t* __restrict__ output_ptr,
+    float scale) {
+  const int head_index = static_cast<int>(blockIdx.x);
+  const int sequence_index = static_cast<int>(blockIdx.y);
+  const int value_index = static_cast<int>(threadIdx.x);
+
+  __shared__ int token_start;
+  __shared__ int token_end;
+  __shared__ int state_slot;
+  if (value_index == 0) {
+    token_start = query_start_loc[sequence_index];
+    token_end = query_start_loc[sequence_index + 1];
+    state_slot = state_indices[sequence_index];
+  }
+  __syncthreads();
+
+  float* state_base =
+      state_ptr +
+      (static_cast<int64_t>(state_slot) * num_heads + head_index) *
+          kHeadSize * kHeadSize;
+  float state[kHeadSize];
+#pragma unroll
+  for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+    state[key_index] = state_base[key_index * kHeadSize + value_index];
+  }
+
+  __shared__ float r[kHeadSize];
+  __shared__ float decay[kHeadSize];
+  __shared__ float k[kHeadSize];
+  __shared__ float a[kHeadSize];
+  __shared__ float b[kHeadSize];
+
+  for (int token_index = token_start; token_index < token_end; ++token_index) {
+    const int64_t input_index =
+        (static_cast<int64_t>(token_index) * num_heads + head_index) *
+            kHeadSize +
+        value_index;
+    r[value_index] = to_float(r_ptr[input_index]);
+    decay[value_index] = expf(to_float(log_decay_ptr[input_index]));
+    k[value_index] = to_float(k_ptr[input_index]);
+    a[value_index] = to_float(a_ptr[input_index]);
+    b[value_index] = to_float(b_ptr[input_index]);
+    __syncthreads();
+
+    float a_state = 0.0f;
+#pragma unroll
+    for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+      a_state += a[key_index] * state[key_index];
+    }
+
+    const float value = to_float(v_ptr[input_index]);
+    float output = 0.0f;
+#pragma unroll
+    for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+      const float updated =
+          decay[key_index] * state[key_index] +
+          b[key_index] * a_state +
+          k[key_index] * value;
+      state[key_index] = updated;
+      output += r[key_index] * updated;
+    }
+    output_ptr[input_index] = from_float<io_t>(scale * output);
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+    state_base[key_index * kHeadSize + value_index] = state[key_index];
+  }
+}
+
+template <typename io_t>
+void launch_recurrent_fp32(
+    int num_sequences,
+    int num_heads,
+    const torch::Tensor& query_start_loc,
+    const torch::Tensor& state_indices,
+    torch::Tensor& state,
+    const torch::Tensor& r,
+    const torch::Tensor& log_decay,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    torch::Tensor& output,
+    float scale,
+    cudaStream_t stream) {
+  recurrent_fp32_kernel<io_t>
+      <<<dim3(num_heads, num_sequences), dim3(kHeadSize), 0, stream>>>(
+          num_heads,
+          query_start_loc.data_ptr<int>(),
+          state_indices.data_ptr<int>(),
+          state.data_ptr<float>(),
+          r.data_ptr<io_t>(),
+          log_decay.data_ptr<io_t>(),
+          k.data_ptr<io_t>(),
+          v.data_ptr<io_t>(),
+          a.data_ptr<io_t>(),
+          b.data_ptr<io_t>(),
+          output.data_ptr<io_t>(),
+          scale);
+}
+
+}  // namespace
+
+void recurrent_fp32_cuda(
+    torch::Tensor query_start_loc,
+    torch::Tensor state_indices,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    double scale) {
+  const c10::cuda::CUDAGuard device_guard(state.device());
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  const int num_sequences = static_cast<int>(state_indices.numel());
+  const int num_heads = static_cast<int>(state.size(1));
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      r.scalar_type(),
+      "flash_rwkv_recurrent_fp32",
+      [&] {
+        launch_recurrent_fp32<scalar_t>(
+            num_sequences,
+            num_heads,
+            query_start_loc,
+            state_indices,
+            state,
+            r,
+            log_decay,
+            k,
+            v,
+            a,
+            b,
+            output,
+            static_cast<float>(scale),
+            stream);
+      });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
