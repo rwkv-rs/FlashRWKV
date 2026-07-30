@@ -61,9 +61,9 @@ def test_missing_cache_key_uses_verified_conservative_fallback() -> None:
 @pytest.mark.parametrize(
     ("dtype", "layout", "bucket", "expected"),
     [
-        ("float16", "fixed", "medium", ChunkConfig(16, 4, 1, 32)),
+        ("float16", "fixed", "medium", ChunkConfig(16, 4, 1, 64)),
         ("bfloat16", "fixed", "long", ChunkConfig(64, 4, 1, 32)),
-        ("float16", "packed", "medium", ChunkConfig(32, 4, 1, 32)),
+        ("float16", "packed", "medium", ChunkConfig(32, 4, 1, 64)),
         ("bfloat16", "packed", "very_long", ChunkConfig(64, 4, 1, 64)),
     ],
 )
@@ -93,7 +93,8 @@ def test_canonical_sm120_keys_use_versioned_cache(
         ("chunk", "fp32io16", 1, "chunk"),
         ("auto", "fp16", 4096, "recurrent"),
         ("auto", "fp32io16", 16, "recurrent"),
-        ("auto", "fp32io16", 17, "chunk"),
+        ("auto", "fp32io16", 17, "recurrent"),
+        ("auto", "fp32io16", 4096, "recurrent"),
     ],
 )
 def test_family_dispatch_is_independent_from_chunk_config(

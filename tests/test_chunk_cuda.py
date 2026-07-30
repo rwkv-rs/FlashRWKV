@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as functional
 
+from flash_rwkv import _extension
 from flash_rwkv import (
     ChunkConfig,
     enumerate_chunk_configs,
@@ -131,6 +132,90 @@ def _assert_chunk_matches_reference(
     return actual_output, actual_state
 
 
+def _chunk_metadata(
+    sequence_lengths: tuple[int, ...],
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    sequence_chunk_offsets = [0]
+    chunk_token_starts: list[int] = []
+    chunk_token_ends: list[int] = []
+    token_start = 0
+    for sequence_length in sequence_lengths:
+        token_end = token_start + sequence_length
+        for chunk_start in range(token_start, token_end, chunk_size):
+            chunk_token_starts.append(chunk_start)
+            chunk_token_ends.append(min(chunk_start + chunk_size, token_end))
+        sequence_chunk_offsets.append(len(chunk_token_starts))
+        token_start = token_end
+    return (
+        torch.tensor(
+            sequence_chunk_offsets,
+            device="cuda",
+            dtype=torch.int32,
+        ),
+        torch.tensor(
+            chunk_token_starts,
+            device="cuda",
+            dtype=torch.int32,
+        ),
+        torch.tensor(
+            chunk_token_ends,
+            device="cuda",
+            dtype=torch.int32,
+        ),
+    )
+
+
+def _run_recompute_chunk(
+    inputs: tuple[torch.Tensor, ...],
+    initial_state: torch.Tensor,
+    *,
+    sequence_lengths: tuple[int, ...],
+    chunk_size: int,
+    state_indices: torch.Tensor | None = None,
+    scale: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    (
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+    ) = _chunk_metadata(sequence_lengths, chunk_size)
+    flattened_inputs = tuple(
+        tensor.reshape(-1, tensor.shape[-2], tensor.shape[-1])
+        for tensor in inputs
+    )
+    if state_indices is None:
+        state_indices = torch.arange(
+            len(sequence_lengths),
+            device="cuda",
+            dtype=torch.int32,
+        )
+    state = initial_state.clone()
+    output = torch.empty_like(flattened_inputs[3])
+    boundary = torch.empty(
+        (
+            chunk_token_starts.numel(),
+            flattened_inputs[0].shape[1],
+            HEAD_SIZE,
+            HEAD_SIZE,
+        ),
+        device="cuda",
+        dtype=torch.float32,
+    )
+    _extension.recompute_chunk_fp32(
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        state_indices,
+        state,
+        *flattened_inputs,
+        output,
+        boundary,
+        scale,
+    )
+    return output.reshape(inputs[3].shape), state, boundary
+
+
 @pytest.mark.parametrize("sequence_length", [1, 15, 16, 17, 31, 32, 33, 65])
 def test_fixed_chunk_matches_reference(sequence_length: int) -> None:
     inputs = _inputs(
@@ -150,6 +235,119 @@ def test_fixed_chunk_matches_reference(sequence_length: int) -> None:
         inputs,
         initial_state,
         chunk_size=16,
+    )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "sequence_length", "chunk_size"),
+    [
+        (torch.float16, 17, 16),
+        (torch.bfloat16, 65, 32),
+        (torch.float16, 65, 64),
+    ],
+)
+def test_recompute_chunk_matches_reference(
+    dtype: torch.dtype,
+    sequence_length: int,
+    chunk_size: int,
+) -> None:
+    inputs = _inputs(
+        batch_size=2,
+        sequence_length=sequence_length,
+        dtype=dtype,
+        seed=700 + sequence_length + chunk_size,
+    )
+    initial_state = 0.02 * torch.randn(
+        2,
+        2,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    expected_output, expected_state = rwkv7_reference(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+    )
+    actual_output, actual_state, boundary = _run_recompute_chunk(
+        inputs,
+        initial_state,
+        sequence_lengths=(sequence_length,) * 2,
+        chunk_size=chunk_size,
+    )
+    torch.cuda.synchronize()
+
+    _assert_relative_rmse(
+        actual_output,
+        expected_output,
+        threshold=TOLERANCE["output_relative_rmse"],
+    )
+    _assert_relative_rmse(
+        actual_state,
+        expected_state,
+        threshold=TOLERANCE["state_relative_rmse"],
+    )
+    expected_chunks = 2 * ((sequence_length + chunk_size - 1) // chunk_size)
+    assert boundary.shape == (expected_chunks, 2, HEAD_SIZE, HEAD_SIZE)
+
+
+def test_recompute_packed_slot_mapping_matches_reference() -> None:
+    sequence_lengths = (3, 16, 17, 35)
+    inputs = _inputs(
+        batch_size=1,
+        sequence_length=sum(sequence_lengths),
+        dtype=torch.bfloat16,
+        seed=811,
+    )
+    cu_seqlens = torch.tensor(
+        [0, 3, 19, 36, 71],
+        device="cuda",
+        dtype=torch.int64,
+    )
+    state_indices = torch.tensor(
+        [5, 1, 4, 2],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    initial_state = 0.02 * torch.randn(
+        7,
+        2,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    expected_output, expected_state = rwkv7_reference(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+    )
+    actual_output, actual_state, _ = _run_recompute_chunk(
+        inputs,
+        initial_state,
+        sequence_lengths=sequence_lengths,
+        chunk_size=16,
+        state_indices=state_indices,
+    )
+    torch.cuda.synchronize()
+
+    _assert_relative_rmse(
+        actual_output,
+        expected_output,
+        threshold=TOLERANCE["output_relative_rmse"],
+    )
+    _assert_relative_rmse(
+        actual_state,
+        expected_state,
+        threshold=TOLERANCE["state_relative_rmse"],
+    )
+    untouched = torch.tensor([0, 3, 6], device="cuda")
+    assert torch.equal(
+        actual_state.index_select(0, untouched),
+        initial_state.index_select(0, untouched),
     )
 
 
@@ -267,7 +465,7 @@ def test_all_materialized_config_variants_match_reference(
 
 @pytest.mark.parametrize(
     ("sequence_length", "explicit_algorithm"),
-    [(16, "recurrent"), (17, "chunk")],
+    [(16, "recurrent"), (17, "recurrent"), (65, "recurrent")],
 )
 def test_auto_family_dispatch_matches_explicit_algorithm(
     sequence_length: int,

@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "source": "FlashRWKV canonical-device offline autotuning",
-  "evidence_artifact": "20260730T222130Z-2579451/flash-rwkv-chunk-autotune.json",
+  "evidence_artifact": "20260730T230302Z-2627268/flash-rwkv-chunk-autotune.json",
   "hardware": {
     "compute_capability": "12.0",
     "device_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
     "torch_cuda_version": "13.0",
     "torch_version": "2.11.0+cu130"
   },
-  "native_source_set_sha256": "54cae198290e9d7c5ccba78cec831e8fe9696e7d2797d3d45be311568c874ccb",
+  "native_source_set_sha256": "b7e82395c285aa3943b9d43201245437cffa4a4675e8891853b53238af451858",
   "entries": {
     "sm120|bfloat16|fp32io16|fixed|long": {
       "config": {
@@ -18,7 +18,7 @@
         "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.20854400098323822,
+      "p50_ms": 0.208064004778862,
       "profile": "fixed_long"
     },
     "sm120|bfloat16|fp32io16|fixed|medium": {
@@ -29,7 +29,7 @@
         "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.08940800279378891,
+      "p50_ms": 0.08966399729251862,
       "profile": "fixed_medium"
     },
     "sm120|bfloat16|fp32io16|fixed|very_long": {
@@ -40,7 +40,7 @@
         "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.6042559742927551,
+      "p50_ms": 0.6036159992218018,
       "profile": "fixed_very_long"
     },
     "sm120|bfloat16|fp32io16|packed|long": {
@@ -51,7 +51,7 @@
         "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.292928010225296,
+      "p50_ms": 0.2933120131492615,
       "profile": "packed_long"
     },
     "sm120|bfloat16|fp32io16|packed|medium": {
@@ -62,7 +62,7 @@
         "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.11004800349473953,
+      "p50_ms": 0.11033599823713303,
       "profile": "packed_medium"
     },
     "sm120|bfloat16|fp32io16|packed|very_long": {
@@ -73,7 +73,7 @@
         "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.9884799718856812,
+      "p50_ms": 0.9887040257453918,
       "profile": "packed_very_long"
     },
     "sm120|float16|fp32io16|fixed|long": {
@@ -84,7 +84,7 @@
         "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.2083200067281723,
+      "p50_ms": 0.20739200711250305,
       "profile": "fixed_long"
     },
     "sm120|float16|fp32io16|fixed|medium": {
@@ -92,10 +92,10 @@
         "build_warps": 4,
         "chunk_size": 16,
         "stages": 1,
-        "state_tile": 32
+        "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.08940800279378891,
+      "p50_ms": 0.08972799777984619,
       "profile": "fixed_medium"
     },
     "sm120|float16|fp32io16|fixed|very_long": {
@@ -103,10 +103,10 @@
         "build_warps": 4,
         "chunk_size": 64,
         "stages": 1,
-        "state_tile": 64
+        "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.605567991733551,
+      "p50_ms": 0.6037759780883789,
       "profile": "fixed_very_long"
     },
     "sm120|float16|fp32io16|packed|long": {
@@ -114,10 +114,10 @@
         "build_warps": 4,
         "chunk_size": 32,
         "stages": 1,
-        "state_tile": 64
+        "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.2927359938621521,
+      "p50_ms": 0.292959988117218,
       "profile": "packed_long"
     },
     "sm120|float16|fp32io16|packed|medium": {
@@ -125,10 +125,10 @@
         "build_warps": 4,
         "chunk_size": 32,
         "stages": 1,
-        "state_tile": 32
+        "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.10992000252008438,
+      "p50_ms": 0.1101439967751503,
       "profile": "packed_medium"
     },
     "sm120|float16|fp32io16|packed|very_long": {
@@ -139,7 +139,7 @@
         "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.9876800179481506,
+      "p50_ms": 0.9896640181541443,
       "profile": "packed_very_long"
     }
   }

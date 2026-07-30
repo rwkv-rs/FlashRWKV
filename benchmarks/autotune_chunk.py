@@ -43,6 +43,8 @@ NATIVE_SOURCE_PATHS = (
     Path("setup.py"),
     Path("csrc/bindings.cpp"),
     Path("csrc/chunk/materialized_fp32.cu"),
+    Path("csrc/chunk/replay.h"),
+    Path("csrc/chunk/replay_fp32.cu"),
     Path("flash_rwkv/config.py"),
     Path("flash_rwkv/ops.py"),
 )

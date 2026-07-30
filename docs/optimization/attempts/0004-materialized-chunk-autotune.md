@@ -4,11 +4,14 @@
 
 - Classification: retained parameter local optimum within the materialized
   chunk behavior cell
+- Family-dispatch result: superseded by `0005`; explicit materialized chunk is
+  retained, but `algorithm="auto"` no longer selects it without a measured
+  crossover
 - Parent attempt: `0003-materialized-chunk`
 - Nearest retained elite: `0002-fp16-recurrent` for decode/short-varlen;
   `0004` only selects materialized chunk parameters
 - Canonical evidence:
-  `artifacts/feature-kernel-12a9715266/20260730T222130Z-2579451/`
+  `artifacts/feature-kernel-12a9715266/20260730T230302Z-2627268/`
 
 ## Hypothesis
 
@@ -39,8 +42,11 @@ architecture or numerical mode.
 
 ## Implementation
 
-- `algorithm="auto"` chooses recurrent for `fp16` or a maximum sequence
-  length of at most 16, and chunk for longer `fp32io16` inputs.
+- At this checkpoint, `algorithm="auto"` chose recurrent for `fp16` or a
+  maximum sequence length of at most 16, and materialized chunk for longer
+  `fp32io16` inputs. Attempt `0005` subsequently disproved that family
+  crossover on the signed SM120 profiles and restored recurrent-only auto
+  dispatch.
 - `ChunkConfig` owns the explicit candidate contract and rejects values outside
   the enumerated space.
 - The native transform builder has real 2-warp, 4-warp, and double-buffered
@@ -78,18 +84,18 @@ Selected configurations and median operator latency:
 
 | dtype | layout | bucket | config | p50 ms |
 | --- | --- | --- | --- | ---: |
-| FP16 | fixed | medium | `c16-w4-s1-t32` | 0.089408 |
-| FP16 | fixed | long | `c64-w4-s1-t32` | 0.208320 |
-| FP16 | fixed | very-long | `c64-w4-s1-t64` | 0.605568 |
-| FP16 | packed | medium | `c32-w4-s1-t32` | 0.109920 |
-| FP16 | packed | long | `c32-w4-s1-t64` | 0.292736 |
-| FP16 | packed | very-long | `c64-w4-s1-t32` | 0.987680 |
-| BF16 | fixed | medium | `c16-w4-s1-t32` | 0.089408 |
-| BF16 | fixed | long | `c64-w4-s1-t32` | 0.208544 |
-| BF16 | fixed | very-long | `c64-w4-s1-t64` | 0.604256 |
-| BF16 | packed | medium | `c32-w4-s1-t64` | 0.110048 |
-| BF16 | packed | long | `c32-w4-s1-t64` | 0.292928 |
-| BF16 | packed | very-long | `c64-w4-s1-t64` | 0.988480 |
+| FP16 | fixed | medium | `c16-w4-s1-t64` | 0.089728 |
+| FP16 | fixed | long | `c64-w4-s1-t32` | 0.207392 |
+| FP16 | fixed | very-long | `c64-w4-s1-t32` | 0.603776 |
+| FP16 | packed | medium | `c32-w4-s1-t64` | 0.110144 |
+| FP16 | packed | long | `c32-w4-s1-t32` | 0.292960 |
+| FP16 | packed | very-long | `c64-w4-s1-t32` | 0.989664 |
+| BF16 | fixed | medium | `c16-w4-s1-t32` | 0.089664 |
+| BF16 | fixed | long | `c64-w4-s1-t32` | 0.208064 |
+| BF16 | fixed | very-long | `c64-w4-s1-t64` | 0.603616 |
+| BF16 | packed | medium | `c32-w4-s1-t64` | 0.110336 |
+| BF16 | packed | long | `c32-w4-s1-t64` | 0.293312 |
+| BF16 | packed | very-long | `c64-w4-s1-t64` | 0.988704 |
 
 The one-stage 4-warp builder won every measured key. This is a result for the
 materialized algorithm on SM120, not evidence that double buffering or these
@@ -97,29 +103,38 @@ tiles are globally inferior.
 
 ## Verification
 
-A reduced smoke first exercised all 27 candidates with two raw samples:
+A reduced smoke for the initial materialized implementation exercised all 27
+candidates with two raw samples:
 
 ```text
 artifacts/feature-kernel-12a9715266/20260730T222031Z-2578143/
 ```
 
-After installing the exact 12-entry cache, config and CUDA chunk regression
-passed `70/70`:
+The initial exact 12-entry cache passed config and CUDA chunk regression
+`70/70`:
 
 ```text
 artifacts/feature-kernel-12a9715266/20260730T222406Z-2582411/
 ```
 
-The final leaf-wide reference, recurrent, chunk, dispatch, and package
+The initial leaf-wide reference, recurrent, chunk, dispatch, and package
 regression passed `99/99`:
 
 ```text
 artifacts/feature-kernel-12a9715266/20260730T222619Z-2585168/
 ```
 
-The cache entries compare byte-for-byte equal to the autotuner payload, and
+After extracting the shared replay kernel and adding the factor/recompute
+behavior cell, the complete 324-case sweep was rerun. The packaged cache
+entries compare byte-for-byte equal to that canonical autotuner payload, and
 its recorded native source-set SHA-256 is
-`54cae198290e9d7c5ccba78cec831e8fe9696e7d2797d3d45be311568c874ccb`.
+`b7e82395c285aa3943b9d43201245437cffa4a4675e8891853b53238af451858`.
+The final leaf-wide regression, including the refreshed cache and dispatch
+fixtures, passed `105/105`:
+
+```text
+artifacts/feature-kernel-12a9715266/20260730T230618Z-2631184/
+```
 
 ## Next decision
 

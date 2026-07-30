@@ -11,6 +11,8 @@ setup(
             sources=[
                 "csrc/bindings.cpp",
                 "csrc/chunk/materialized_fp32.cu",
+                "csrc/chunk/recompute_fp32.cu",
+                "csrc/chunk/replay_fp32.cu",
                 "csrc/recurrent/recurrent_fp16.cu",
                 "csrc/recurrent/recurrent_fp32.cu",
             ],

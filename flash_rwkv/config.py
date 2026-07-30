@@ -185,9 +185,12 @@ def select_algorithm(
 ) -> str:
     if requested != "auto":
         return requested
-    if mode == "fp16" or max_sequence_length <= 16:
-        return "recurrent"
-    return "chunk"
+    # The current materialized and factor/recompute chunk behavior cells are
+    # both slower than the recurrent kernel on every correctness-gated SM120
+    # profile measured so far. Keep them available for explicit experiments,
+    # but do not silently dispatch production calls to a disproven crossover.
+    del mode, max_sequence_length
+    return "recurrent"
 
 
 def config_as_dict(config: ChunkConfig) -> dict[str, int]:

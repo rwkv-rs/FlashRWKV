@@ -57,6 +57,22 @@ void materialized_chunk_fp32_cuda(
     int64_t state_tile,
     double scale);
 
+void recompute_chunk_fp32_cuda(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor state_indices,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor boundary,
+    double scale);
+
 namespace {
 
 constexpr int64_t kHeadSize = 64;
@@ -176,6 +192,37 @@ RecurrentDimensions check_recurrent_layout(
   }
 
   return RecurrentDimensions{num_sequences, num_heads};
+}
+
+int64_t check_chunk_metadata(
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    const torch::Tensor& state,
+    const RecurrentDimensions& dimensions) {
+  check_cuda_contiguous(chunk_token_starts, "chunk_token_starts");
+  check_cuda_contiguous(chunk_token_ends, "chunk_token_ends");
+  TORCH_CHECK(
+      chunk_token_starts.scalar_type() == torch::kInt32 &&
+          chunk_token_ends.scalar_type() == torch::kInt32,
+      "chunk token metadata must be int32");
+  TORCH_CHECK(
+      chunk_token_starts.dim() == 1 &&
+          chunk_token_starts.numel() > 0 &&
+          chunk_token_starts.sizes() == chunk_token_ends.sizes(),
+      "chunk_token_starts and chunk_token_ends must have shape [C]");
+  check_same_device(state, chunk_token_starts, "chunk_token_starts");
+  check_same_device(state, chunk_token_ends, "chunk_token_ends");
+
+  const int64_t num_chunks = chunk_token_starts.numel();
+  TORCH_CHECK(
+      num_chunks * dimensions.num_heads <=
+          std::numeric_limits<int>::max(),
+      "chunk/head grid must fit in int32");
+  TORCH_CHECK(
+      dimensions.num_sequences * dimensions.num_heads <=
+          std::numeric_limits<int>::max(),
+      "sequence/head grid must fit in int32");
+  return num_chunks;
 }
 
 void recurrent_fp32(
@@ -298,22 +345,15 @@ void materialized_chunk_fp32(
       b,
       output,
       scale);
-  check_cuda_contiguous(chunk_token_starts, "chunk_token_starts");
-  check_cuda_contiguous(chunk_token_ends, "chunk_token_ends");
+  const int64_t num_chunks = check_chunk_metadata(
+      chunk_token_starts,
+      chunk_token_ends,
+      state,
+      dimensions);
   check_cuda_contiguous(transform, "transform");
   check_cuda_contiguous(bias, "bias");
   check_cuda_contiguous(boundary, "boundary");
 
-  TORCH_CHECK(
-      chunk_token_starts.scalar_type() == torch::kInt32 &&
-          chunk_token_ends.scalar_type() == torch::kInt32,
-      "chunk token metadata must be int32");
-  TORCH_CHECK(
-      chunk_token_starts.dim() == 1 &&
-          chunk_token_starts.numel() > 0 &&
-          chunk_token_starts.sizes() == chunk_token_ends.sizes(),
-      "chunk_token_starts and chunk_token_ends must have shape [C]");
-  const int64_t num_chunks = chunk_token_starts.numel();
   const std::vector<int64_t> workspace_shape{
       num_chunks,
       dimensions.num_heads,
@@ -337,14 +377,6 @@ void materialized_chunk_fp32(
           r.scalar_type() == torch::kFloat32,
       "FP32-state token tensors must be fp16, bf16, or fp32");
   TORCH_CHECK(
-      num_chunks * dimensions.num_heads <=
-          std::numeric_limits<int>::max(),
-      "chunk/head grid must fit in int32");
-  TORCH_CHECK(
-      dimensions.num_sequences * dimensions.num_heads <=
-          std::numeric_limits<int>::max(),
-      "sequence/head grid must fit in int32");
-  TORCH_CHECK(
       (build_warps == 2 && stages == 1) ||
           (build_warps == 4 && (stages == 1 || stages == 2)),
       "chunk build config must be (warps,stages) in "
@@ -355,9 +387,7 @@ void materialized_chunk_fp32(
 
   for (const auto& item : {
            std::pair<const torch::Tensor*, const char*>{
-               &chunk_token_starts, "chunk_token_starts"},
-           {&chunk_token_ends, "chunk_token_ends"},
-           {&transform, "transform"},
+               &transform, "transform"},
            {&bias, "bias"},
            {&boundary, "boundary"},
        }) {
@@ -383,6 +413,77 @@ void materialized_chunk_fp32(
       build_warps,
       stages,
       state_tile,
+      scale);
+}
+
+void recompute_chunk_fp32(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor state_indices,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor boundary,
+    double scale) {
+  const auto dimensions = check_recurrent_layout(
+      sequence_chunk_offsets,
+      state_indices,
+      state,
+      r,
+      log_decay,
+      k,
+      v,
+      a,
+      b,
+      output,
+      scale);
+  const int64_t num_chunks = check_chunk_metadata(
+      chunk_token_starts,
+      chunk_token_ends,
+      state,
+      dimensions);
+  check_cuda_contiguous(boundary, "boundary");
+
+  const std::vector<int64_t> workspace_shape{
+      num_chunks,
+      dimensions.num_heads,
+      kHeadSize,
+      kHeadSize,
+  };
+  TORCH_CHECK(
+      boundary.sizes().vec() == workspace_shape,
+      "boundary must have shape [C,H,64,64]");
+  TORCH_CHECK(
+      boundary.scalar_type() == torch::kFloat32,
+      "boundary must be fp32");
+  TORCH_CHECK(state.scalar_type() == torch::kFloat32, "state must be fp32");
+  TORCH_CHECK(
+      r.scalar_type() == torch::kFloat16 ||
+          r.scalar_type() == torch::kBFloat16 ||
+          r.scalar_type() == torch::kFloat32,
+      "FP32-state token tensors must be fp16, bf16, or fp32");
+  check_same_device(state, boundary, "boundary");
+
+  recompute_chunk_fp32_cuda(
+      sequence_chunk_offsets,
+      chunk_token_starts,
+      chunk_token_ends,
+      state_indices,
+      state,
+      r,
+      log_decay,
+      k,
+      v,
+      a,
+      b,
+      output,
+      boundary,
       scale);
 }
 
@@ -441,5 +542,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       py::arg("build_warps"),
       py::arg("stages"),
       py::arg("state_tile"),
+      py::arg("scale"));
+  module.def(
+      "recompute_chunk_fp32",
+      &recompute_chunk_fp32,
+      "FlashRWKV DPLR-factor recompute chunk forward with FP32 state",
+      py::arg("sequence_chunk_offsets"),
+      py::arg("chunk_token_starts"),
+      py::arg("chunk_token_ends"),
+      py::arg("state_indices"),
+      py::arg("state"),
+      py::arg("r"),
+      py::arg("log_decay"),
+      py::arg("k"),
+      py::arg("v"),
+      py::arg("a"),
+      py::arg("b"),
+      py::arg("output"),
+      py::arg("boundary"),
       py::arg("scale"));
 }
