@@ -70,6 +70,14 @@ PROVIDER_NAMES = (
     "flash_chunk",
     "fla_chunk",
 )
+_CLEAN_WORKTREE_SHA256 = hashlib.sha256(
+    b"helicopter-dev-worktree-v1\0"
+).hexdigest()
+_SOURCE_MANIFEST_RELATIVE = Path(
+    ".helicopter-dev/source-revisions.json"
+)
+_LEAF_SUBMODULE_PATH = "src/kernel/flash-rwkv"
+_FLA_SUBMODULE_PATH = "src/kernel/fla-rwkv"
 
 
 @dataclass(frozen=True)
@@ -152,6 +160,53 @@ def _repository_metadata(repository: Path) -> dict[str, object]:
     }
 
 
+def _source_manifest() -> tuple[dict[str, object] | None, dict[str, object]]:
+    path = SOURCE_ROOT.parents[2] / _SOURCE_MANIFEST_RELATIVE
+    if not path.is_file():
+        return None, {"path": str(path), "available": False}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("version") != 2:
+        raise RuntimeError("unsupported synchronized source manifest version")
+    return payload, {
+        "path": str(path),
+        "available": True,
+        "sha256": _sha256(path),
+        "version": payload["version"],
+    }
+
+
+def _manifest_repository_metadata(
+    entry: object,
+    repository: Path,
+) -> dict[str, object]:
+    if not isinstance(entry, dict):
+        raise RuntimeError("synchronized source manifest entry is missing")
+    commit = entry.get("commit")
+    worktree_sha256 = entry.get("worktree_sha256")
+    if not isinstance(commit, str) or len(commit) != 40:
+        raise RuntimeError("synchronized source commit is invalid")
+    if not isinstance(worktree_sha256, str) or len(worktree_sha256) != 64:
+        raise RuntimeError("synchronized worktree identity is invalid")
+    return {
+        "path": str(repository),
+        "revision": commit,
+        "dirty": worktree_sha256 != _CLEAN_WORKTREE_SHA256,
+        "worktree_sha256": worktree_sha256,
+        "revision_source": "synchronized_source_manifest",
+    }
+
+
+def _repository_or_manifest_metadata(
+    repository: Path,
+    manifest_entry: object,
+) -> dict[str, object]:
+    metadata = _repository_metadata(repository)
+    if metadata["revision"] is not None:
+        metadata["revision_source"] = "git"
+        return metadata
+    return _manifest_repository_metadata(manifest_entry, repository)
+
+
 def _source_paths() -> tuple[Path, ...]:
     native = (
         path.relative_to(SOURCE_ROOT)
@@ -170,7 +225,7 @@ def _source_paths() -> tuple[Path, ...]:
     return tuple(sorted((*native, *python, *fixed), key=str))
 
 
-def _fla_metadata() -> dict[str, object]:
+def _fla_metadata(manifest_entry: object) -> dict[str, object]:
     import fla
 
     package_root = Path(fla.__file__).resolve().parent
@@ -180,7 +235,7 @@ def _fla_metadata() -> dict[str, object]:
     except importlib.metadata.PackageNotFoundError:
         version = None
     return {
-        **_repository_metadata(repository),
+        **_repository_or_manifest_metadata(repository, manifest_entry),
         "package_version": version,
         "module_path": str(package_root),
     }
@@ -193,10 +248,30 @@ def _source_metadata() -> dict[str, object]:
         for relative in paths
     }
     extension_path = Path(_C.__file__).resolve()
+    manifest, manifest_metadata = _source_manifest()
+    product_entry = None if manifest is None else manifest.get("product")
+    submodules = None if manifest is None else manifest.get("submodules")
+    leaf_entry = (
+        None
+        if not isinstance(submodules, dict)
+        else submodules.get(_LEAF_SUBMODULE_PATH)
+    )
+    fla_entry = (
+        None
+        if not isinstance(submodules, dict)
+        else submodules.get(_FLA_SUBMODULE_PATH)
+    )
     return {
-        "leaf": _repository_metadata(SOURCE_ROOT),
-        "parent": _repository_metadata(SOURCE_ROOT.parents[2]),
-        "fla": _fla_metadata(),
+        "leaf": _repository_or_manifest_metadata(
+            SOURCE_ROOT,
+            leaf_entry,
+        ),
+        "parent": _repository_or_manifest_metadata(
+            SOURCE_ROOT.parents[2],
+            product_entry,
+        ),
+        "synchronized_source_manifest": manifest_metadata,
+        "fla": _fla_metadata(fla_entry),
         "benchmark_script_sha256": _sha256(Path(__file__).resolve()),
         "source_sha256": hashes,
         "source_set_sha256": hashlib.sha256(
