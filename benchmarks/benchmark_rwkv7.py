@@ -18,6 +18,7 @@ import json
 import os
 import platform
 import random
+import re
 import statistics
 import subprocess
 from collections.abc import Callable, Sequence
@@ -165,13 +166,54 @@ def _source_manifest() -> tuple[dict[str, object] | None, dict[str, object]]:
     if not path.is_file():
         return None, {"path": str(path), "available": False}
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("version") != 2:
-        raise RuntimeError("unsupported synchronized source manifest version")
-    return payload, {
+    if not isinstance(payload, dict):
+        raise RuntimeError("synchronized source manifest must be an object")
+
+    if payload.get("version") == 2:
+        product = payload.get("product")
+        submodules = payload.get("submodules")
+        manifest_format = "profile-v2"
+        revision_source = "synchronized_source_manifest"
+    elif "product_commit" in payload and "submodules" in payload:
+        product = payload.get("product_commit")
+        submodules = payload.get("submodules")
+        manifest_format = "legacy"
+        revision_source = "synchronized_source_manifest_legacy"
+    else:
+        raise RuntimeError("unsupported synchronized source manifest format")
+
+    if not isinstance(submodules, dict):
+        raise RuntimeError(
+            "synchronized source manifest submodules must be an object"
+        )
+
+    def normalize_entry(entry: object) -> object:
+        if isinstance(entry, str):
+            return {
+                "commit": entry,
+                "worktree_sha256": None,
+                "revision_source": revision_source,
+            }
+        if isinstance(entry, dict):
+            return {
+                **entry,
+                "revision_source": revision_source,
+            }
+        return entry
+
+    normalized = {
+        "product": normalize_entry(product),
+        "submodules": {
+            name: normalize_entry(entry)
+            for name, entry in submodules.items()
+        },
+    }
+    return normalized, {
         "path": str(path),
         "available": True,
         "sha256": _sha256(path),
-        "version": payload["version"],
+        "format": manifest_format,
+        "version": payload.get("version"),
     }
 
 
@@ -183,16 +225,35 @@ def _manifest_repository_metadata(
         raise RuntimeError("synchronized source manifest entry is missing")
     commit = entry.get("commit")
     worktree_sha256 = entry.get("worktree_sha256")
-    if not isinstance(commit, str) or len(commit) != 40:
+    revision_source = entry.get("revision_source")
+    if not isinstance(commit, str) or re.fullmatch(
+        r"[0-9a-f]{40}",
+        commit,
+    ) is None:
         raise RuntimeError("synchronized source commit is invalid")
-    if not isinstance(worktree_sha256, str) or len(worktree_sha256) != 64:
+    if (
+        worktree_sha256 is not None
+        and (
+            not isinstance(worktree_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", worktree_sha256) is None
+        )
+    ):
         raise RuntimeError("synchronized worktree identity is invalid")
+    if revision_source not in {
+        "synchronized_source_manifest",
+        "synchronized_source_manifest_legacy",
+    }:
+        raise RuntimeError("synchronized revision source is invalid")
     return {
         "path": str(repository),
         "revision": commit,
-        "dirty": worktree_sha256 != _CLEAN_WORKTREE_SHA256,
+        "dirty": (
+            None
+            if worktree_sha256 is None
+            else worktree_sha256 != _CLEAN_WORKTREE_SHA256
+        ),
         "worktree_sha256": worktree_sha256,
-        "revision_source": "synchronized_source_manifest",
+        "revision_source": revision_source,
     }
 
 
