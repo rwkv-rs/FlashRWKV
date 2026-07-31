@@ -7,7 +7,7 @@ import torch
 from . import _extension
 
 
-def rwkv7_chunk_autograd(
+def pretrain_recurrent_fp32io16_autograd(
     r: torch.Tensor,
     log_decay: torch.Tensor,
     k: torch.Tensor,
@@ -19,15 +19,11 @@ def rwkv7_chunk_autograd(
     sequence_chunk_offsets: torch.Tensor,
     chunk_token_starts: torch.Tensor,
     chunk_token_ends: torch.Tensor,
-    state_indices: torch.Tensor,
     scale: float,
-    build_warps: int,
-    stages: int,
-    state_tile: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run the fixed-length FP32-state chunk autograd boundary."""
+    """Run the RWKV-LM-derived fixed-length recurrent autograd boundary."""
 
-    return _ChunkAutogradFunction.apply(
+    return _PretrainRecurrentFp32io16Function.apply(
         r,
         log_decay,
         k,
@@ -38,15 +34,11 @@ def rwkv7_chunk_autograd(
         sequence_chunk_offsets,
         chunk_token_starts,
         chunk_token_ends,
-        state_indices,
         scale,
-        build_warps,
-        stages,
-        state_tile,
     )
 
 
-class _ChunkAutogradFunction(torch.autograd.Function):
+class _PretrainRecurrentFp32io16Function(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
@@ -60,11 +52,7 @@ class _ChunkAutogradFunction(torch.autograd.Function):
         sequence_chunk_offsets: torch.Tensor,
         chunk_token_starts: torch.Tensor,
         chunk_token_ends: torch.Tensor,
-        state_indices: torch.Tensor,
         scale: float,
-        build_warps: int,
-        stages: int,
-        state_tile: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, _, num_heads, head_size = r.shape
         flattened = tuple(
@@ -89,13 +77,11 @@ class _ChunkAutogradFunction(torch.autograd.Function):
             head_size,
             head_size,
         )
-        transform = torch.empty(
+        boundary = torch.empty(
             workspace_shape,
             dtype=torch.float32,
             device=r.device,
         )
-        bias = torch.empty_like(transform)
-        boundary = torch.empty_like(transform)
         state_dot_a = torch.empty(
             flattened[0].shape,
             dtype=torch.float32,
@@ -103,22 +89,16 @@ class _ChunkAutogradFunction(torch.autograd.Function):
         )
         output = torch.empty_like(flattened[3])
 
-        _extension.materialized_chunk_fp32(
+        _extension.pretrain_recurrent_fp32io16_forward(
             sequence_chunk_offsets,
             chunk_token_starts,
             chunk_token_ends,
-            state_indices,
             working_state,
             *flattened,
             output,
-            transform,
-            bias,
             boundary,
-            build_warps,
-            stages,
-            state_tile,
-            float(scale),
             state_dot_a,
+            float(scale),
         )
 
         ctx.set_materialize_grads(False)
@@ -175,7 +155,7 @@ class _ChunkAutogradFunction(torch.autograd.Function):
             else grad_final_state.contiguous()
         )
 
-        _extension.chunk_backward_fp32(
+        _extension.pretrain_recurrent_fp32io16_backward(
             sequence_chunk_offsets,
             chunk_token_starts,
             chunk_token_ends,
@@ -203,10 +183,6 @@ class _ChunkAutogradFunction(torch.autograd.Function):
         return (
             *shaped_gradients,
             grad_initial_state,
-            None,
-            None,
-            None,
-            None,
             None,
             None,
             None,

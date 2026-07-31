@@ -15,6 +15,15 @@
     "state_relative_rmse": 0.008,
     "gradient_relative_rmse": 0.008
   },
+  "fp32io16_pretrain_recurrent": {
+    "output_relative_rmse": 0.007,
+    "state_relative_rmse": 0.008,
+    "gradient_relative_rmse": 0.008
+  },
+  "bf16_kda_chunk": {
+    "output_relative_rmse": 0.02,
+    "state_relative_rmse": 0.02
+  },
   "fp16": {
     "output_relative_rmse": 0.003,
     "state_relative_rmse": 0.003,

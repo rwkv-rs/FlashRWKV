@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flash-rwkv"
 version = "0.1.0"
-description = "RWKV-7 reference, recurrent, and chunk CUDA kernels"
+description = "Source-attributed RWKV-7 recurrent and chunk CUDA kernels"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

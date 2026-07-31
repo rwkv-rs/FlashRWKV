@@ -10,7 +10,10 @@ import pytest
 import torch
 import torch.nn.functional as functional
 
-from flash_rwkv import rwkv7, rwkv7_reference
+from flash_rwkv import (
+    pretrain_recurrent_fp32io16_forward,
+    rwkv7_reference,
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -23,7 +26,7 @@ TOLERANCE = json.loads(
     (
         Path(__file__).parent / "fixtures/tolerances-v1.json"
     ).read_text(encoding="utf-8")
-)["fp32io16_chunk"]
+)["fp32io16_pretrain_recurrent"]
 
 
 def _inputs(
@@ -94,7 +97,6 @@ def _run_backward(
     grad_final_state: torch.Tensor,
     include_final_state_loss: bool,
     scale: float,
-    flash_chunk_size: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     inputs = tuple(
         tensor.detach().clone().requires_grad_(required)
@@ -117,13 +119,11 @@ def _run_backward(
             output_final_state=True,
         )
     elif implementation == "flash":
-        output, final_state = rwkv7(
+        output, final_state = pretrain_recurrent_fp32io16_forward(
             *inputs,
             scale=scale,
             initial_state=initial_state,
             output_final_state=True,
-            algorithm="chunk",
-            chunk_size=flash_chunk_size,
         )
     elif implementation == "fla":
         from fla.ops.rwkv7 import chunk_rwkv7
@@ -155,20 +155,18 @@ def _run_backward(
         "sequence_length",
         "include_final_state_loss",
         "seed",
-        "flash_chunk_size",
     ),
     [
-        (torch.bfloat16, 17, False, 1201, 16),
-        (torch.float16, 33, True, 1202, 16),
-        (torch.float16, 257, True, 1203, 64),
+        (torch.bfloat16, 17, False, 1201),
+        (torch.float16, 33, True, 1202),
+        (torch.float16, 257, True, 1203),
     ],
 )
-def test_chunk_autograd_matches_torch_and_fla(
+def test_pretrain_recurrent_autograd_matches_torch_and_fla(
     dtype: torch.dtype,
     sequence_length: int,
     include_final_state_loss: bool,
     seed: int,
-    flash_chunk_size: int,
 ) -> None:
     inputs, initial_state = _inputs(
         batch_size=1,
@@ -202,7 +200,6 @@ def test_chunk_autograd_matches_torch_and_fla(
             grad_final_state=grad_final_state,
             include_final_state_loss=include_final_state_loss,
             scale=0.125,
-            flash_chunk_size=flash_chunk_size,
         )
         for implementation in ("torch", "flash", "fla")
     }
@@ -232,7 +229,7 @@ def test_chunk_autograd_matches_torch_and_fla(
             )
 
 
-def test_chunk_autograd_only_materializes_requested_gradients() -> None:
+def test_pretrain_recurrent_only_materializes_requested_gradients() -> None:
     inputs, initial_state = _inputs(
         batch_size=2,
         sequence_length=17,

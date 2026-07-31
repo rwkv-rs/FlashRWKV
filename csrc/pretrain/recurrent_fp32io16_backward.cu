@@ -42,7 +42,7 @@ struct BackwardShared {
 
 template <typename io_t>
 __global__ __launch_bounds__(kHeadSize, 1)
-void chunk_backward_kernel(
+void pretrain_recurrent_fp32io16_backward_kernel(
     int num_heads,
     const int* __restrict__ sequence_chunk_offsets,
     const int* __restrict__ chunk_token_starts,
@@ -247,7 +247,7 @@ void chunk_backward_kernel(
 }
 
 template <typename io_t>
-void launch_chunk_backward(
+void launch_pretrain_recurrent_fp32io16_backward(
     int num_sequences,
     int num_heads,
     const torch::Tensor& sequence_chunk_offsets,
@@ -273,7 +273,7 @@ void launch_chunk_backward(
     torch::Tensor& grad_initial_state,
     float scale,
     cudaStream_t stream) {
-  chunk_backward_kernel<io_t>
+  pretrain_recurrent_fp32io16_backward_kernel<io_t>
       <<<dim3(num_heads, num_sequences), kHeadSize, 0, stream>>>(
           num_heads,
           sequence_chunk_offsets.data_ptr<int>(),
@@ -310,7 +310,7 @@ void launch_chunk_backward(
 
 }  // namespace
 
-void chunk_backward_fp32_cuda(
+void pretrain_recurrent_fp32io16_backward_cuda(
     torch::Tensor sequence_chunk_offsets,
     torch::Tensor chunk_token_starts,
     torch::Tensor chunk_token_ends,
@@ -343,9 +343,9 @@ void chunk_backward_fp32_cuda(
       at::ScalarType::Half,
       at::ScalarType::BFloat16,
       r.scalar_type(),
-      "flash_rwkv_chunk_backward_fp32",
+      "flash_rwkv_pretrain_recurrent_fp32io16_backward",
       [&] {
-        launch_chunk_backward<scalar_t>(
+        launch_pretrain_recurrent_fp32io16_backward<scalar_t>(
             num_sequences,
             num_heads,
             sequence_chunk_offsets,

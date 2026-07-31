@@ -7,7 +7,7 @@ import math
 import torch
 
 from . import _extension
-from ._autograd import rwkv7_chunk_autograd
+from ._autograd import pretrain_recurrent_fp32io16_autograd
 from .config import (
     ChunkConfig,
     chunk_tuning_key,
@@ -30,6 +30,96 @@ def decay_logits_to_log_decay(decay_logits: torch.Tensor) -> torch.Tensor:
     if not decay_logits.is_floating_point():
         raise TypeError("decay_logits must have a floating-point dtype")
     return -math.exp(-0.5) * torch.sigmoid(decay_logits)
+
+
+def pretrain_recurrent_fp32io16_forward(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    scale: float = 1.0,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run the RWKV-LM-derived fixed-length recurrent training operator."""
+
+    layout = validate_rwkv7_inputs(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        scale=scale,
+        initial_state=initial_state,
+        cu_seqlens=None,
+        state_indices=None,
+        required_head_size=_HEAD_SIZE,
+    )
+    if not r.is_cuda:
+        raise ValueError(
+            "pretrain_recurrent_fp32io16_forward requires CUDA inputs"
+        )
+    if r.dtype not in {torch.float16, torch.bfloat16}:
+        raise TypeError(
+            "pretrain_recurrent_fp32io16_forward requires fp16 or bf16 "
+            "token tensors"
+        )
+    if initial_state is not None and initial_state.dtype != torch.float32:
+        raise TypeError(
+            "pretrain_recurrent_fp32io16_forward requires an FP32 "
+            "initial_state"
+        )
+    (
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        _,
+    ) = _cuda_chunk_metadata(layout, 16, r.device)
+    output, final_state = pretrain_recurrent_fp32io16_autograd(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        initial_state=initial_state,
+        sequence_chunk_offsets=sequence_chunk_offsets,
+        chunk_token_starts=chunk_token_starts,
+        chunk_token_ends=chunk_token_ends,
+        scale=float(scale),
+    )
+    return output, final_state if output_final_state else None
+
+
+def pretrain_recurrent_fp32io16(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    scale: float = 1.0,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Compatibility alias for ``pretrain_recurrent_fp32io16_forward``."""
+
+    return pretrain_recurrent_fp32io16_forward(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+    )
 
 
 def rwkv7(
@@ -290,7 +380,7 @@ def _rwkv7_chunk_cuda(
         cuda_state_indices,
     ) = _cuda_chunk_metadata(layout, config.chunk_size, r.device)
     if requires_grad:
-        output, final_state = rwkv7_chunk_autograd(
+        output, final_state = pretrain_recurrent_fp32io16_autograd(
             r,
             log_decay,
             k,
@@ -301,11 +391,7 @@ def _rwkv7_chunk_cuda(
             sequence_chunk_offsets=sequence_chunk_offsets,
             chunk_token_starts=chunk_token_starts,
             chunk_token_ends=chunk_token_ends,
-            state_indices=cuda_state_indices,
             scale=float(scale),
-            build_warps=config.build_warps,
-            stages=config.stages,
-            state_tile=config.state_tile,
         )
         return output, final_state if output_final_state else None
 
@@ -473,6 +559,232 @@ def rwkv7_recurrent_stateful(
         mutate_state=True,
     )
     return output
+
+
+def infer_recurrent_fp32io16_forward_varlen(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    initial_state: torch.Tensor | None,
+    cu_seqlens: torch.Tensor,
+    state_indices: torch.Tensor | None = None,
+    scale: float = 1.0,
+    output_final_state: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run vllm-rwkv-derived packed inference with FP32 canonical state."""
+
+    return _rwkv7_recurrent_cuda(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        mode="fp32io16",
+        mutate_state=False,
+    )
+
+
+def infer_recurrent_fp16_forward_varlen(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    initial_state: torch.Tensor | None,
+    cu_seqlens: torch.Tensor,
+    state_indices: torch.Tensor | None = None,
+    scale: float = 1.0,
+    output_final_state: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run vllm-rwkv-derived packed inference with FP16 canonical state."""
+
+    return _rwkv7_recurrent_cuda(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        mode="fp16",
+        mutate_state=False,
+    )
+
+
+def _infer_chunk_bf16_forward(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    initial_state: torch.Tensor | None,
+    cu_seqlens: torch.Tensor | None,
+    scale: float,
+    output_final_state: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    layout = validate_rwkv7_inputs(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        scale=scale,
+        initial_state=initial_state,
+        cu_seqlens=cu_seqlens,
+        state_indices=None,
+        required_head_size=_HEAD_SIZE,
+    )
+    if not r.is_cuda:
+        raise ValueError("infer_chunk_bf16_forward requires CUDA inputs")
+    if r.dtype != torch.bfloat16:
+        raise TypeError("infer_chunk_bf16_forward token tensors must be bf16")
+    if initial_state is not None and initial_state.dtype != torch.bfloat16:
+        raise TypeError("infer_chunk_bf16_forward initial_state must be bf16")
+    _check_cuda_forward_only((r, log_decay, k, v, a, b, initial_state))
+
+    (
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        _,
+    ) = _cuda_chunk_metadata(layout, 16, r.device)
+    flattened = tuple(
+        tensor.reshape(-1, layout.num_heads, _HEAD_SIZE)
+        for tensor in (r, log_decay, k, v, a, b)
+    )
+    state = (
+        torch.zeros(
+            layout.num_sequences,
+            layout.num_heads,
+            _HEAD_SIZE,
+            _HEAD_SIZE,
+            dtype=torch.bfloat16,
+            device=r.device,
+        )
+        if initial_state is None
+        else initial_state.clone()
+    )
+    chunk_workspace_shape = (
+        chunk_token_starts.numel(),
+        layout.num_heads,
+        _HEAD_SIZE,
+        _HEAD_SIZE,
+    )
+    chunk_transform = torch.empty(
+        chunk_workspace_shape,
+        dtype=torch.float32,
+        device=r.device,
+    )
+    chunk_bias = torch.empty_like(chunk_transform)
+    token_transform = torch.empty(
+        flattened[0].shape,
+        dtype=torch.float32,
+        device=r.device,
+    )
+    token_bias = torch.empty_like(token_transform)
+    output = torch.empty_like(flattened[3])
+
+    _extension.infer_chunk_bf16_forward_k1_prepare(
+        chunk_token_starts,
+        chunk_token_ends,
+        *flattened,
+        chunk_transform,
+        chunk_bias,
+        token_transform,
+        token_bias,
+        float(scale),
+    )
+    _extension.infer_chunk_bf16_forward_k2_recurrence(
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        state,
+        output,
+        chunk_transform,
+        chunk_bias,
+        token_transform,
+        token_bias,
+    )
+    return (
+        output.reshape(v.shape),
+        state if output_final_state else None,
+    )
+
+
+def infer_chunk_bf16_forward(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    initial_state: torch.Tensor | None = None,
+    scale: float = 1.0,
+    output_final_state: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run the KDA-derived K1/K2 fixed-length BF16 chunk operator."""
+
+    return _infer_chunk_bf16_forward(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        initial_state=initial_state,
+        cu_seqlens=None,
+        scale=scale,
+        output_final_state=output_final_state,
+    )
+
+
+def infer_chunk_bf16_forward_varlen(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    initial_state: torch.Tensor | None,
+    cu_seqlens: torch.Tensor,
+    scale: float = 1.0,
+    output_final_state: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run the KDA-derived K1/K2 packed-varlen BF16 chunk operator."""
+
+    return _infer_chunk_bf16_forward(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        initial_state=initial_state,
+        cu_seqlens=cu_seqlens,
+        scale=scale,
+        output_final_state=output_final_state,
+    )
 
 
 def rwkv7_from_decay_logits(

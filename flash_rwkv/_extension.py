@@ -77,6 +77,40 @@ def recurrent_fp16(
     )
 
 
+def pretrain_recurrent_fp32io16_forward(
+    sequence_chunk_offsets: torch.Tensor,
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    state: torch.Tensor,
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    output: torch.Tensor,
+    boundary: torch.Tensor,
+    state_dot_a: torch.Tensor,
+    scale: float,
+) -> None:
+    _load_extension().pretrain_recurrent_fp32io16_forward(
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        state,
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        output,
+        boundary,
+        state_dot_a,
+        scale,
+    )
+
+
 def materialized_chunk_fp32(
     sequence_chunk_offsets: torch.Tensor,
     chunk_token_starts: torch.Tensor,
@@ -123,7 +157,7 @@ def materialized_chunk_fp32(
     )
 
 
-def chunk_backward_fp32(
+def pretrain_recurrent_fp32io16_backward(
     sequence_chunk_offsets: torch.Tensor,
     chunk_token_starts: torch.Tensor,
     chunk_token_ends: torch.Tensor,
@@ -147,7 +181,7 @@ def chunk_backward_fp32(
     grad_initial_state: torch.Tensor | None,
     scale: float,
 ) -> None:
-    _load_extension().chunk_backward_fp32(
+    _load_extension().pretrain_recurrent_fp32io16_backward(
         sequence_chunk_offsets,
         chunk_token_starts,
         chunk_token_ends,
@@ -170,6 +204,62 @@ def chunk_backward_fp32(
         grad_b,
         grad_initial_state,
         scale,
+    )
+
+
+def infer_chunk_bf16_forward_k1_prepare(
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    chunk_transform: torch.Tensor,
+    chunk_bias: torch.Tensor,
+    token_transform: torch.Tensor,
+    token_bias: torch.Tensor,
+    scale: float,
+) -> None:
+    _load_extension().infer_chunk_bf16_forward_k1_prepare(
+        chunk_token_starts,
+        chunk_token_ends,
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        chunk_transform,
+        chunk_bias,
+        token_transform,
+        token_bias,
+        scale,
+    )
+
+
+def infer_chunk_bf16_forward_k2_recurrence(
+    sequence_chunk_offsets: torch.Tensor,
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    state: torch.Tensor,
+    output: torch.Tensor,
+    chunk_transform: torch.Tensor,
+    chunk_bias: torch.Tensor,
+    token_transform: torch.Tensor,
+    token_bias: torch.Tensor,
+) -> None:
+    _load_extension().infer_chunk_bf16_forward_k2_recurrence(
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        state,
+        output,
+        chunk_transform,
+        chunk_bias,
+        token_transform,
+        token_bias,
     )
 
 

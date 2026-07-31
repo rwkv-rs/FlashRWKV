@@ -1,9 +1,17 @@
 FlashRWKV
 
 This repository began from MoonshotAI/FlashKDA, distributed under the MIT
-License. The original KDA operator, Python package, CUDA data-plane, tests,
-and benchmarks have been removed. The repository history and remaining
-general project material retain the MoonshotAI copyright and MIT notice.
+License. The original KDA attention operator, Python package, tests, and
+benchmark data-plane were removed. The following new RWKV-7 files retain the
+MIT boundary and derive their explicit K1/K2 launch separation from
+MoonshotAI/FlashKDA commit
+1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b:
+
+- csrc/kda/infer_chunk_bf16_forward_k1_prepare.cu
+- csrc/kda/infer_chunk_bf16_forward_k2_recurrence.cu
+
+They implement the canonical RWKV-7 recurrence, not the KDA attention
+mathematics.
 
 The following files contain material adapted from the vLLM project and its
 RWKV/Albatross integration at rwkv-rs/vllm-rwkv commit
@@ -14,17 +22,25 @@ RWKV/Albatross integration at rwkv-rs/vllm-rwkv commit
 - csrc/recurrent/recurrent_fp16.cu
 - benchmarks/benchmark_recurrent.py
 - benchmarks/benchmark_rwkv7.py
+- benchmarks/benchmark_training.py
+- benchmarks/kernel_benchmark.py
 
-The following file contains a checkpoint/backstepping method adapted from
-BlinkDL/RWKV-LM commit 952102498e9ed367ea0a59ee64106916d474d30f:
+The FP16 recurrent lineage includes BlinkDL/Albatross faster3a_2607 commit
+63c53f4abf2cd891dd3a18c8f44f5b2cccc8c64b.
 
-- csrc/chunk/backward_fp32.cu
+The following files contain recurrent checkpoint and reverse-recurrence
+methods adapted from BlinkDL/RWKV-LM commit
+952102498e9ed367ea0a59ee64106916d474d30f:
+
+- csrc/pretrain/recurrent_fp32io16_forward.cu
+- csrc/pretrain/recurrent_fp32io16_backward.cu
 
 Those derived files are licensed under the Apache License, Version 2.0 and
 retain SPDX/source-revision headers. See LICENSES/Apache-2.0.txt.
 
-The FLA chunk_rwkv7 implementation is used only as an external correctness
-and benchmark dependency. No FLA implementation source is bundled here.
+The FLA chunk_rwkv7 and fused_recurrent_rwkv7 implementations are used only
+through an external correctness and benchmark dependency. No FLA
+implementation source is bundled here.
 
 All other original FlashRWKV work is licensed under the repository's MIT
 license unless a file states otherwise.

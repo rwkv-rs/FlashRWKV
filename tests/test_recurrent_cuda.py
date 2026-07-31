@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from flash_rwkv import rwkv7, rwkv7_recurrent_stateful, rwkv7_reference
+from flash_rwkv import (
+    infer_recurrent_fp16_forward_varlen,
+    infer_recurrent_fp32io16_forward_varlen,
+    rwkv7,
+    rwkv7_recurrent_stateful,
+    rwkv7_reference,
+)
 
 
 HEAD_SIZE = 64
@@ -209,6 +215,42 @@ def test_stateful_recurrent_updates_only_selected_rows(
         state_pool.index_select(0, untouched),
         initial_state.index_select(0, untouched),
     )
+
+
+@pytest.mark.parametrize(
+    ("mode", "named_operator"),
+    [
+        ("fp32io16", infer_recurrent_fp32io16_forward_varlen),
+        ("fp16", infer_recurrent_fp16_forward_varlen),
+    ],
+)
+def test_named_varlen_operator_matches_legacy_dispatch(
+    mode: str,
+    named_operator: object,
+) -> None:
+    inputs = _inputs(batch_size=1, sequence_length=7, seed=29)
+    cu_seqlens = torch.tensor([0, 2, 7], device="cuda", dtype=torch.int32)
+    state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
+    initial_state = 0.01 * torch.randn(
+        2, 1, HEAD_SIZE, HEAD_SIZE, device="cuda", dtype=state_dtype
+    )
+    expected = rwkv7(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        algorithm="recurrent",
+        mode=mode,
+    )
+    actual = named_operator(  # type: ignore[operator]
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(actual[0], expected[0])
+    assert torch.equal(actual[1], expected[1])
 
 
 def test_duplicate_state_indices_fail_before_cuda_launch() -> None:
