@@ -1,139 +1,175 @@
-<!-- KDA-specific documentation disabled for RWKV adaptation.
-# FlashKDA
+# FlashRWKV
 
-FlashKDA: Flash Kimi Delta Attention — high-performance KDA kernels built on CUTLASS
+FlashRWKV provides a numerical reference and CUDA kernels for the canonical
+RWKV-7 recurrence. It exposes one operator contract for fixed-length training
+and packed-varlen serving instead of embedding model-specific time-mix
+parameter generation in the kernel.
 
-## News
+The current implementation targets head size 64 and canonical FP32
+`state[K,V]`. It has been built and correctness-tested on an NVIDIA RTX PRO
+6000 Blackwell GPU with PyTorch 2.11 and CUDA 13.0.
 
-- **2026-04-22** — Deep-Dive Blog: the design decisions behind FlashKDA v1, read it [here](docs/20260420-flashkda-v1-deep-dive.md).
+## Capabilities
 
--->
-## Requirements
-- SM90 and above
-- CUDA 12.9 and above
-- PyTorch 2.4 and above
+| Algorithm | Layout | Numerical mode | Autograd | State behavior |
+| --- | --- | --- | --- | --- |
+| `reference` | fixed and packed | FP32 oracle | yes | functional |
+| `recurrent` | fixed and packed | `fp32io16`, `fp16` | no | functional |
+| `chunk` | fixed | `fp32io16` | yes | functional |
+| `chunk` | packed | `fp32io16` | no | functional |
+| `rwkv7_recurrent_stateful` | packed | `fp32io16`, `fp16` | no | in-place state pool |
 
-## Installation
-```bash
-git clone https://github.com/MoonshotAI/FlashKDA.git flash-kda
-cd flash-kda
-git submodule update --init --recursive
-pip install -v --no-build-isolation .
+`algorithm="auto"` currently selects recurrent. Correctness-gated SM120
+measurements found no sequence-length crossover where the current
+materialized or factor/recompute chunk implementation beats recurrent. Chunk
+remains explicitly selectable for training and continued optimization.
+
+## Operator
+
+For every token, FlashRWKV evaluates
+
+```text
+S_t = diag(exp(log_decay_t)) S_(t-1)
+    + b_t (a_t^T S_(t-1))
+    + k_t v_t^T
+y_t = scale * r_t^T S_t
 ```
 
-By default, the build detects the current CUDA device and compiles for that architecture. For wheel or CI builds, compile all supported architectures explicitly:
-
-```bash
-FLASH_KDA_CUDA_ARCHS=all pip install -v --no-build-isolation .
-```
-
-Supported values are `auto` (default), `all`, or a comma-separated arch list such as `90a,100a`.
-
-<!-- KDA-specific backend documentation disabled for RWKV adaptation.
-## Using FlashKDA as an FLA backend
-
-Once installed, FlashKDA is auto-dispatched from `flash-linear-attention`'s `chunk_kda`. See [fla-org/flash-linear-attention#852](https://github.com/fla-org/flash-linear-attention/pull/852) for integration details.
--->
-
-**Requirements**
-
-1. Install `flash-linear-attention >= 0.5.0`:
-   ```bash
-   pip install -U flash-linear-attention
-   ```
-<!-- KDA-specific runtime, benchmark, test, and API documentation disabled.
-2. Call `chunk_kda` under `torch.inference_mode()`
-   ```python
-   import torch
-   from fla.ops.kda import chunk_kda
-
-   with torch.inference_mode():
-       out, final_state = chunk_kda(
-           q=q, k=k, v=v, g=g, beta=beta,
-           scale=scale,
-           initial_state=h0,
-           output_final_state=True,
-           use_gate_in_kernel=True,
-           use_qk_l2norm_in_kernel=True,
-           use_beta_sigmoid_in_kernel=True,
-           safe_gate=True,
-           A_log=A_log, dt_bias=dt_bias,
-           lower_bound=lower_bound,
-           transpose_state_layout=True,
-           cu_seqlens=cu_seqlens,
-       )
-   ```
-
-**Opt out:** set `FLA_FLASH_KDA=0` to fall back to the Triton path.
-
-**Debug dispatch:** add `logging.basicConfig(level=logging.INFO)` to see `[FLA Backend] kda.chunk_kda -> flashkda` on hit, or `... rejected: <reason>` on miss.
-
-## Performance
-
-See [BENCHMARK_H20.md](BENCHMARK_H20.md).
-
-## Tests
-
-```bash
-bash tests/test.sh
-```
-
-- `tests/test_fwd.py` — correctness tests (exact match against the torch reference; compared with `flash-linear-attention`)
-
-
-## Kernel API
-
-### `flash_kda.fwd`
+Inputs use `[B,T,H,D]`, with `D=64`. The canonical state uses
+`[N,H,K,V]`, not the transposed `[N,H,V,K]` layout used by some RWKV serving
+kernels.
 
 ```python
-flash_kda.fwd(q, k, v, g, beta, scale, out, A_log, dt_bias, lower_bound,
-              initial_state=None, final_state=None, cu_seqlens=None)
+import torch
+from flash_rwkv import rwkv7
+
+B, T, H, D = 2, 128, 32, 64
+shape = (B, T, H, D)
+r, log_decay, k, v, a, b = (
+    torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    for _ in range(6)
+)
+log_decay = -0.5 * torch.sigmoid(log_decay)
+initial_state = torch.zeros(
+    B, H, D, D, device="cuda", dtype=torch.float32
+)
+
+output, final_state = rwkv7(
+    r,
+    log_decay,
+    k,
+    v,
+    a,
+    b,
+    initial_state=initial_state,
+    output_final_state=True,
+    algorithm="chunk",
+)
 ```
 
-**Parameters:**
+RWKV-LM training code can keep its raw decay logits outside the core
+operator:
 
-| Parameter | Dtype | Shape | Description |
-|---|---|---|---|
-| `q` | bf16 | `[B, T, H, K]` | Query |
-| `k` | bf16 | `[B, T, H, K]` | Key |
-| `v` | bf16 | `[B, T, H, V]` | Value |
-| `g` | bf16 | `[B, T, H, K]` | Gate before activation |
-| `beta` | bf16 | `[B, T, H]` | Beta logits (pre-activation; sigmoid applied internally) |
-| `scale` | float | scalar | scaling factor |
-| `out` | bf16 | `[B, T, H, V]` | Output tensor |
-| `A_log` | fp32 | `[H]` | Log-gate parameter |
-| `dt_bias` | fp32 | `[H, K]` | Gate bias |
-| `lower_bound` | float | scalar | Gate lower bound (range from -5.0 to 0) |
-| `initial_state` | bf16/fp32/None | `[B, H, V, K]` or `[N, H, V, K]` | (optional) Initial recurrent state |
-| `final_state` | bf16/fp32/None | `[B, H, V, K]` or `[N, H, V, K]` | (optional, output) Final recurrent state |
-| `cu_seqlens` | int64 | `[N+1]` | (optional) Cumulative sequence lengths for variable-length batching |
+```python
+from flash_rwkv import rwkv7_from_decay_logits
 
-- Currently requires `K = V = 128`.
-- `initial_state` / `final_state` accept `None` (stateless), bf16, or fp32 tensors. When both are provided, their dtypes must match.
-- When `cu_seqlens` is provided, `B` must be 1, `T` is the total length across all sequences, and `initial_state` / `final_state` have shape `[N, H, V, K]`.
-- When `cu_seqlens` is `None`, each batch element is treated as an independent sequence, and the state shape is `[B, H, V, K]`.
+output, final_state = rwkv7_from_decay_logits(
+    r,
+    decay_logits,
+    k,
+    v,
+    a,
+    b,
+    initial_state=initial_state,
+    output_final_state=True,
+    algorithm="chunk",
+)
+```
 
--->
-## Development
+The adapter applies
+`log_decay = -exp(-0.5) * sigmoid(decay_logits)` with a differentiable
+PyTorch operation, so the CUDA backward returns the canonical
+`dlog_decay` and PyTorch applies the remaining chain rule.
 
-To set up IntelliSense (clangd) for the CUDA/C++ sources, run:
+Packed inputs use `B=1`, concatenate tokens along `T`, and provide strictly
+increasing `cu_seqlens[N+1]`. For in-place serving, also provide unique
+`state_indices[N]` to `rwkv7_recurrent_stateful`; only those state-pool rows
+are updated.
+
+## Installation
+
+A CUDA-enabled PyTorch environment, a matching CUDA toolkit, Ninja, and a C++
+toolchain are required.
 
 ```bash
-bash setup_clangd.sh
+git clone https://github.com/rwkv-rs/FlashRWKV.git
+cd FlashRWKV
+python -m pip install -v --no-build-isolation .
 ```
 
-This generates a `.clangd` file with the correct repository paths and installs the global clangd `config.yaml` to `~/.config/clangd/`.
+The Helicopter checkout installs this repository through its dedicated
+`flash-rwkv` dependency group and control-plane preparation workflow.
 
-<!-- KDA-specific citation disabled for RWKV adaptation.
-## Citation
+## Correctness and measurement
 
-```bibtex
-@misc{flashkda2026,
-      title={FlashKDA: Flash Kimi Delta Attention},
-      author={Yutian Chen, Zhiyuan Li, Yucheng Wang, Ming Wei},
-      year={2026},
-      publisher = {GitHub},
-      howpublished = {\url{https://github.com/MoonshotAI/FlashKDA}},
-}
+Run the package regression:
+
+```bash
+pytest -q
 ```
--->
+
+Run the unified correctness-gated JSON benchmark:
+
+```bash
+python benchmarks/benchmark_rwkv7.py
+```
+
+The runner reuses the Albatross/vllm-rwkv decode, equal-chunk, 1..16 ragged,
+long-ragged, and skewed-ragged profiles. It compares public functional calls
+for FlashRWKV recurrent, FlashRWKV chunk, and FLA `chunk_rwkv7` with identical
+inputs and one CUDA event/synchronization boundary. In-place recurrent
+state-pool measurements are reported separately and are not labelled
+identical-input latency.
+
+Additional development runners are:
+
+- `benchmarks/benchmark_training.py`: fixed-length FlashRWKV/FLA
+  forward-backward comparison using the same output and final-state upstream
+  gradients;
+- `benchmarks/autotune_chunk.py`: exhaustive chunk configuration sweep and
+  versioned cache generation;
+- `benchmarks/compare_chunk_strategies.py`: materialized,
+  factor/recompute, and recurrent low-level behavior-cell comparison;
+- `benchmarks/benchmark_recurrent.py`: detailed recurrent numerical-mode and
+  stateful-boundary characterization.
+
+Every timing runner gates the exact case on output and final-state
+correctness, retains raw samples, and records source/binary revision,
+hardware, runtime, shape, sequence lengths, configuration, and numerical
+mode in JSON. Optimization decisions and profiler evidence are archived in
+`docs/optimization/attempts/`.
+
+## Provenance and licenses
+
+FlashRWKV began as a code-only copy of
+[MoonshotAI/FlashKDA](https://github.com/MoonshotAI/FlashKDA). Its KDA
+operator, package, kernels, tests, and benchmark data-plane have been removed.
+The remaining project uses FlashKDA's MIT-licensed repository history and
+general separation of token-parallel preparation from recurrent state work as
+design context; no KDA mathematical API remains.
+
+The recurrent kernels and serving benchmark profiles are adapted from
+[rwkv-rs/vllm-rwkv](https://github.com/rwkv-rs/vllm-rwkv) at
+`6d683f9e49a2997e405c47edc147872c8609513b`, whose dense-kernel lineage
+includes [BlinkDL/Albatross](https://github.com/BlinkDL/Albatross). The
+fixed-length backward checkpoint/backstepping method is adapted from
+[BlinkDL/RWKV-LM](https://github.com/BlinkDL/RWKV-LM) at
+`952102498e9ed367ea0a59ee64106916d474d30f`. Those derived files are
+Apache-2.0 and retain SPDX/source headers.
+
+[FLA](https://github.com/fla-org/flash-linear-attention) `chunk_rwkv7` at
+`3adcb3c50a9e78c6ef6d173543305b1d5ef8fa4c` is an external correctness and
+performance comparison dependency; its implementation is not bundled here.
+
+See [NOTICE](NOTICE), [LICENSE](LICENSE), and
+[LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt) for the file-level boundary.

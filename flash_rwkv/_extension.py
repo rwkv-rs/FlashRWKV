@@ -15,7 +15,8 @@ def _load_extension() -> ModuleType:
     except ImportError as error:
         raise RuntimeError(
             "FlashRWKV CUDA extension is not built for this source and environment; "
-            "prepare the flash-rwkv dependency group through helicopter-dev"
+            "install the package with its CUDA build dependencies before using "
+            "an accelerated algorithm"
         ) from error
     return _C
 

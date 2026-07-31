@@ -1,10 +1,30 @@
 FlashRWKV
 
-The files csrc/bindings.cpp, csrc/recurrent/recurrent_fp32.cu,
-csrc/recurrent/recurrent_fp16.cu, and benchmarks/benchmark_recurrent.py contain
-material adapted from the vLLM project and its RWKV/Albatross integration.
-Those files are licensed under the Apache License, Version 2.0 and retain their
-source revision in the file header. See LICENSES/Apache-2.0.txt.
+This repository began from MoonshotAI/FlashKDA, distributed under the MIT
+License. The original KDA operator, Python package, CUDA data-plane, tests,
+and benchmarks have been removed. The repository history and remaining
+general project material retain the MoonshotAI copyright and MIT notice.
 
-The remaining original FlashRWKV work is licensed under the repository's MIT
+The following files contain material adapted from the vLLM project and its
+RWKV/Albatross integration at rwkv-rs/vllm-rwkv commit
+6d683f9e49a2997e405c47edc147872c8609513b:
+
+- csrc/bindings.cpp
+- csrc/recurrent/recurrent_fp32.cu
+- csrc/recurrent/recurrent_fp16.cu
+- benchmarks/benchmark_recurrent.py
+- benchmarks/benchmark_rwkv7.py
+
+The following file contains a checkpoint/backstepping method adapted from
+BlinkDL/RWKV-LM commit 952102498e9ed367ea0a59ee64106916d474d30f:
+
+- csrc/chunk/backward_fp32.cu
+
+Those derived files are licensed under the Apache License, Version 2.0 and
+retain SPDX/source-revision headers. See LICENSES/Apache-2.0.txt.
+
+The FLA chunk_rwkv7 implementation is used only as an external correctness
+and benchmark dependency. No FLA implementation source is bundled here.
+
+All other original FlashRWKV work is licensed under the repository's MIT
 license unless a file states otherwise.
