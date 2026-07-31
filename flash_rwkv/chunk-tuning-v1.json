@@ -1,14 +1,4 @@
 {
-  "schema_version": 1,
-  "source": "FlashRWKV canonical-device offline autotuning",
-  "evidence_artifact": "20260730T230302Z-2627268/flash-rwkv-chunk-autotune.json",
-  "hardware": {
-    "compute_capability": "12.0",
-    "device_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
-    "torch_cuda_version": "13.0",
-    "torch_version": "2.11.0+cu130"
-  },
-  "native_source_set_sha256": "b7e82395c285aa3943b9d43201245437cffa4a4675e8891853b53238af451858",
   "entries": {
     "sm120|bfloat16|fp32io16|fixed|long": {
       "config": {
@@ -18,7 +8,7 @@
         "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.208064004778862,
+      "p50_ms": 0.20790399610996246,
       "profile": "fixed_long"
     },
     "sm120|bfloat16|fp32io16|fixed|medium": {
@@ -26,10 +16,10 @@
         "build_warps": 4,
         "chunk_size": 16,
         "stages": 1,
-        "state_tile": 32
+        "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.08966399729251862,
+      "p50_ms": 0.08953599631786346,
       "profile": "fixed_medium"
     },
     "sm120|bfloat16|fp32io16|fixed|very_long": {
@@ -37,10 +27,10 @@
         "build_warps": 4,
         "chunk_size": 64,
         "stages": 1,
-        "state_tile": 64
+        "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.6036159992218018,
+      "p50_ms": 0.603488028049469,
       "profile": "fixed_very_long"
     },
     "sm120|bfloat16|fp32io16|packed|long": {
@@ -48,10 +38,10 @@
         "build_warps": 4,
         "chunk_size": 32,
         "stages": 1,
-        "state_tile": 64
+        "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.2933120131492615,
+      "p50_ms": 0.29289600253105164,
       "profile": "packed_long"
     },
     "sm120|bfloat16|fp32io16|packed|medium": {
@@ -62,7 +52,7 @@
         "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.11033599823713303,
+      "p50_ms": 0.1103999987244606,
       "profile": "packed_medium"
     },
     "sm120|bfloat16|fp32io16|packed|very_long": {
@@ -73,7 +63,7 @@
         "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.9887040257453918,
+      "p50_ms": 0.9728959798812866,
       "profile": "packed_very_long"
     },
     "sm120|float16|fp32io16|fixed|long": {
@@ -81,10 +71,10 @@
         "build_warps": 4,
         "chunk_size": 64,
         "stages": 1,
-        "state_tile": 32
+        "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.20739200711250305,
+      "p50_ms": 0.20828799903392792,
       "profile": "fixed_long"
     },
     "sm120|float16|fp32io16|fixed|medium": {
@@ -95,7 +85,7 @@
         "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.08972799777984619,
+      "p50_ms": 0.08979199826717377,
       "profile": "fixed_medium"
     },
     "sm120|float16|fp32io16|fixed|very_long": {
@@ -103,10 +93,10 @@
         "build_warps": 4,
         "chunk_size": 64,
         "stages": 1,
-        "state_tile": 32
+        "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.6037759780883789,
+      "p50_ms": 0.6048319935798645,
       "profile": "fixed_very_long"
     },
     "sm120|float16|fp32io16|packed|long": {
@@ -114,10 +104,10 @@
         "build_warps": 4,
         "chunk_size": 32,
         "stages": 1,
-        "state_tile": 32
+        "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.292959988117218,
+      "p50_ms": 0.2927039861679077,
       "profile": "packed_long"
     },
     "sm120|float16|fp32io16|packed|medium": {
@@ -125,10 +115,10 @@
         "build_warps": 4,
         "chunk_size": 32,
         "stages": 1,
-        "state_tile": 64
+        "state_tile": 32
       },
       "correct_candidates": 27,
-      "p50_ms": 0.1101439967751503,
+      "p50_ms": 0.11049599945545197,
       "profile": "packed_medium"
     },
     "sm120|float16|fp32io16|packed|very_long": {
@@ -136,11 +126,21 @@
         "build_warps": 4,
         "chunk_size": 64,
         "stages": 1,
-        "state_tile": 32
+        "state_tile": 64
       },
       "correct_candidates": 27,
-      "p50_ms": 0.9896640181541443,
+      "p50_ms": 0.9735680222511292,
       "profile": "packed_very_long"
     }
-  }
+  },
+  "evidence_artifact": "20260731T000342Z-2696407/flash-rwkv-chunk-autotune.json",
+  "hardware": {
+    "compute_capability": "12.0",
+    "device_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "torch_cuda_version": "13.0",
+    "torch_version": "2.11.0+cu130"
+  },
+  "native_source_set_sha256": "adf6c02478551cd5e454ac58d241d88f9ae6d5b4f665615c38ce4f800ed018c2",
+  "schema_version": 1,
+  "source": "FlashRWKV canonical-device offline autotuning"
 }
