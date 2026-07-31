@@ -70,7 +70,7 @@ def test_training_config_caps_only_the_checkpoint_interval() -> None:
     [
         ("float16", "fixed", "medium", ChunkConfig(16, 4, 1, 64)),
         ("bfloat16", "fixed", "long", ChunkConfig(64, 4, 1, 32)),
-        ("float16", "packed", "medium", ChunkConfig(32, 4, 1, 64)),
+        ("float16", "packed", "medium", ChunkConfig(32, 4, 1, 32)),
         ("bfloat16", "packed", "very_long", ChunkConfig(64, 4, 1, 64)),
     ],
 )
