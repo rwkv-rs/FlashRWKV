@@ -9,9 +9,11 @@
 - Independent comparison source:
   `fla-org/flash-linear-attention@3adcb3c50a9e78c6ef6d173543305b1d5ef8fa4c`
 - Targeted correctness evidence:
-  `artifacts/feature-kernel-12a9715266/20260730T233108Z-2657690/`
+  `artifacts/feature-kernel-12a9715266/20260731T002238Z-2721314/`
+- Long-sequence benchmark evidence:
+  `artifacts/feature-kernel-12a9715266/20260731T002330Z-2722425/`
 - Leaf-wide regression evidence:
-  `artifacts/feature-kernel-12a9715266/20260730T233428Z-2660727/`
+  `artifacts/feature-kernel-12a9715266/20260731T003522Z-2735698/`
 
 ## Contract
 
@@ -73,8 +75,9 @@ independent FP32 Torch recurrence and FLA `chunk_rwkv7`. It covers:
 - all six canonical token gradients, final state, and output.
 
 Every FlashRWKV and FLA result passed the signed relative-RMSE gates in
-`tests/fixtures/tolerances-v1.json`. The targeted run passed `3/3`; the
-subsequent package regression passed `108/108`.
+`tests/fixtures/tolerances-v1.json`. The targeted config/autograd run passed
+`29/29`, including the length-257 regression; the subsequent package
+regression passed `110/110`.
 
 ## Decision
 
