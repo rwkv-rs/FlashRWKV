@@ -13,6 +13,7 @@ from .config import (
     chunk_tuning_key,
     select_algorithm,
     select_chunk_config,
+    training_chunk_config,
 )
 from .reference import rwkv7_reference
 from .validation import ValidatedLayout, validate_rwkv7_inputs
@@ -277,7 +278,11 @@ def _rwkv7_chunk_cuda(
         chunk_size=chunk_size,
         config=chunk_config,
     )
-    config = selected_config.config
+    config = (
+        training_chunk_config(selected_config.config)
+        if requires_grad
+        else selected_config.config
+    )
     (
         sequence_chunk_offsets,
         chunk_token_starts,

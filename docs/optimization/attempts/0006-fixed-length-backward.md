@@ -33,6 +33,12 @@ training domain is therefore the RWKV-LM adapter
 `log_decay = -exp(-0.5) * sigmoid(decay_logits)`, whose decay is finite and
 strictly nonzero in the supported floating-point formats.
 
+Training always checkpoints every 16 tokens, independently of the
+forward-only tuning cache or an explicitly requested larger forward chunk.
+The build-warp, pipeline-stage, and state-tile choices remain unchanged.
+This follows the RWKV-LM reconstruction interval and bounds numerical
+amplification while backstepping through `exp(log_decay)`.
+
 ## Checkpoint policy
 
 The forward allocates materialized transform and bias workspaces only for the
@@ -60,6 +66,8 @@ independent FP32 Torch recurrence and FLA `chunk_rwkv7`. It covers:
 
 - BF16, length 17, output-only loss and a masked tail chunk;
 - FP16, length 33, output plus final-state loss and two tail boundaries;
+- FP16, length 257, output plus final-state loss, with an explicitly requested
+  64-token forward chunk reduced to 16-token training checkpoints;
 - nonzero FP32 initial state with `dS0`;
 - batch size 2 with only `r`, `v`, and `b` requesting gradients;
 - all six canonical token gradients, final state, and output.

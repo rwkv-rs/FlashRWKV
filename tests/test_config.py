@@ -11,6 +11,7 @@ from flash_rwkv.config import (
     select_algorithm,
     select_chunk_config,
     sequence_length_bucket,
+    training_chunk_config,
 )
 
 
@@ -56,6 +57,12 @@ def test_missing_cache_key_uses_verified_conservative_fallback() -> None:
 
     assert selection.source == "conservative_fallback"
     assert selection.config == ChunkConfig(16, 2, 1, 64)
+
+
+def test_training_config_caps_only_the_checkpoint_interval() -> None:
+    selected = ChunkConfig(64, 4, 2, 32)
+
+    assert training_chunk_config(selected) == ChunkConfig(16, 4, 2, 32)
 
 
 @pytest.mark.parametrize(

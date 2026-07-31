@@ -91,6 +91,11 @@ The adapter applies
 PyTorch operation, so the CUDA backward returns the canonical
 `dlog_decay` and PyTorch applies the remaining chain rule.
 
+Fixed-length autograd uses a 16-token checkpoint interval for stable reverse
+state reconstruction. Forward-only calls may still use autotuned 16-, 32-, or
+64-token chunks; requesting a larger chunk does not weaken the training
+checkpoint policy.
+
 Packed inputs use `B=1`, concatenate tokens along `T`, and provide strictly
 increasing `cu_seqlens[N+1]`. For in-place serving, also provide unique
 `state_indices[N]` to `rwkv7_recurrent_stateful`; only those state-pool rows

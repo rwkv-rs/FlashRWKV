@@ -28,7 +28,11 @@ from flash_rwkv import (
     rwkv7_from_decay_logits,
     rwkv7_reference,
 )
-from flash_rwkv.config import chunk_tuning_key, select_chunk_config
+from flash_rwkv.config import (
+    chunk_tuning_key,
+    select_chunk_config,
+    training_chunk_config,
+)
 
 
 INPUT_NAMES = ("r", "decay_logits", "k", "v", "a", "b", "initial_state")
@@ -215,6 +219,7 @@ def _providers(
         max_sequence_length=sample.shape[1],
     )
     selected = select_chunk_config(key)
+    effective_training_config = training_chunk_config(selected.config)
     flash_inputs, flash_state = _leaf_inputs(inputs)
 
     def flash_call() -> TrainingResult:
@@ -280,7 +285,11 @@ def _providers(
                 "mode": "fp32io16",
                 "tuning_key": key.identifier,
                 "selection_source": selected.source,
-                "chunk_config": asdict(selected.config),
+                "selected_forward_config": asdict(selected.config),
+                "effective_training_config": asdict(
+                    effective_training_config
+                ),
+                "checkpoint_policy": "fixed_16_token_boundaries",
             },
             call=flash_call,
         ),

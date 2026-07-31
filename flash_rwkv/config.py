@@ -15,6 +15,7 @@ _CACHE_PATH = Path(__file__).with_name("chunk-tuning-v1.json")
 _CHUNK_SIZES = (16, 32, 64)
 _BUILD_PIPELINES = ((2, 1), (4, 1), (4, 2))
 _STATE_TILES = (16, 32, 64)
+TRAINING_CHECKPOINT_CHUNK_SIZE = 16
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,17 @@ def enumerate_chunk_configs() -> tuple[ChunkConfig, ...]:
         for chunk_size in _CHUNK_SIZES
         for build_warps, stages in _BUILD_PIPELINES
         for state_tile in _STATE_TILES
+    )
+
+
+def training_chunk_config(config: ChunkConfig) -> ChunkConfig:
+    """Apply the stable RWKV-LM reverse-reconstruction checkpoint policy."""
+
+    return ChunkConfig(
+        chunk_size=TRAINING_CHECKPOINT_CHUNK_SIZE,
+        build_warps=config.build_warps,
+        stages=config.stages,
+        state_tile=config.state_tile,
     )
 
 
