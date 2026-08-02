@@ -146,6 +146,32 @@ def test_gpu_workflow_owns_its_exact_fla_reference_environment() -> None:
     assert "module_path.is_relative_to(package_root)" in workflow
 
 
+def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
+    workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
+    quick_workflow = (ROOT / ".github/workflows/quick-contract.yml").read_text()
+
+    assert "pr_number:" in workflow
+    assert "source_revision:" in workflow
+    assert "context.sha !== sourceRevision" in workflow
+    assert "pull.head.sha !== sourceRevision" in workflow
+    assert "ref: ${{ steps.target.outputs.head_sha }}" in workflow
+    assert "name: flash-rwkv-pro6000-${{ steps.target.outputs.head_sha }}" in workflow
+    assert "runtime_semantic_revision" in workflow
+    assert "listJobsForWorkflowRunAttempt" in workflow
+    assert "ARTIFACT_ID: ${{ steps.evidence.outputs.artifact-id }}" in workflow
+    assert "ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}" in workflow
+    assert "pull_number: prNumber" in workflow
+    assert "body: `${prefix}${prefix ? '\\n\\n' : ''}${body}`" in workflow
+    assert "decode_b2048" in workflow
+    assert "B=2048 packed validator evidence is incomplete" in workflow
+    assert "invalid StateTune RESULT identity" in workflow
+    assert (
+        "tests/infer/wkv7/"
+        "test_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py"
+        in quick_workflow
+    )
+
+
 def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     validation = _function_source(
         "flash_rwkv/validation.py",

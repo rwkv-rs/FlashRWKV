@@ -23,6 +23,9 @@ from flash_rwkv.provenance import imported_source_family
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
 HEAD_SIZE = 64
 HEAD_COUNT = 2
+PROVIDER = "flash_rwkv"
+OPERATOR_NAME = "statetune_recurrent_fp32io16_forward_backward"
+MODE = "fp32io16"
 
 
 def _git_revision() -> str | None:
@@ -232,6 +235,9 @@ def main() -> None:
     )
     arguments = parser.parse_args()
     cases = tuple(_parse_case(value) for value in arguments.cases)
+    source_revision = _git_revision()
+    if source_revision is None or len(source_revision) != 40:
+        raise RuntimeError("StateTune benchmark requires a full Git source revision")
     rows = []
     for index, (batch_size, token_count) in enumerate(cases):
         inputs, initial_state, grad_output, grad_final_state = _inputs(
@@ -261,13 +267,23 @@ def main() -> None:
             token_count=token_count,
             samples_ms=samples,
         ).as_dict()
+        row.update(
+            provider=PROVIDER,
+            name=OPERATOR_NAME,
+            source_revision=source_revision,
+            mode=MODE,
+        )
         rows.append({**row, "correctness": correctness, "raw_samples_ms": samples})
-        print(format_result(row))
+        print(
+            f"{format_result(row)} provider={row['provider']} "
+            f"name={row['name']} source_revision={row['source_revision']} "
+            f"mode={row['mode']}"
+        )
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     payload = {
         "schema_version": 1,
         "benchmark": "flash_rwkv_statetune_nonzero_state_forward_backward",
-        "revision": _git_revision(),
+        "revision": source_revision,
         "source_provenance": asdict(imported_source_family("rwkv-lm-pretrain")),
         "wkv_mode": "fp32io16",
         "dtype": "bfloat16",

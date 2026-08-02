@@ -23,12 +23,14 @@ jobs:
       - name: Lint maintained public contracts
         run: |
           .venv/bin/ruff check \
+            benchmarks/infer/wkv7/benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py \
             benchmarks/statetune/wkv7/benchmark_statetune_smxx_recurrent_fp32io16_backward.py \
             flash_rwkv/benchmark_contract.py \
             flash_rwkv/channel_mix.py \
             flash_rwkv/head_l2wrap_ce.py \
             flash_rwkv/inference_blocks.py \
             flash_rwkv/l2wrap_ce.py \
+            flash_rwkv/ops.py \
             flash_rwkv/provenance.py \
             flash_rwkv/registry.py \
             flash_rwkv/time_mix.py \
@@ -36,11 +38,13 @@ jobs:
             tests/pretrain/wkv7/test_pretrain_smxx_cmix_bf16_forward_backward.py \
             tests/pretrain/wkv7/test_pretrain_smxx_head_l2wrap_ce_bf16_forward.py \
             tests/infer/wkv7/test_infer_smxx_fused_fp16_forward.py \
+            tests/infer/wkv7/test_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py \
             tests/pretrain/wkv7/test_pretrain_smxx_l2wrap_ce_bf16_forward_backward.py \
             tests/test_benchmark_contract.py \
             tests/test_native_source_layout.py \
             tests/test_provenance.py \
             tests/test_registry.py \
+            tests/racecheck/fused_operators.py \
             tests/pretrain/wkv7/test_pretrain_smxx_tmix_bf16_forward_backward.py
       - name: Run CPU contract tests
         env:
@@ -51,6 +55,7 @@ jobs:
             tests/test_benchmark_contract.py \
             tests/test_config.py \
             tests/infer/wkv7/test_infer_smxx_fused_fp16_forward.py \
+            tests/infer/wkv7/test_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py \
             tests/test_native_source_layout.py \
             tests/test_provenance.py \
             tests/test_registry.py

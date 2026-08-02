@@ -4,13 +4,23 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Existing FlashRWKV pull request number to update
+        required: true
+        type: number
+      source_revision:
+        description: Exact approved pull request head revision
+        required: true
+        type: string
 
 permissions:
+  actions: read
   contents: read
   pull-requests: write
 
 concurrency:
-  group: flash-rwkv-pro6000-${{ github.event.pull_request.number || github.ref }}
+  group: flash-rwkv-pro6000-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -23,13 +33,61 @@ jobs:
     runs-on: [self-hosted, linux, x64, rwkv-sha-pro6000x8]
     timeout-minutes: 90
     steps:
+      - name: Resolve target PR and exact revision
+        id: target
+        uses: actions/github-script@v7
+        env:
+          DISPATCH_PR_NUMBER: ${{ inputs.pr_number }}
+          DISPATCH_SOURCE_REVISION: ${{ inputs.source_revision }}
+        with:
+          script: |
+            let prNumber;
+            let sourceRevision;
+            if (context.eventName === 'pull_request') {
+              prNumber = context.payload.pull_request.number;
+              sourceRevision = context.payload.pull_request.head.sha;
+            } else {
+              prNumber = Number(process.env.DISPATCH_PR_NUMBER);
+              sourceRevision = process.env.DISPATCH_SOURCE_REVISION;
+              if (!Number.isInteger(prNumber) || prNumber <= 0) {
+                core.setFailed(`invalid pull request number: ${process.env.DISPATCH_PR_NUMBER}`);
+                return;
+              }
+              if (!/^[0-9a-f]{40}$/.test(sourceRevision)) {
+                core.setFailed(`source_revision must be a full lowercase Git OID: ${sourceRevision}`);
+                return;
+              }
+              if (context.sha !== sourceRevision) {
+                core.setFailed(`dispatch ref resolved to ${context.sha}, not ${sourceRevision}`);
+                return;
+              }
+            }
+            const {data: pull} = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: prNumber,
+            });
+            if (pull.state !== 'open') {
+              core.setFailed(`pull request #${prNumber} is not open`);
+              return;
+            }
+            if (pull.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+              core.setFailed(`pull request #${prNumber} is not an in-repository branch`);
+              return;
+            }
+            if (pull.head.sha !== sourceRevision) {
+              core.setFailed(`pull request head is ${pull.head.sha}, not ${sourceRevision}`);
+              return;
+            }
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_sha', sourceRevision);
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ steps.target.outputs.head_sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify clean tracked source checkout
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
           PREBUILD_PROVENANCE: ${{ runner.temp }}/flash-rwkv-prebuild-provenance.json
         run: |
           python3 - <<'PY'
@@ -47,12 +105,22 @@ jobs:
               ).stdout.strip()
 
           head_sha = git("rev-parse", "HEAD")
+          runtime_semantic_revision = git(
+              "log",
+              "-1",
+              "--format=%H",
+              "--",
+              "csrc",
+              "flash_rwkv",
+              "setup.py",
+          )
           tracked_status = git("status", "--short", "--untracked-files=no")
           worktree_diff_paths = git("diff", "--name-only").splitlines()
           index_diff_paths = git("diff", "--cached", "--name-only").splitlines()
           payload = {
               "head_sha": head_sha,
               "expected_head_sha": os.environ["HEAD_SHA"],
+              "runtime_semantic_revision": runtime_semantic_revision,
               "tracked_source_dirty": bool(tracked_status),
               "index_dirty": bool(index_diff_paths),
               "tracked_status_entries": tracked_status.splitlines(),
@@ -148,6 +216,7 @@ jobs:
             --output artifacts/statetune-benchmark.json
           .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py \
             --profiles decode_b320 equal_chunk16_b320 ragged_chunk16_b320 \
+            decode_b2048 \
             --modes fp32io16 fp16 \
             --warmup-iters 3 \
             --samples 10 \
@@ -155,7 +224,7 @@ jobs:
             --output artifacts/packed-recurrent-benchmark.json
       - name: Record immutable run identity
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
           PREBUILD_PROVENANCE: ${{ runner.temp }}/flash-rwkv-prebuild-provenance.json
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -208,8 +277,27 @@ jobs:
           )
           for path in benchmark_paths:
               payload = json.loads(path.read_text())
+              required_identity_fields = {
+                  "provider", "name", "source_revision"
+              }
+              if path.name == "statetune-benchmark.json":
+                  required_identity_fields.add("mode")
               report.extend((f"#### `{path.name}`", "", "```text"))
               for row in payload["rows"]:
+                  missing = sorted(required_identity_fields - row.keys())
+                  if missing:
+                      raise SystemExit(
+                          f"{path.name} RESULT row lacks fields: {missing}"
+                      )
+                  if (
+                      path.name == "statetune-benchmark.json"
+                      and (
+                          row["source_revision"] != os.environ["HEAD_SHA"]
+                          or row["mode"] != "fp32io16"
+                          or row["provider"] != "flash_rwkv"
+                      )
+                  ):
+                      raise SystemExit(f"invalid StateTune RESULT identity: {row}")
                   result = (
                       f"RESULT B={row['B']} T={row['T']} iters={row['iters']} "
                       f"p10_ms={metric(row['p10_ms'])} "
@@ -220,7 +308,7 @@ jobs:
                   )
                   identity = " ".join(
                       f"{field}={row[field]}"
-                      for field in ("provider", "name", "source_revision")
+                      for field in ("provider", "name", "source_revision", "mode")
                       if field in row
                   )
                   report.append(f"{result} {identity}".rstrip())
@@ -232,6 +320,23 @@ jobs:
               raise SystemExit("packed benchmark source checkout is dirty")
           if not packed["all_cases_correct"]:
               raise SystemExit("packed recurrent correctness gate failed")
+          if packed["source"]["leaf_revision"] != os.environ["HEAD_SHA"]:
+              raise SystemExit("packed benchmark source revision is mismatched")
+          b2048 = [
+              row for row in packed["results"]
+              if row["profile"] == "decode_b2048"
+          ]
+          if (
+              len(b2048) != 2
+              or {row["mode"] for row in b2048} != {"fp32io16", "fp16"}
+              or any(row["sequence_count"] != 2048 for row in b2048)
+              or any(
+                  row["metadata_validation_complexity"]
+                  != "O(sequence_count + state_pool_size)"
+                  for row in b2048
+              )
+          ):
+              raise SystemExit("B=2048 packed validator evidence is incomplete")
           graph_evidence = [
               row["device_metadata"]["cuda_graph_evidence"]
               for row in packed["results"]
@@ -271,6 +376,7 @@ jobs:
           )
           if (
               prebuild["head_sha"] != os.environ["HEAD_SHA"]
+              or len(prebuild["runtime_semantic_revision"]) != 40
               or prebuild["tracked_source_dirty"]
               or prebuild["index_dirty"]
               or prebuild["worktree_diff_paths"]
@@ -339,6 +445,7 @@ jobs:
               })
           Path("artifacts/run-identity.json").write_text(json.dumps({
               "head_sha": os.environ["HEAD_SHA"],
+              "runtime_semantic_revision": prebuild["runtime_semantic_revision"],
               "run_id": os.environ["RUN_ID"],
               "run_attempt": os.environ["RUN_ATTEMPT"],
               "files": inventory,
@@ -348,27 +455,46 @@ jobs:
         id: evidence
         uses: actions/upload-artifact@v4
         with:
-          name: flash-rwkv-pro6000-${{ github.event.pull_request.head.sha || github.sha }}
+          name: flash-rwkv-pro6000-${{ steps.target.outputs.head_sha }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
       - name: Update pull request report
-        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
+          PR_NUMBER: ${{ steps.target.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+          ARTIFACT_ID: ${{ steps.evidence.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
           ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}
         with:
           script: |
             const fs = require('fs');
             const marker = '<!-- flash-rwkv-pro6000-report -->';
+            const prNumber = Number(process.env.PR_NUMBER);
             const benchmarkReport = fs.readFileSync(
               'artifacts/benchmark-report.md', 'utf8').trim();
+            const runIdentity = JSON.parse(
+              fs.readFileSync('artifacts/run-identity.json', 'utf8'));
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRunAttempt({
+              ...context.repo,
+              run_id: context.runId,
+              attempt_number: Number(process.env.GITHUB_RUN_ATTEMPT),
+            });
+            const currentJob = jobs.jobs.find(job => job.name === 'trusted-source');
+            if (!currentJob) {
+              core.setFailed('trusted-source job identity is unavailable');
+              return;
+            }
             const body = [
               marker,
               '### FlashRWKV PRO 6000 GPU report',
               '',
-              `- Head: \`${context.payload.pull_request.head.sha}\``,
-              `- Test/racecheck/benchmark run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              `- Head: \`${process.env.HEAD_SHA}\``,
+              `- Runtime semantic revision: \`${runIdentity.runtime_semantic_revision}\``,
+              `- Run: \`${context.runId}\` (attempt \`${process.env.GITHUB_RUN_ATTEMPT}\`)`,
+              `- Job: \`${currentJob.id}\` (${currentJob.html_url})`,
+              `- Artifact: \`${process.env.ARTIFACT_ID}\` (${process.env.ARTIFACT_URL})`,
               `- Artifact SHA-256: \`${process.env.ARTIFACT_DIGEST}\``,
               '- Runner contract: `rwkv-sha-pro6000x8`, single NVIDIA RTX PRO 6000 Blackwell Workstation Edition',
               '',
@@ -376,7 +502,7 @@ jobs:
             ].join('\n');
             const {data: comments} = await github.rest.issues.listComments({
               ...context.repo,
-              issue_number: context.issue.number,
+              issue_number: prNumber,
             });
             const previous = comments.find(comment =>
               comment.user.type === 'Bot' && comment.body.includes(marker));
@@ -389,10 +515,24 @@ jobs:
             } else {
               await github.rest.issues.createComment({
                 ...context.repo,
-                issue_number: context.issue.number,
+                issue_number: prNumber,
                 body,
               });
             }
+            const {data: pull} = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: prNumber,
+            });
+            const currentBody = pull.body || '';
+            const markerIndex = currentBody.indexOf(marker);
+            const prefix = (
+              markerIndex === -1 ? currentBody : currentBody.slice(0, markerIndex)
+            ).trimEnd();
+            await github.rest.pulls.update({
+              ...context.repo,
+              pull_number: prNumber,
+              body: `${prefix}${prefix ? '\n\n' : ''}${body}`,
+            });
 
   untrusted-fork-notice:
     if: >-
