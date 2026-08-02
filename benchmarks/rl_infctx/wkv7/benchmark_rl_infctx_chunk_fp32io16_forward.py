@@ -19,6 +19,7 @@ import torch
 from torch.nn import functional
 
 from flash_rwkv import _C
+from flash_rwkv.benchmark_contract import format_result, percentile
 from flash_rwkv.config import (
     ChunkConfig,
     chunk_tuning_key,
@@ -42,11 +43,12 @@ DTYPES = {
 }
 SOURCE_PATHS = (
     Path("setup.py"),
+    Path("flash_rwkv/architecture.py"),
     Path("csrc/bindings.cpp"),
-    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_forward_materialized.cu"),
-    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_forward_recompute.cu"),
-    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_backward_replay.cuh"),
-    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_backward_replay.cu"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_forward_materialized.cu"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_forward_recompute.cu"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_backward_replay.cuh"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_backward_replay.cu"),
     Path("flash_rwkv/config.py"),
 )
 
@@ -121,10 +123,17 @@ def _source_metadata() -> dict[str, object]:
         for path in SOURCE_PATHS
     }
     extension_path = Path(_C.__file__).resolve()
-    leaf_status = _git_output(SOURCE_ROOT, "status", "--short")
+    tracked_status = _git_output(
+        SOURCE_ROOT,
+        "status",
+        "--short",
+        "--untracked-files=no",
+    )
     return {
         "leaf_revision": _git_output(SOURCE_ROOT, "rev-parse", "HEAD"),
-        "leaf_dirty": None if leaf_status is None else bool(leaf_status),
+        "tracked_source_dirty": (
+            None if tracked_status is None else bool(tracked_status)
+        ),
         "benchmark_sha256": _sha256(Path(__file__).resolve()),
         "source_sha256": hashes,
         "source_set_sha256": hashlib.sha256(
@@ -704,6 +713,35 @@ def run(config: BenchmarkConfig) -> dict[str, object]:
             )
             counter += 1
 
+    source = _source_metadata()
+    rows = []
+    for result in results:
+        for strategy, measurement in result["measurements"].items():
+            samples_ms = measurement["raw_samples_ms"]
+            p50_ms = percentile(samples_ms, 0.50)
+            rows.append(
+                {
+                    "provider": "flash_rwkv",
+                    "name": f"rl_infctx_chunk_fp32io16_{strategy}",
+                    "source_revision": source["leaf_revision"],
+                    "mode": "fp32io16",
+                    "dtype": result["dtype"],
+                    "layout": result["layout"],
+                    "profile": result["profile"],
+                    "label": (
+                        f"rl-infctx-{result['profile']}-{result['dtype']}-{strategy}"
+                    ),
+                    "B": len(result["seq_lens"]),
+                    "T": result["total_tokens"],
+                    "iters": len(samples_ms),
+                    "p10_ms": percentile(samples_ms, 0.10),
+                    "p50_ms": p50_ms,
+                    "p90_ms": percentile(samples_ms, 0.90),
+                    "tok_s_p50": result["total_tokens"] * 1000.0 / p50_ms,
+                    "correctness": measurement["correctness"],
+                }
+            )
+
     payload: dict[str, object] = {
         "schema_version": 1,
         "benchmark": "flash_rwkv_chunk_strategy_comparison",
@@ -717,8 +755,9 @@ def run(config: BenchmarkConfig) -> dict[str, object]:
         "recompute_tuning_samples": config.tuning_samples,
         "seed": config.seed,
         "hardware": _hardware_metadata(),
-        "source": _source_metadata(),
+        "source": source,
         "results": results,
+        "rows": rows,
     }
     if config.output is not None:
         config.output.parent.mkdir(parents=True, exist_ok=True)
@@ -782,6 +821,12 @@ def main() -> None:
             profile_iterations=args.profile_iterations,
         )
     )
+    for row in payload["rows"]:
+        print(
+            f"{format_result(row)} provider={row['provider']} name={row['name']} "
+            f"source_revision={row['source_revision']} mode={row['mode']} "
+            f"dtype={row['dtype']} layout={row['layout']}"
+        )
     print(
         json.dumps(
             {

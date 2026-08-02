@@ -9,9 +9,9 @@ void register_statetune_recurrent_manifest(py::module_& module) {
   manifest["model_family"] = "wkv7";
   manifest["numerical_mode"] = "fp32io16";
   manifest["forward_source"] =
-      "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_forward.cu";
+      "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_forward.cu";
   manifest["backward_source"] =
-      "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_backward.cu";
+      "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_backward.cu";
   manifest["state_contract"] =
       "nonzero initial state, final state, and initial-state gradient";
   module.attr("_statetune_recurrent_source_manifest") = manifest;

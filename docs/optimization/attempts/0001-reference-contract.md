@@ -21,7 +21,7 @@ not CUDA performance evidence.
 | Training semantics and backward | `rwkv-lm@46691027da83376414147f878f2232e1a3d2f406` | `cuda/wkv7_cuda.cu`, `cuda/wkv7_cuda_fp32.cu`, `cuda/wkv7_op.cpp`, `cuda/wkv7_op_fp32.cpp` |
 | Chunk and autograd baseline | `fla-rwkv@3adcb3c50a9e78c6ef6d173543305b1d5ef8fa4c` | `fla/ops/rwkv7/chunk.py`, `fla/ops/rwkv7/fused_recurrent.py`, `tests/ops/test_rwkv7.py` |
 | Packed-varlen serving baseline | `vllm-rwkv@6d683f9e49a2997e405c47edc147872c8609513b` | `csrc/libtorch_stable/rwkv7/rwkv7_wkv_fp16_v2.{cpp,cu}`, `csrc/libtorch_stable/rwkv7/rwkv7_wkv_fp32_v2.{cpp,cu}`, `tests/kernels/test_rwkv7_wkv_canonical.py`, `benchmarks/kernels/benchmark_rwkv7_wkv.py` |
-| SM90 pipeline ideas | imported FlashKDA tree at `FlashRWKV@54c863d` | `csrc/smxx/**`, `docs/20260420-flashkda-v1-deep-dive.md` |
+| SM90 pipeline ideas | imported FlashKDA tree at `FlashRWKV@54c863d` | legacy architecture-placeholder CUDA tree, `docs/20260420-flashkda-v1-deep-dive.md` |
 
 Albatross/vLLM-derived files are Apache-2.0 material and must retain SPDX and
 source attribution if adapted. FlashKDA and FLA material is MIT. No KDA

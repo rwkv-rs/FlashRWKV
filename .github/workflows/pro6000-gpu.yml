@@ -32,6 +32,8 @@ jobs:
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
     runs-on: [self-hosted, linux, x64, rwkv-sha-pro6000x8]
     timeout-minutes: 90
+    env:
+      TORCH_CUDA_ARCH_LIST: "12.0"
     steps:
       - name: Resolve target PR and exact revision
         id: target
@@ -185,6 +187,48 @@ jobs:
                   )
               print(f"{name}={module_path}")
           PY
+      - name: Cross-compile architecture matrix
+        run: |
+          set -o pipefail
+          mkdir -p artifacts build/architecture-matrix
+          if TORCH_CUDA_ARCH_LIST=8.0 .venv/bin/python setup.py build_ext \
+            --force \
+            --build-temp build/architecture-matrix/sm80-temp \
+            --build-lib build/architecture-matrix/sm80-lib \
+            > artifacts/architecture-sm80.log 2>&1; then
+            echo "SM80 build unexpectedly succeeded" >&2
+            exit 1
+          fi
+          grep -F \
+            "requires compute capability >= 9.0" \
+            artifacts/architecture-sm80.log
+          for target in 9.0 12.0; do
+            label="sm${target/./}"
+            TORCH_CUDA_ARCH_LIST="$target" .venv/bin/python setup.py build_ext \
+              --force \
+              --build-temp "build/architecture-matrix/${label}-temp" \
+              --build-lib "build/architecture-matrix/${label}-lib" \
+              2>&1 | tee "artifacts/architecture-${label}.log"
+          done
+          .venv/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = {
+              "schema_version": 1,
+              "wheel_minimum_architecture": "sm90",
+              "targets": [
+                  {"architecture": "sm80", "status": "fail_closed"},
+                  {"architecture": "sm90", "status": "compile_only"},
+                  {"architecture": "sm120", "status": "compile_only"},
+              ],
+              "runtime_validated_architectures": ["sm120"],
+          }
+          Path("artifacts/architecture-matrix.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
       - name: Verify controlled GPU target
         run: |
           command -v compute-sanitizer
@@ -195,7 +239,11 @@ jobs:
           actual = torch.cuda.get_device_name(0)
           if actual != expected:
               raise SystemExit(f"expected {expected!r}, got {actual!r}")
+          capability = torch.cuda.get_device_capability(0)
+          if capability != (12, 0):
+              raise SystemExit(f"expected compute capability (12, 0), got {capability}")
           print(actual)
+          print(f"compute_capability={capability[0]}.{capability[1]}")
           PY
       - name: Run complete CUDA test suite
         run: |
@@ -208,13 +256,15 @@ jobs:
           tests/racecheck/run.sh | tee artifacts/racecheck.log
       - name: Run correctness-gated benchmarks
         run: |
-          .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_smxx_fused_fp16_forward.py \
+          .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_fused_fp16_forward.py \
             --output artifacts/operator-benchmark.json
-          .venv/bin/python benchmarks/pretrain/wkv7/benchmark_pretrain_smxx_operators_bf16_forward_backward.py \
+          .venv/bin/python benchmarks/pretrain/wkv7/benchmark_pretrain_operators_bf16_forward_backward.py \
             --output artifacts/training-operator-benchmark.json
-          .venv/bin/python benchmarks/statetune/wkv7/benchmark_statetune_smxx_recurrent_fp32io16_backward.py \
+          .venv/bin/python benchmarks/statetune/wkv7/benchmark_statetune_recurrent_fp32io16_backward.py \
             --output artifacts/statetune-benchmark.json
-          .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py \
+          .venv/bin/python benchmarks/rl_infctx/wkv7/benchmark_rl_infctx_chunk_fp32io16_forward.py \
+            --output artifacts/rl-infctx-benchmark.json
+          .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py \
             --profiles decode_b320 equal_chunk16_b320 ragged_chunk16_b320 \
             decode_b2048 \
             --modes fp32io16 fp16 \
@@ -270,17 +320,47 @@ jobs:
               "### Correctness-gated benchmark results",
               "",
           ]
+          architecture_path = Path("artifacts/architecture-matrix.json")
+          architecture = json.loads(architecture_path.read_text())
+          expected_architecture_targets = [
+              {"architecture": "sm80", "status": "fail_closed"},
+              {"architecture": "sm90", "status": "compile_only"},
+              {"architecture": "sm120", "status": "compile_only"},
+          ]
+          if (
+              architecture["wheel_minimum_architecture"] != "sm90"
+              or architecture["targets"] != expected_architecture_targets
+              or architecture["runtime_validated_architectures"] != ["sm120"]
+          ):
+              raise SystemExit(f"invalid architecture matrix: {architecture}")
+          report.extend(
+              (
+                  f"#### `{architecture_path.name}`",
+                  "",
+                  "```text",
+                  "BUILD target=sm80 status=fail_closed wheel_minimum=sm90",
+                  "BUILD target=sm90 status=compile_only wheel_minimum=sm90",
+                  "BUILD target=sm120 status=compile_only wheel_minimum=sm90",
+                  "RUNTIME architecture=sm120 status=validated",
+                  "```",
+                  "",
+              )
+          )
           benchmark_paths = (
               Path("artifacts/operator-benchmark.json"),
               Path("artifacts/training-operator-benchmark.json"),
               Path("artifacts/statetune-benchmark.json"),
+              Path("artifacts/rl-infctx-benchmark.json"),
           )
           for path in benchmark_paths:
               payload = json.loads(path.read_text())
               required_identity_fields = {
                   "provider", "name", "source_revision"
               }
-              if path.name == "statetune-benchmark.json":
+              if path.name in {
+                  "statetune-benchmark.json",
+                  "rl-infctx-benchmark.json",
+              }:
                   required_identity_fields.add("mode")
               report.extend((f"#### `{path.name}`", "", "```text"))
               for row in payload["rows"]:
@@ -298,6 +378,16 @@ jobs:
                       )
                   ):
                       raise SystemExit(f"invalid StateTune RESULT identity: {row}")
+                  if (
+                      path.name == "rl-infctx-benchmark.json"
+                      and (
+                          row["source_revision"] != os.environ["HEAD_SHA"]
+                          or row["mode"] != "fp32io16"
+                          or row["provider"] != "flash_rwkv"
+                          or not row["correctness"]["passed"]
+                      )
+                  ):
+                      raise SystemExit(f"invalid RL-infctx RESULT identity: {row}")
                   result = (
                       f"RESULT B={row['B']} T={row['T']} iters={row['iters']} "
                       f"p10_ms={metric(row['p10_ms'])} "
@@ -313,6 +403,11 @@ jobs:
                   )
                   report.append(f"{result} {identity}".rstrip())
               report.extend(("```", ""))
+              if (
+                  path.name == "rl-infctx-benchmark.json"
+                  and payload["source"]["tracked_source_dirty"] is not False
+              ):
+                  raise SystemExit("RL-infctx benchmark source checkout is dirty")
 
           packed_path = Path("artifacts/packed-recurrent-benchmark.json")
           packed = json.loads(packed_path.read_text())
