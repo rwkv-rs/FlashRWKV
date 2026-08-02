@@ -2,6 +2,7 @@
 
 from .channel_mix import pretrain_cmix_bf16
 from .config import ChunkConfig, enumerate_chunk_configs
+from .head_l2wrap_ce import pretrain_head_l2wrap_ce_bf16
 from .l2wrap_ce import pretrain_l2wrap_ce_bf16
 from .ops import (
     decay_logits_to_log_decay,
@@ -38,6 +39,7 @@ __all__ = [
     "infer_recurrent_fp32io16_forward_varlen",
     "kernel_specs",
     "pretrain_cmix_bf16",
+    "pretrain_head_l2wrap_ce_bf16",
     "pretrain_l2wrap_ce_bf16",
     "pretrain_recurrent_fp32io16",
     "pretrain_recurrent_fp32io16_forward",

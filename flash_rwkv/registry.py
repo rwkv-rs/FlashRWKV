@@ -172,6 +172,17 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
 TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
     TrainingOperatorSpec(
         provider="rwkv-lm",
+        name="pretrain_head_l2wrap_ce_bf16",
+        family="head_l2wrap_ce",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=("rwkv7_head_l2wrap_ce_bf16_v4::forward",),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("hidden[B,T,C]", "weight[65536,C]", "targets[B,T]"),
+        output_contract=("mean_cross_entropy[]", "L2Wrap surrogate gradients"),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
         name="pretrain_tmix_a_gate_bf16",
         family="tmix",
         dtype="bfloat16",

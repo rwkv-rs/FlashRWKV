@@ -432,3 +432,21 @@ def pretrain_tmix_vres_gate_bf16_backward(
         v12,
     )
     return gradients[0], gradients[1], gradients[2], gradients[3]
+
+
+def pretrain_head_l2wrap_ce_bf16_forward(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    targets: torch.Tensor,
+    chunk_rows: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Call the RWKV-LM fused output-head loss operator."""
+
+    _load_extension()
+    result = torch.ops.rwkv7_head_l2wrap_ce_bf16_v4.forward(
+        hidden,
+        weight,
+        targets,
+        chunk_rows,
+    )
+    return result[0], result[1], result[2]
