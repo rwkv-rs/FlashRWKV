@@ -184,6 +184,20 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
         input_contract=("x[B,T,C]", "x_k[C]", "key[4C,C]", "value[C,4C]"),
         output_contract=("output[B,T,C]",),
     ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_l2wrap_ce_bf16",
+        family="l2wrap_ce",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_l2wrap_ce_bf16_v2::forward",
+            "rwkv7_l2wrap_ce_bf16_v2::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("logits[...,V]", "targets[...]"),
+        output_contract=("mean_cross_entropy[]", "L2Wrap surrogate gradient"),
+    ),
 )
 
 _BY_IDENTITY = {spec.identity: spec for spec in KERNEL_SPECS}

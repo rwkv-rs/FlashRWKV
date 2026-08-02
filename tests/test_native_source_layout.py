@@ -108,6 +108,19 @@ def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
         assert "952102498e9ed367ea0a59ee64106916d474d30f" in contents
 
 
+def test_l2wrap_sources_are_built_from_the_pretrain_family() -> None:
+    sources = _extension_sources()
+    expected = {
+        "csrc/pretrain/l2wrap_ce/rwkv7_l2wrap_ce_bf16_v2_registration.cpp",
+        "csrc/pretrain/l2wrap_ce/rwkv7_l2wrap_ce_bf16_v2.cu",
+    }
+    assert expected <= sources
+    for source in expected:
+        contents = (ROOT / source).read_text()
+        assert "SPDX-License-Identifier: Apache-2.0" in contents
+        assert "952102498e9ed367ea0a59ee64106916d474d30f" in contents
+
+
 def test_registration_preserves_exact_native_operator_surface() -> None:
     registration = (CSRC / "registration.cpp").read_text()
     blocks = re.findall(r"module\.def\((.*?)\);", registration, re.DOTALL)

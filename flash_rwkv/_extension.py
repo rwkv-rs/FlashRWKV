@@ -337,3 +337,35 @@ def pretrain_cmix_bf16_backward(
         activation,
     )
     return gradients[0], gradients[1], gradients[2], gradients[3]
+
+
+def pretrain_l2wrap_ce_bf16_forward(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Call the RWKV-LM cross-entropy + L2Wrap forward operator."""
+
+    _load_extension()
+    result = torch.ops.rwkv7_l2wrap_ce_bf16_v2.forward(logits, targets)
+    return result[0], result[1], result[2], result[3]
+
+
+def pretrain_l2wrap_ce_bf16_backward(
+    grad_loss: torch.Tensor,
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    logsumexp: torch.Tensor,
+    max_values: torch.Tensor,
+    argmax: torch.Tensor,
+) -> torch.Tensor:
+    """Call the paired RWKV-LM cross-entropy + L2Wrap backward operator."""
+
+    _load_extension()
+    return torch.ops.rwkv7_l2wrap_ce_bf16_v2.backward(
+        grad_loss,
+        logits,
+        targets,
+        logsumexp,
+        max_values,
+        argmax,
+    )

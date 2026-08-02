@@ -33,8 +33,9 @@ def test_registry_contains_exact_provider_specific_identities() -> None:
 
 def test_cmix_is_a_distinct_source_attributed_training_operator() -> None:
     assert training_operator_specs() == TRAINING_OPERATOR_SPECS
-    assert len(TRAINING_OPERATOR_SPECS) == 1
-    spec = TRAINING_OPERATOR_SPECS[0]
+    spec = next(
+        operator for operator in TRAINING_OPERATOR_SPECS if operator.family == "cmix"
+    )
     assert spec.identity == ("rwkv-lm", "pretrain_cmix_bf16")
     assert spec.family == "cmix"
     assert spec.autograd is True
@@ -44,6 +45,23 @@ def test_cmix_is_a_distinct_source_attributed_training_operator() -> None:
         "rwkv7_cmix_bf16_v5::backward",
     )
     assert spec.identity not in {kernel.identity for kernel in KERNEL_SPECS}
+
+
+def test_l2wrap_ce_preserves_its_distinct_loss_identity() -> None:
+    spec = next(
+        operator
+        for operator in TRAINING_OPERATOR_SPECS
+        if operator.family == "l2wrap_ce"
+    )
+    assert spec.identity == ("rwkv-lm", "pretrain_l2wrap_ce_bf16")
+    assert spec.native_ops == (
+        "rwkv7_l2wrap_ce_bf16_v2::forward",
+        "rwkv7_l2wrap_ce_bf16_v2::backward",
+    )
+    assert spec.output_contract == (
+        "mean_cross_entropy[]",
+        "L2Wrap surrogate gradient",
+    )
 
 
 def test_duplicate_canonical_name_requires_provider() -> None:
