@@ -1,0 +1,47 @@
+name: Quick contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Create source-test environment
+        run: |
+          uv venv --python 3.12
+          uv pip install --python .venv/bin/python torch pytest ruff
+      - name: Lint maintained public contracts
+        run: |
+          .venv/bin/ruff check \
+            flash_rwkv/channel_mix.py \
+            flash_rwkv/head_l2wrap_ce.py \
+            flash_rwkv/inference_blocks.py \
+            flash_rwkv/l2wrap_ce.py \
+            flash_rwkv/registry.py \
+            flash_rwkv/time_mix.py \
+            tests/test_channel_mix.py \
+            tests/test_head_l2wrap_ce.py \
+            tests/test_inference_blocks.py \
+            tests/test_l2wrap_ce.py \
+            tests/test_registry.py \
+            tests/test_time_mix.py
+      - name: Run CPU contract tests
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          .venv/bin/python -m pytest -q \
+            tests/test_benchmark_contract.py \
+            tests/test_config.py \
+            tests/test_inference_blocks.py \
+            tests/test_registry.py
