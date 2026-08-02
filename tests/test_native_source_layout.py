@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -18,6 +19,42 @@ EXPECTED_NATIVE_OPS = {
     "recurrent_fp16",
     "recurrent_fp32",
 }
+
+
+def test_tracked_paths_and_text_do_not_use_architecture_placeholders() -> None:
+    placeholder = "sm" + "xx"
+    tracked = subprocess.run(
+        ("git", "ls-files"),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert not [path for path in tracked if placeholder in path.lower()]
+    text_paths = [
+        path
+        for path in tracked
+        if Path(path).suffix
+        in {
+            ".cpp",
+            ".cu",
+            ".cuh",
+            ".json",
+            ".md",
+            ".py",
+            ".sh",
+            ".toml",
+            ".yml",
+            ".yaml",
+        }
+        or path == "NOTICE"
+    ]
+    offenders = [
+        path
+        for path in text_paths
+        if placeholder in (ROOT / path).read_text(encoding="utf-8").lower()
+    ]
+    assert offenders == []
 EXPECTED_ARGUMENTS = {
     "recurrent_fp32": (
         "query_start_loc", "state_indices", "state", "r", "log_decay", "k",
@@ -169,7 +206,7 @@ def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
     assert "invalid StateTune RESULT identity" in workflow
     assert (
         "tests/infer/wkv7/"
-        "test_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py"
+        "test_infer_recurrent_fp16_fp32io16_forward_varlen.py"
         in quick_workflow
     )
 
@@ -182,12 +219,12 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     metadata = _function_source("flash_rwkv/ops.py", "_cuda_metadata")
     benchmark_revision = _function_source(
         "benchmarks/infer/wkv7/"
-        "benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py",
+        "benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py",
         "_revision_metadata",
     )
     benchmark_case = _function_source(
         "benchmarks/infer/wkv7/"
-        "benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py",
+        "benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py",
         "_run_case",
     )
     workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
@@ -213,7 +250,7 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert '"decode_b2048": (1,) * 2048' in (
         ROOT
         / "benchmarks/infer/wkv7/"
-        "benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py"
+        "benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py"
     ).read_text()
     assert "command -v compute-sanitizer" in workflow
     assert "packed-recurrent-benchmark.json" in workflow
@@ -228,13 +265,22 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert 'Path("artifacts/postbuild-provenance.json")' in workflow
     assert '"--untracked-files=no"' in benchmark_revision
     assert "artifacts/**" in gitignore
+    assert 'TORCH_CUDA_ARCH_LIST: "12.0"' in workflow
+    assert "TORCH_CUDA_ARCH_LIST=8.0" in workflow
+    assert 'for target in 9.0 12.0' in workflow
+    assert "architecture-matrix.json" in workflow
+    assert '"wheel_minimum_architecture": "sm90"' in workflow
+    assert '"runtime_validated_architectures": ["sm120"]' in workflow
+    assert "torch.cuda.get_device_capability(0)" in workflow
+    assert "benchmark_rl_infctx_chunk_fp32io16_forward.py" in workflow
+    assert "rl-infctx-benchmark.json" in workflow
 
 
 def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
     sources = _extension_sources()
     expected = {
-        "csrc/pretrain/wkv7/pretrain_smxx_cmix_bf16_forward_backward_registration.cpp",
-        "csrc/pretrain/wkv7/pretrain_smxx_cmix_bf16_forward_backward.cu",
+        "csrc/pretrain/wkv7/pretrain_common_cmix_bf16_forward_backward_registration.cpp",
+        "csrc/pretrain/wkv7/pretrain_sm90_cmix_bf16_forward_backward.cu",
     }
     assert expected <= sources
     for source in expected:
@@ -246,8 +292,8 @@ def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
 def test_l2wrap_sources_are_built_from_the_pretrain_family() -> None:
     sources = _extension_sources()
     expected = {
-        "csrc/pretrain/wkv7/pretrain_smxx_l2wrap_ce_bf16_forward_backward_registration.cpp",
-        "csrc/pretrain/wkv7/pretrain_smxx_l2wrap_ce_bf16_forward_backward.cu",
+        "csrc/pretrain/wkv7/pretrain_common_l2wrap_ce_bf16_forward_backward_registration.cpp",
+        "csrc/pretrain/wkv7/pretrain_common_l2wrap_ce_bf16_forward_backward.cu",
     }
     assert expected <= sources
     for source in expected:
@@ -292,16 +338,16 @@ def test_native_sources_are_owned_by_workload_wkv7_trees() -> None:
 def test_statetune_registration_points_to_shared_recurrence_sources() -> None:
     source = (
         CSRC
-        / "statetune/wkv7/statetune_smxx_recurrent_fp32io16_registration.cpp"
+        / "statetune/wkv7/statetune_common_recurrent_fp32io16_registration.cpp"
     )
     contents = source.read_text()
     assert source.relative_to(ROOT).as_posix() in _extension_sources()
     assert (
-        "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_forward.cu"
+        "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_forward.cu"
         in contents
     )
     assert (
-        "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_backward.cu"
+        "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_backward.cu"
         in contents
     )
     assert "_statetune_recurrent_source_manifest" in contents
@@ -322,10 +368,10 @@ def test_all_workloads_own_csrc_tests_and_benchmarks() -> None:
 
 def test_registration_preserves_exact_native_operator_surface() -> None:
     binding_sources = {
-        "csrc/infer/wkv7/infer_smxx_recurrent_varlen_bindings.cpp",
-        "csrc/infer/wkv7/infer_smxx_chunk_bf16_bindings.cpp",
-        "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_bindings.cpp",
-        "csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_bindings.cpp",
+        "csrc/infer/wkv7/infer_common_recurrent_varlen_bindings.cpp",
+        "csrc/infer/wkv7/infer_common_chunk_bf16_bindings.cpp",
+        "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_bindings.cpp",
+        "csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_bindings.cpp",
     }
     assert binding_sources <= _extension_sources()
     blocks = []

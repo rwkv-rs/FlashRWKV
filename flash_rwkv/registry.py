@@ -8,12 +8,16 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from .architecture import RUNTIME_VALIDATED_ARCHITECTURES
+
 Provider = Literal["rwkv-lm", "vllm-rwkv", "flashkda-derived", "fla", "albatross"]
 Maturity = Literal["stable", "experimental", "external"]
 Layout = Literal["fixed", "packed"]
 StateBehavior = Literal["functional"]
 OperatorFamily = Literal["tmix", "cmix", "l2wrap_ce", "head_l2wrap_ce"]
 InferenceStateBehavior = Literal["functional", "mutates_shift"]
+TranslationUnitArchitecture = Literal["common", "sm80", "sm90"]
+ValidatedArchitecture = Literal["sm120"]
 
 _NAME_PATTERN = re.compile(
     r"^(pretrain|infer)_(recurrent|chunk)_"
@@ -32,6 +36,11 @@ class KernelSpec:
     autograd: bool
     state_behavior: StateBehavior
     stages: tuple[str, ...]
+    translation_unit_architecture: TranslationUnitArchitecture | None = "common"
+    package_minimum_architecture: Literal["sm90"] | None = "sm90"
+    validated_architectures: tuple[ValidatedArchitecture, ...] = (
+        RUNTIME_VALIDATED_ARCHITECTURES
+    )
 
     def __post_init__(self) -> None:
         match = _NAME_PATTERN.fullmatch(self.name)
@@ -50,6 +59,24 @@ class KernelSpec:
             raise ValueError(f"{self.name}: backward kernels must support autograd")
         if not self.stages or any(not stage for stage in self.stages):
             raise ValueError(f"{self.name}: stages must be non-empty")
+        if self.maturity == "external":
+            if (
+                self.translation_unit_architecture is not None
+                or self.package_minimum_architecture is not None
+                or self.validated_architectures
+            ):
+                raise ValueError(
+                    f"{self.name}: external kernels cannot claim native architecture evidence"
+                )
+        elif (
+            self.translation_unit_architecture not in {"common", "sm80", "sm90"}
+            or self.package_minimum_architecture != "sm90"
+            or self.validated_architectures != RUNTIME_VALIDATED_ARCHITECTURES
+        ):
+            raise ValueError(
+                f"{self.name}: native kernels require a minimum architecture and "
+                "the exact runtime-validated architecture set"
+            )
 
     @property
     def identity(self) -> tuple[Provider, str]:
@@ -69,6 +96,11 @@ class TrainingOperatorSpec:
     source_revision: str
     input_contract: tuple[str, ...]
     output_contract: tuple[str, ...]
+    translation_unit_architecture: TranslationUnitArchitecture = "common"
+    package_minimum_architecture: Literal["sm90"] = "sm90"
+    validated_architectures: tuple[ValidatedArchitecture, ...] = (
+        RUNTIME_VALIDATED_ARCHITECTURES
+    )
 
     def __post_init__(self) -> None:
         expected_prefix = f"pretrain_{self.family}_"
@@ -80,6 +112,12 @@ class TrainingOperatorSpec:
             raise ValueError("native_ops must be non-empty and unique")
         if not self.input_contract or not self.output_contract:
             raise ValueError("input and output contracts must be non-empty")
+        if (
+            self.translation_unit_architecture not in {"common", "sm80", "sm90"}
+            or self.package_minimum_architecture != "sm90"
+            or self.validated_architectures != RUNTIME_VALIDATED_ARCHITECTURES
+        ):
+            raise ValueError("invalid training operator architecture contract")
 
     @property
     def identity(self) -> tuple[Provider, str]:
@@ -99,6 +137,11 @@ class InferenceOperatorSpec:
     source_revision: str
     input_contract: tuple[str, ...]
     output_contract: tuple[str, ...]
+    translation_unit_architecture: TranslationUnitArchitecture = "common"
+    package_minimum_architecture: Literal["sm90"] = "sm90"
+    validated_architectures: tuple[ValidatedArchitecture, ...] = (
+        RUNTIME_VALIDATED_ARCHITECTURES
+    )
 
     def __post_init__(self) -> None:
         if not self.name.startswith(f"infer_{self.family}_"):
@@ -109,6 +152,12 @@ class InferenceOperatorSpec:
             raise ValueError("source_revision must be a canonical full Git OID")
         if not self.input_contract or not self.output_contract:
             raise ValueError("input and output contracts must be non-empty")
+        if (
+            self.translation_unit_architecture not in {"common", "sm80", "sm90"}
+            or self.package_minimum_architecture != "sm90"
+            or self.validated_architectures != RUNTIME_VALIDATED_ARCHITECTURES
+        ):
+            raise ValueError("invalid inference operator architecture contract")
 
     @property
     def identity(self) -> tuple[Provider, str]:
@@ -151,6 +200,7 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
         autograd=False,
         state_behavior="functional",
         stages=("forward recurrence",),
+        translation_unit_architecture="sm80",
     ),
     KernelSpec(
         provider="flashkda-derived",
@@ -178,6 +228,9 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
         autograd=True,
         state_behavior="functional",
         stages=("FLA chunk forward",),
+        translation_unit_architecture=None,
+        package_minimum_architecture=None,
+        validated_architectures=(),
     ),
     KernelSpec(
         provider="fla",
@@ -187,6 +240,9 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
         autograd=True,
         state_behavior="functional",
         stages=("FLA chunk backward",),
+        translation_unit_architecture=None,
+        package_minimum_architecture=None,
+        validated_architectures=(),
     ),
     KernelSpec(
         provider="fla",
@@ -196,6 +252,9 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
         autograd=False,
         state_behavior="functional",
         stages=("FLA fused recurrent forward",),
+        translation_unit_architecture=None,
+        package_minimum_architecture=None,
+        validated_architectures=(),
     ),
 )
 
@@ -238,6 +297,7 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
         source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
         input_contract=("x[B,T,C]", "x_{r,w,k,v,a,g}[C]"),
         output_contract=("mixed_{r,w,k,v,a,g}[B,T,C]",),
+        translation_unit_architecture="sm90",
     ),
     TrainingOperatorSpec(
         provider="rwkv-lm",
@@ -256,6 +316,7 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
             "negative_direction[B,T,C]",
             "scaled_direction[B,T,C]",
         ),
+        translation_unit_architecture="sm90",
     ),
     TrainingOperatorSpec(
         provider="rwkv-lm",
@@ -298,6 +359,7 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
         source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
         input_contract=("x[B,T,C]", "x_k[C]", "key[4C,C]", "value[C,4C]"),
         output_contract=("output[B,T,C]",),
+        translation_unit_architecture="sm90",
     ),
     TrainingOperatorSpec(
         provider="rwkv-lm",

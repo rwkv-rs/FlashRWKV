@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: MIT
 
+from .architecture import (
+    BUILD_TARGET_MATRIX,
+    MINIMUM_WHEEL_ARCHITECTURE,
+    RUNTIME_VALIDATED_ARCHITECTURES,
+    TRANSLATION_UNIT_ARCHITECTURES,
+)
 from .channel_mix import pretrain_cmix_bf16
 from .config import ChunkConfig, enumerate_chunk_configs
 from .head_l2wrap_ce import pretrain_head_l2wrap_ce_bf16
@@ -41,6 +47,10 @@ from .time_mix import (
 from .validation import validate_packed_metadata_strict
 
 __all__ = [
+    "BUILD_TARGET_MATRIX",
+    "MINIMUM_WHEEL_ARCHITECTURE",
+    "RUNTIME_VALIDATED_ARCHITECTURES",
+    "TRANSLATION_UNIT_ARCHITECTURES",
     "ChunkConfig",
     "KernelSpec",
     "TrainingOperatorSpec",

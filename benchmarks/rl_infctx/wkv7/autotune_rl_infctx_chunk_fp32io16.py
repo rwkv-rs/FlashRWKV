@@ -41,9 +41,9 @@ DTYPES = {
 NATIVE_SOURCE_PATHS = (
     Path("setup.py"),
     Path("csrc/bindings.cpp"),
-    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_forward_materialized.cu"),
-    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_backward_replay.cuh"),
-    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_backward_replay.cu"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_forward_materialized.cu"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_backward_replay.cuh"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_backward_replay.cu"),
     Path("flash_rwkv/config.py"),
     Path("flash_rwkv/ops.py"),
 )

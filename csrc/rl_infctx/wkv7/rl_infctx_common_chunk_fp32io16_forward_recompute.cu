@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // DPLR-factor recompute chunk forward for the FlashRWKV core contract.
 
-#include "rl_infctx_smxx_chunk_fp32io16_backward_replay.cuh"
+#include "rl_infctx_common_chunk_fp32io16_backward_replay.cuh"
 
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
