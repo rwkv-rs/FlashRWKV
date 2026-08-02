@@ -6,31 +6,15 @@ import pytest
 import torch
 
 from flash_rwkv import (
-    infer_cmix_mix_fp16,
     infer_tmix_kk_a_gate_fp16,
     infer_tmix_lnx_rkvres_xg_fp16,
     infer_tmix_mix6_fp16,
     infer_tmix_vres_gate_fp16,
 )
 from flash_rwkv._extension import _load_extension
-from flash_rwkv.registry import INFERENCE_OPERATOR_SPECS, inference_operator_specs
 
 
-def test_albatross_inference_registry_binds_fixed_source_and_public_ops() -> None:
-    assert inference_operator_specs() == INFERENCE_OPERATOR_SPECS
-    assert {spec.name for spec in INFERENCE_OPERATOR_SPECS} == {
-        "infer_tmix_mix6_fp16_forward",
-        "infer_tmix_kk_a_gate_fp16_forward",
-        "infer_tmix_lnx_rkvres_xg_fp16_forward",
-        "infer_tmix_vres_gate_fp16_forward",
-        "infer_cmix_mix_fp16_forward",
-    }
-    assert {spec.source_revision for spec in INFERENCE_OPERATOR_SPECS} == {
-        "ee3308f6922e59f2166c7fac3c5a192340a2b48e"
-    }
-
-
-def test_fused_inference_rejects_cpu_before_native_dispatch() -> None:
+def test_tmix_inference_rejects_cpu_before_native_dispatch() -> None:
     x = torch.zeros(1, 1, 64, dtype=torch.float16)
     shift = torch.zeros(1, 64, dtype=torch.float16)
     mixes = tuple(torch.zeros(64, dtype=torch.float16) for _ in range(6))
@@ -38,7 +22,7 @@ def test_fused_inference_rejects_cpu_before_native_dispatch() -> None:
         infer_tmix_mix6_fp16(x, shift, mixes)
 
 
-def test_fused_inference_rejects_state_alias_before_native_dispatch() -> None:
+def test_tmix_inference_rejects_state_alias_before_native_dispatch() -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required")
     storage = torch.zeros(2, 64, device="cuda", dtype=torch.float16)
@@ -49,7 +33,7 @@ def test_fused_inference_rejects_state_alias_before_native_dispatch() -> None:
         infer_tmix_mix6_fp16(x, shift, mixes)
 
 
-def test_raw_fused_inference_rejects_empty_launch_metadata() -> None:
+def test_raw_tmix_inference_rejects_empty_launch_metadata() -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required")
     _load_extension()
@@ -61,33 +45,27 @@ def test_raw_fused_inference_rejects_empty_launch_metadata() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_fused_inference_mix_operators_match_reference_and_advance_state() -> None:
+def test_tmix_mix6_matches_reference_and_advances_state() -> None:
     torch.manual_seed(2607)
     x = torch.randn(2, 3, 128, device="cuda", dtype=torch.float16).mul_(0.2)
-    mix_state = torch.randn(2, 128, device="cuda", dtype=torch.float16).mul_(0.2)
-    cmix_state = mix_state.clone()
-    initial_state = mix_state.clone()
+    shift_state = torch.randn(2, 128, device="cuda", dtype=torch.float16).mul_(0.2)
+    initial_state = shift_state.clone()
     mixes = tuple(
         torch.randn(128, device="cuda", dtype=torch.float16).mul_(0.2) for _ in range(6)
     )
-    cmix_weight = torch.randn(128, device="cuda", dtype=torch.float16).mul_(0.2)
 
-    outputs = infer_tmix_mix6_fp16(x, mix_state, mixes)
-    cmix_output = infer_cmix_mix_fp16(x, cmix_state, cmix_weight)
+    outputs = infer_tmix_mix6_fp16(x, shift_state, mixes)
 
     previous = torch.cat((initial_state[:, None], x[:, :-1]), dim=1)
     delta = previous.float() - x.float()
     for output, mix in zip(outputs, mixes, strict=True):
         reference = (x.float() + delta * mix.float()).half()
         torch.testing.assert_close(output, reference, atol=0.002, rtol=0.002)
-    cmix_reference = (x.float() + delta * cmix_weight.float()).half()
-    torch.testing.assert_close(cmix_output, cmix_reference, atol=0.002, rtol=0.002)
-    torch.testing.assert_close(mix_state, x[:, -1], atol=0, rtol=0)
-    torch.testing.assert_close(cmix_state, x[:, -1], atol=0, rtol=0)
+    torch.testing.assert_close(shift_state, x[:, -1], atol=0, rtol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_fused_inference_key_and_value_gates_match_reference() -> None:
+def test_tmix_key_and_value_gates_match_reference() -> None:
     torch.manual_seed(2608)
     shape = (2, 3, 128)
     key = torch.randn(*shape, device="cuda", dtype=torch.float16).mul_(0.2)
@@ -131,7 +109,7 @@ def test_fused_inference_key_and_value_gates_match_reference() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_fused_inference_output_transform_matches_reference() -> None:
+def test_tmix_output_transform_matches_reference() -> None:
     torch.manual_seed(2609)
     shape = (2, 3, 128)
     tensors = tuple(
