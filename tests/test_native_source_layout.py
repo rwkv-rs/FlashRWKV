@@ -98,8 +98,8 @@ def test_binding_responsibilities_have_distinct_translation_units() -> None:
 def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
     sources = _extension_sources()
     expected = {
-        "csrc/pretrain/cmix/rwkv7_cmix_bf16_v5_registration.cpp",
-        "csrc/pretrain/cmix/rwkv7_cmix_bf16_v5.cu",
+        "csrc/pretrain/wkv7/pretrain_smxx_cmix_bf16_forward_backward.cpp",
+        "csrc/pretrain/wkv7/pretrain_smxx_cmix_bf16_forward_backward.cu",
     }
     assert expected <= sources
     for source in expected:
@@ -111,14 +111,46 @@ def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
 def test_l2wrap_sources_are_built_from_the_pretrain_family() -> None:
     sources = _extension_sources()
     expected = {
-        "csrc/pretrain/l2wrap_ce/rwkv7_l2wrap_ce_bf16_v2_registration.cpp",
-        "csrc/pretrain/l2wrap_ce/rwkv7_l2wrap_ce_bf16_v2.cu",
+        "csrc/pretrain/wkv7/pretrain_smxx_l2wrap_ce_bf16_forward_backward.cpp",
+        "csrc/pretrain/wkv7/pretrain_smxx_l2wrap_ce_bf16_forward_backward.cu",
     }
     assert expected <= sources
     for source in expected:
         contents = (ROOT / source).read_text()
         assert "SPDX-License-Identifier: Apache-2.0" in contents
         assert "952102498e9ed367ea0a59ee64106916d474d30f" in contents
+
+
+def test_native_sources_are_owned_by_workload_wkv7_trees() -> None:
+    sources = _extension_sources()
+    workload_sources = {
+        source
+        for source in sources
+        if source.endswith((".cpp", ".cu"))
+        and source not in {
+            "csrc/bindings.cpp",
+            "csrc/registration.cpp",
+            "csrc/validation.cpp",
+        }
+    }
+    assert workload_sources
+    assert all((ROOT / source).is_file() for source in sources)
+    assert all(
+        source.startswith(
+            (
+                "csrc/pretrain/wkv7/",
+                "csrc/rl_infctx/wkv7/",
+                "csrc/statetune/wkv7/",
+                "csrc/infer/wkv7/",
+            )
+        )
+        for source in workload_sources
+    )
+    assert not any(
+        path.is_file()
+        for legacy in ("chunk", "kda", "recurrent")
+        for path in (CSRC / legacy).rglob("*")
+    )
 
 
 def test_registration_preserves_exact_native_operator_surface() -> None:

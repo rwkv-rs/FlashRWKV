@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // FlashRWKV materialized affine chunk forward.
 
-#include "replay.h"
+#include "rl_infctx_smxx_chunk_fp32io16_backward_replay.cuh"
 
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>

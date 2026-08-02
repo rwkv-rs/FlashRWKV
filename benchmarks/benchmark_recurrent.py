@@ -46,8 +46,8 @@ TOLERANCE_PATH = SOURCE_ROOT / "tests/fixtures/tolerances-v1.json"
 NATIVE_SOURCE_PATHS = (
     Path("setup.py"),
     Path("csrc/bindings.cpp"),
-    Path("csrc/recurrent/recurrent_fp32.cu"),
-    Path("csrc/recurrent/recurrent_fp16.cu"),
+    Path("csrc/infer/wkv7/infer_smxx_recurrent_fp32io16_forward_varlen.cu"),
+    Path("csrc/infer/wkv7/infer_smxx_recurrent_fp16_forward_varlen.cu"),
     Path("flash_rwkv/_extension.py"),
     Path("flash_rwkv/ops.py"),
 )

@@ -44,10 +44,10 @@ DTYPES = {
 SOURCE_PATHS = (
     Path("setup.py"),
     Path("csrc/bindings.cpp"),
-    Path("csrc/chunk/materialized_fp32.cu"),
-    Path("csrc/chunk/recompute_fp32.cu"),
-    Path("csrc/chunk/replay.h"),
-    Path("csrc/chunk/replay_fp32.cu"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_forward_materialized.cu"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_forward_recompute.cu"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_backward_replay.cuh"),
+    Path("csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_backward_replay.cu"),
     Path("flash_rwkv/config.py"),
 )
 
