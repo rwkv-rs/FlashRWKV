@@ -146,6 +146,7 @@ using flash_rwkv::validation::check_optional_like;
 using flash_rwkv::validation::check_recurrent_layout;
 using flash_rwkv::validation::check_same_device;
 using flash_rwkv::validation::kHeadSize;
+using flash_rwkv::validation::RecurrentDimensions;
 
 void recurrent_fp32(
     torch::Tensor query_start_loc,
