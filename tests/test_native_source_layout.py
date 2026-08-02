@@ -145,6 +145,11 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
         "validate_rwkv7_inputs",
     )
     metadata = _function_source("flash_rwkv/ops.py", "_cuda_metadata")
+    benchmark_revision = _function_source(
+        "benchmarks/infer/wkv7/"
+        "benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py",
+        "_revision_metadata",
+    )
     workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
     gitignore = (ROOT / ".gitignore").read_text().splitlines()
 
@@ -154,7 +159,11 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert "else state_indices" in metadata
     assert "command -v compute-sanitizer" in workflow
     assert "packed-recurrent-benchmark.json" in workflow
-    assert 'packed["source"]["leaf_dirty"] is not False' in workflow
+    assert "Verify clean tracked source checkout" in workflow
+    assert 'git("status", "--short", "--untracked-files=no")' in workflow
+    assert 'prebuild["tracked_source_dirty"]' in workflow
+    assert 'packed["source"]["tracked_source_dirty"] is not False' in workflow
+    assert '"--untracked-files=no"' in benchmark_revision
     assert "artifacts/**" in gitignore
 
 

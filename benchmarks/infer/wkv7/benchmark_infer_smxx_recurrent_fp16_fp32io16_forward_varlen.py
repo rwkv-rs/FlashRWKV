@@ -43,12 +43,23 @@ MODES = ("fp32io16", "fp16")
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
 TOLERANCE_PATH = SOURCE_ROOT / "tests/fixtures/tolerances-v1.json"
 NATIVE_SOURCE_PATHS = (
+    Path(".github/workflows/pro6000-gpu.yml"),
+    Path("pyproject.toml"),
     Path("setup.py"),
     Path("csrc/bindings.cpp"),
     Path("csrc/infer/wkv7/infer_smxx_recurrent_fp32io16_forward_varlen.cu"),
     Path("csrc/infer/wkv7/infer_smxx_recurrent_fp16_forward_varlen.cu"),
+    Path("flash_rwkv/__init__.py"),
     Path("flash_rwkv/_extension.py"),
     Path("flash_rwkv/ops.py"),
+    Path("flash_rwkv/validation.py"),
+)
+CONTROLLED_GENERATED_PATH_PATTERNS = (
+    ".venv/**",
+    "artifacts/**",
+    "build/**",
+    "*.egg-info/**",
+    "*.so",
 )
 
 
@@ -106,7 +117,12 @@ def _git_output(repository: Path, *arguments: str) -> str | None:
 
 def _revision_metadata() -> dict[str, object]:
     parent_root = SOURCE_ROOT.parents[2]
-    leaf_status = _git_output(SOURCE_ROOT, "status", "--short")
+    leaf_status = _git_output(
+        SOURCE_ROOT,
+        "status",
+        "--short",
+        "--untracked-files=no",
+    )
     parent_status = _git_output(
         parent_root,
         "status",
@@ -116,6 +132,9 @@ def _revision_metadata() -> dict[str, object]:
     return {
         "leaf_revision": _git_output(SOURCE_ROOT, "rev-parse", "HEAD"),
         "leaf_dirty": None if leaf_status is None else bool(leaf_status),
+        "tracked_source_dirty": None if leaf_status is None else bool(leaf_status),
+        "tracked_status_entries": None if leaf_status is None else leaf_status.splitlines(),
+        "controlled_generated_path_patterns": CONTROLLED_GENERATED_PATH_PATTERNS,
         "parent_revision": _git_output(parent_root, "rev-parse", "HEAD"),
         "parent_dirty": None if parent_status is None else bool(parent_status),
     }

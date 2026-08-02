@@ -27,6 +27,57 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Verify clean tracked source checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PREBUILD_PROVENANCE: ${{ runner.temp }}/flash-rwkv-prebuild-provenance.json
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          def git(*arguments):
+              return subprocess.run(
+                  ("git", *arguments),
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              ).stdout.strip()
+
+          head_sha = git("rev-parse", "HEAD")
+          tracked_status = git("status", "--short", "--untracked-files=no")
+          worktree_diff_paths = git("diff", "--name-only").splitlines()
+          index_diff_paths = git("diff", "--cached", "--name-only").splitlines()
+          payload = {
+              "head_sha": head_sha,
+              "expected_head_sha": os.environ["HEAD_SHA"],
+              "tracked_source_dirty": bool(tracked_status),
+              "index_dirty": bool(index_diff_paths),
+              "tracked_status_entries": tracked_status.splitlines(),
+              "worktree_diff_paths": worktree_diff_paths,
+              "index_diff_paths": index_diff_paths,
+              "controlled_generated_path_patterns": [
+                  ".venv/**",
+                  "artifacts/**",
+                  "build/**",
+                  "*.egg-info/**",
+                  "*.so",
+              ],
+          }
+          if (
+              head_sha != payload["expected_head_sha"]
+              or payload["tracked_source_dirty"]
+              or payload["index_dirty"]
+              or worktree_diff_paths
+          ):
+              raise SystemExit(f"unclean or mismatched source checkout: {payload}")
+          Path(os.environ["PREBUILD_PROVENANCE"]).write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -101,6 +152,7 @@ jobs:
       - name: Record immutable run identity
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PREBUILD_PROVENANCE: ${{ runner.temp }}/flash-rwkv-prebuild-provenance.json
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -144,7 +196,7 @@ jobs:
 
           packed_path = Path("artifacts/packed-recurrent-benchmark.json")
           packed = json.loads(packed_path.read_text())
-          if packed["source"]["leaf_dirty"] is not False:
+          if packed["source"]["tracked_source_dirty"] is not False:
               raise SystemExit("packed benchmark source checkout is dirty")
           if not packed["all_cases_correct"]:
               raise SystemExit("packed recurrent correctness gate failed")
@@ -180,6 +232,21 @@ jobs:
           report.extend(("```", ""))
           Path("artifacts/benchmark-report.md").write_text(
               "\n".join(report), encoding="utf-8"
+          )
+
+          prebuild = json.loads(
+              Path(os.environ["PREBUILD_PROVENANCE"]).read_text(encoding="utf-8")
+          )
+          if (
+              prebuild["head_sha"] != os.environ["HEAD_SHA"]
+              or prebuild["tracked_source_dirty"]
+              or prebuild["index_dirty"]
+              or prebuild["worktree_diff_paths"]
+          ):
+              raise SystemExit(f"invalid prebuild provenance: {prebuild}")
+          Path("artifacts/prebuild-provenance.json").write_text(
+              json.dumps(prebuild, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
           )
 
           files = sorted(Path("artifacts").glob("*"))
