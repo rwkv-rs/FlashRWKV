@@ -172,6 +172,20 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
 TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
     TrainingOperatorSpec(
         provider="rwkv-lm",
+        name="pretrain_tmix_a_gate_bf16",
+        family="tmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_tmix_a_gate_bf16::forward",
+            "rwkv7_tmix_a_gate_bf16::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("a0[C]", "a12[B,T,C]"),
+        output_contract=("sigmoid_gate[B,T,C]",),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
         name="pretrain_cmix_bf16",
         family="cmix",
         dtype="bfloat16",

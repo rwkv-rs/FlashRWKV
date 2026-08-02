@@ -23,6 +23,7 @@ from .registry import (
     kernel_specs,
     training_operator_specs,
 )
+from .time_mix import pretrain_tmix_a_gate_bf16
 
 __all__ = [
     "ChunkConfig",
@@ -40,6 +41,7 @@ __all__ = [
     "pretrain_l2wrap_ce_bf16",
     "pretrain_recurrent_fp32io16",
     "pretrain_recurrent_fp32io16_forward",
+    "pretrain_tmix_a_gate_bf16",
     "rwkv7",
     "rwkv7_from_decay_logits",
     "rwkv7_recurrent_stateful",

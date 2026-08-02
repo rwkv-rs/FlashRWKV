@@ -369,3 +369,29 @@ def pretrain_l2wrap_ce_bf16_backward(
         max_values,
         argmax,
     )
+
+
+def pretrain_tmix_a_gate_bf16_forward(
+    a0: torch.Tensor,
+    a12: torch.Tensor,
+) -> torch.Tensor:
+    """Call the RWKV-LM TimeMix a-gate forward operator."""
+
+    _load_extension()
+    return torch.ops.rwkv7_tmix_a_gate_bf16.forward(a0, a12)
+
+
+def pretrain_tmix_a_gate_bf16_backward(
+    grad_output: torch.Tensor,
+    a0: torch.Tensor,
+    a12: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Call the paired RWKV-LM TimeMix a-gate backward operator."""
+
+    _load_extension()
+    gradients = torch.ops.rwkv7_tmix_a_gate_bf16.backward(
+        grad_output,
+        a0,
+        a12,
+    )
+    return gradients[0], gradients[1]
