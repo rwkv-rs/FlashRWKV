@@ -60,6 +60,11 @@ CONTROLLED_GENERATED_PATH_PATTERNS = (
     "build/**",
     "*.egg-info/**",
     "*.so",
+    ".cache/**",
+    ".pytest_cache/**",
+    ".ruff_cache/**",
+    "__pycache__/**",
+    "**/__pycache__/**",
 )
 
 

@@ -163,6 +163,11 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert 'git("status", "--short", "--untracked-files=no")' in workflow
     assert 'prebuild["tracked_source_dirty"]' in workflow
     assert 'packed["source"]["tracked_source_dirty"] is not False' in workflow
+    assert 'non_ignored_untracked_paths = [' in workflow
+    assert 'ignored_generated_paths = [' in workflow
+    assert 'unexpected_ignored_paths = [' in workflow
+    assert 'or unexpected_ignored_paths' in workflow
+    assert 'Path("artifacts/postbuild-provenance.json")' in workflow
     assert '"--untracked-files=no"' in benchmark_revision
     assert "artifacts/**" in gitignore
 

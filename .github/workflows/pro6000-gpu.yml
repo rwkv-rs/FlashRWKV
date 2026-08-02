@@ -64,6 +64,11 @@ jobs:
                   "build/**",
                   "*.egg-info/**",
                   "*.so",
+                  ".cache/**",
+                  ".pytest_cache/**",
+                  ".ruff_cache/**",
+                  "__pycache__/**",
+                  "**/__pycache__/**",
               ],
           }
           if (
@@ -84,9 +89,8 @@ jobs:
       - name: Prepare isolated CUDA build
         run: |
           uv venv --python 3.12
-          uv sync --no-install-project
           uv pip install --python .venv/bin/python \
-            'pytest==9.1.1' 'einops' 'transformers>=4.45.0'
+            'torch>=2.4' 'pytest==9.1.1' 'einops' 'transformers>=4.45.0'
           uv pip install --python .venv/bin/python --no-deps --no-build-isolation -e .
           uv pip install --python .venv/bin/python --no-deps \
             'flash-linear-attention @ git+https://github.com/rwkv-rs/fla-rwkv.git@fcd4502ab957513a3d97dbd8aa64851e5e4dba11'
@@ -157,13 +161,41 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           .venv/bin/python - <<'PY'
+          import fnmatch
           import hashlib
           import json
           import os
+          import subprocess
           from pathlib import Path
 
           def metric(value):
               return str(round(float(value), 6))
+
+          generated_path_allowlist = (
+              ".venv/**",
+              "artifacts/**",
+              "build/**",
+              "*.egg-info/**",
+              "*.so",
+              ".cache/**",
+              ".pytest_cache/**",
+              ".ruff_cache/**",
+              "__pycache__/**",
+              "**/__pycache__/**",
+          )
+
+          def git_status_entries(*arguments):
+              output = subprocess.run(
+                  ("git", "status", "--porcelain=v1", "-z", *arguments),
+                  check=True,
+                  capture_output=True,
+              ).stdout.decode("utf-8")
+              return [entry for entry in output.split("\0") if entry]
+
+          def entry_path(entry):
+              if len(entry) < 4 or entry[2] != " ":
+                  raise SystemExit(f"unexpected porcelain entry: {entry!r}")
+              return entry[3:]
 
           report = [
               "### Correctness-gated benchmark results",
@@ -246,6 +278,54 @@ jobs:
               raise SystemExit(f"invalid prebuild provenance: {prebuild}")
           Path("artifacts/prebuild-provenance.json").write_text(
               json.dumps(prebuild, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          postbuild_entries = git_status_entries("--untracked-files=all")
+          non_ignored_untracked_paths = [
+              entry_path(entry)
+              for entry in postbuild_entries
+              if entry.startswith("?? ")
+          ]
+          tracked_status_entries = [
+              entry
+              for entry in postbuild_entries
+              if not entry.startswith("?? ")
+          ]
+          ignored_entries = git_status_entries(
+              "--ignored=matching",
+              "--untracked-files=normal",
+          )
+          ignored_generated_paths = [
+              entry_path(entry)
+              for entry in ignored_entries
+              if entry.startswith("!! ")
+          ]
+          unexpected_ignored_paths = [
+              path
+              for path in ignored_generated_paths
+              if not any(
+                  fnmatch.fnmatchcase(path, pattern)
+                  for pattern in generated_path_allowlist
+              )
+          ]
+          postbuild = {
+              "head_sha": os.environ["HEAD_SHA"],
+              "tracked_source_dirty": bool(tracked_status_entries),
+              "tracked_status_entries": tracked_status_entries,
+              "non_ignored_untracked_paths": non_ignored_untracked_paths,
+              "controlled_generated_path_patterns": generated_path_allowlist,
+              "ignored_generated_paths": ignored_generated_paths,
+              "unexpected_ignored_paths": unexpected_ignored_paths,
+          }
+          if (
+              postbuild["tracked_source_dirty"]
+              or non_ignored_untracked_paths
+              or unexpected_ignored_paths
+          ):
+              raise SystemExit(f"uncontrolled postbuild checkout paths: {postbuild}")
+          Path("artifacts/postbuild-provenance.json").write_text(
+              json.dumps(postbuild, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
 
