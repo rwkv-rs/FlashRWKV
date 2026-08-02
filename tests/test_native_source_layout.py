@@ -95,10 +95,23 @@ def test_binding_responsibilities_have_distinct_translation_units() -> None:
     assert "check_recurrent_layout(" in validation
 
 
+def test_cuda_extension_sources_have_unique_ninja_object_stems() -> None:
+    sources_by_stem: dict[str, list[str]] = {}
+    for source in sorted(_extension_sources()):
+        sources_by_stem.setdefault(Path(source).stem, []).append(source)
+
+    collisions = {
+        stem: sources
+        for stem, sources in sources_by_stem.items()
+        if len(sources) > 1
+    }
+    assert collisions == {}
+
+
 def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
     sources = _extension_sources()
     expected = {
-        "csrc/pretrain/wkv7/pretrain_smxx_cmix_bf16_forward_backward.cpp",
+        "csrc/pretrain/wkv7/pretrain_smxx_cmix_bf16_forward_backward_registration.cpp",
         "csrc/pretrain/wkv7/pretrain_smxx_cmix_bf16_forward_backward.cu",
     }
     assert expected <= sources
@@ -111,7 +124,7 @@ def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
 def test_l2wrap_sources_are_built_from_the_pretrain_family() -> None:
     sources = _extension_sources()
     expected = {
-        "csrc/pretrain/wkv7/pretrain_smxx_l2wrap_ce_bf16_forward_backward.cpp",
+        "csrc/pretrain/wkv7/pretrain_smxx_l2wrap_ce_bf16_forward_backward_registration.cpp",
         "csrc/pretrain/wkv7/pretrain_smxx_l2wrap_ce_bf16_forward_backward.cu",
     }
     assert expected <= sources
