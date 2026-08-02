@@ -98,8 +98,6 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          from flash_rwkv.registry import get_kernel_spec
-
           def git(*arguments):
               return subprocess.run(
                   ("git", *arguments),
@@ -288,6 +286,8 @@ jobs:
           import os
           import subprocess
           from pathlib import Path
+
+          from flash_rwkv.registry import get_kernel_spec
 
           def metric(value):
               return str(round(float(value), 6))
