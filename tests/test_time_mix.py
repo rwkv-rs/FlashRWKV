@@ -8,6 +8,7 @@ import torch
 from flash_rwkv import (
     pretrain_tmix_a_gate_bf16,
     pretrain_tmix_kk_pre_bf16,
+    pretrain_tmix_lnx_rkvres_xg_bf16,
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
 )
@@ -257,4 +258,84 @@ def test_time_mix_kk_pre_outputs_and_gradients_match_torch_reference() -> None:
             reference_gradient,
             atol=0.015,
             rtol=0.08,
+        )
+
+
+def _lnx_inputs(
+    *,
+    device: torch.device | str,
+    channels: int = 64,
+) -> tuple[torch.Tensor, ...]:
+    torch.manual_seed(916)
+    features = tuple(
+        torch.randn(1, 3, channels, device=device, dtype=torch.bfloat16).mul_(0.2)
+        for _ in range(4)
+    )
+    residual_scale = torch.randn(
+        channels // 64,
+        64,
+        device=device,
+        dtype=torch.bfloat16,
+    ).mul_(0.1)
+    norm_weight = torch.rand(channels, device=device, dtype=torch.bfloat16)
+    norm_bias = torch.randn(channels, device=device, dtype=torch.bfloat16).mul_(0.1)
+    gate = torch.sigmoid(
+        torch.randn(1, 3, channels, device=device, dtype=torch.bfloat16)
+    )
+    return *features, residual_scale, norm_weight, norm_bias, gate
+
+
+def test_time_mix_lnx_rejects_non_cuda_inputs_before_extension() -> None:
+    with pytest.raises(ValueError, match="requires CUDA"):
+        pretrain_tmix_lnx_rkvres_xg_bf16(*_lnx_inputs(device="cpu"))
+
+
+def test_time_mix_lnx_rejects_non_64_head_geometry() -> None:
+    with pytest.raises(ValueError, match="divisible by 64"):
+        pretrain_tmix_lnx_rkvres_xg_bf16(*_lnx_inputs(device="cpu", channels=96))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_time_mix_lnx_output_and_gradients_match_torch_reference() -> None:
+    native_inputs = tuple(
+        tensor.requires_grad_(True) for tensor in _lnx_inputs(device="cuda")
+    )
+    reference_inputs = tuple(
+        tensor.detach().clone().requires_grad_(True) for tensor in native_inputs
+    )
+    grad_output = torch.randn_like(native_inputs[0])
+
+    output = pretrain_tmix_lnx_rkvres_xg_bf16(*native_inputs)
+    recurrent_output, receptance, key, value, residual_scale, weight, bias, gate = (
+        reference_inputs
+    )
+    normalized = torch.nn.functional.group_norm(
+        recurrent_output.float().reshape(-1, 64),
+        num_groups=1,
+        weight=weight.float(),
+        bias=bias.float(),
+        eps=64e-5,
+    ).reshape_as(recurrent_output)
+    residual = (
+        receptance.float().view(1, 3, 1, 64)
+        * key.float().view(1, 3, 1, 64)
+        * residual_scale.float()
+    ).sum(dim=-1, keepdim=True) * value.float().view(1, 3, 1, 64)
+    reference = ((normalized + residual.view_as(normalized)) * gate.float()).to(
+        torch.bfloat16
+    )
+    output.backward(grad_output)
+    reference.backward(grad_output)
+
+    torch.testing.assert_close(output, reference, atol=0.006, rtol=0.04)
+    for gradient, reference_gradient in zip(
+        (tensor.grad for tensor in native_inputs),
+        (tensor.grad for tensor in reference_inputs),
+        strict=True,
+    ):
+        torch.testing.assert_close(
+            gradient,
+            reference_gradient,
+            atol=0.02,
+            rtol=0.1,
         )

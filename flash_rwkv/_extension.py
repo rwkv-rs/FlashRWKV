@@ -559,3 +559,62 @@ def pretrain_tmix_kk_pre_bf16_backward(
             64,
         )
     )
+
+
+def pretrain_tmix_lnx_rkvres_xg_bf16_forward(
+    recurrent_output: torch.Tensor,
+    receptance: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    residual_scale: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    gate: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Call the RWKV-LM fused TimeMix output forward operator."""
+
+    _load_extension()
+    result = torch.ops.rwkv7_tmix_lnx_rkvres_xg_bf16_v1.forward(
+        recurrent_output,
+        receptance,
+        key,
+        value,
+        residual_scale,
+        norm_weight,
+        norm_bias,
+        gate,
+    )
+    return result[0], result[1], result[2]
+
+
+def pretrain_tmix_lnx_rkvres_xg_bf16_backward(
+    grad_output: torch.Tensor,
+    recurrent_output: torch.Tensor,
+    receptance: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    residual_scale: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    gate: torch.Tensor,
+    mean: torch.Tensor,
+    reciprocal_std: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Call the paired RWKV-LM fused TimeMix output backward operator."""
+
+    _load_extension()
+    return tuple(
+        torch.ops.rwkv7_tmix_lnx_rkvres_xg_bf16_v1.backward(
+            grad_output,
+            recurrent_output,
+            receptance,
+            key,
+            value,
+            residual_scale,
+            norm_weight,
+            norm_bias,
+            gate,
+            mean,
+            reciprocal_std,
+        )
+    )

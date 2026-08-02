@@ -243,6 +243,20 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
     ),
     TrainingOperatorSpec(
         provider="rwkv-lm",
+        name="pretrain_tmix_lnx_rkvres_xg_bf16",
+        family="tmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_tmix_lnx_rkvres_xg_bf16_v1::forward",
+            "rwkv7_tmix_lnx_rkvres_xg_bf16_v1::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("x,r,k,v,g[B,T,C]", "r_k[H,64]", "norm_weight,bias[C]"),
+        output_contract=("normalized_gated_residual[B,T,C]",),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
         name="pretrain_cmix_bf16",
         family="cmix",
         dtype="bfloat16",

@@ -29,6 +29,8 @@ setup(
                 "csrc/pretrain/tmix_a_gate/rwkv7_tmix_a_gate_bf16.cu",
                 "csrc/pretrain/tmix_kk_pre/rwkv7_tmix_kk_pre_bf16_v5_registration.cpp",
                 "csrc/pretrain/tmix_kk_pre/rwkv7_tmix_kk_pre_bf16_v5.cu",
+                "csrc/pretrain/tmix_lnx_rkvres_xg/rwkv7_tmix_lnx_rkvres_xg_bf16_v1_registration.cpp",
+                "csrc/pretrain/tmix_lnx_rkvres_xg/rwkv7_tmix_lnx_rkvres_xg_bf16_v1.cu",
                 "csrc/pretrain/tmix_mix6/rwkv7_tmix_mix6_bf16_v5_registration.cpp",
                 "csrc/pretrain/tmix_mix6/rwkv7_tmix_mix6_bf16_v5.cu",
                 "csrc/pretrain/tmix_vres_gate/rwkv7_tmix_vres_gate_bf16_v3_registration.cpp",

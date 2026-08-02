@@ -69,6 +69,32 @@ def pretrain_tmix_kk_pre_bf16(
     )
 
 
+def pretrain_tmix_lnx_rkvres_xg_bf16(
+    recurrent_output: torch.Tensor,
+    receptance: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    residual_scale: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    gate: torch.Tensor,
+) -> torch.Tensor:
+    """Fuse per-head normalization, receptance-key residual, and output gate."""
+
+    inputs = (
+        recurrent_output,
+        receptance,
+        key,
+        value,
+        residual_scale,
+        norm_weight,
+        norm_bias,
+        gate,
+    )
+    _validate_lnx_rkvres_xg_inputs(*inputs)
+    return _PretrainTmixLnxRkvresXgBf16Function.apply(*inputs)
+
+
 def _validate_a_gate_inputs(a0: torch.Tensor, a12: torch.Tensor) -> None:
     for name, tensor in {"a0": a0, "a12": a12}.items():
         if not isinstance(tensor, torch.Tensor):
@@ -190,6 +216,59 @@ def _validate_kk_pre_inputs(
         raise ValueError("all TimeMix key-preparation tensors must share a device")
     if not key.is_cuda:
         raise ValueError("pretrain_tmix_kk_pre_bf16 requires CUDA tensors")
+
+
+def _validate_lnx_rkvres_xg_inputs(
+    recurrent_output: torch.Tensor,
+    receptance: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    residual_scale: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    gate: torch.Tensor,
+) -> None:
+    tensors = {
+        "recurrent_output": recurrent_output,
+        "receptance": receptance,
+        "key": key,
+        "value": value,
+        "residual_scale": residual_scale,
+        "norm_weight": norm_weight,
+        "norm_bias": norm_bias,
+        "gate": gate,
+    }
+    for name, tensor in tensors.items():
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor")
+        if tensor.dtype != torch.bfloat16:
+            raise TypeError(f"{name} must have dtype torch.bfloat16")
+        if not tensor.is_contiguous():
+            raise ValueError(f"{name} must be contiguous")
+    if recurrent_output.ndim != 3 or any(
+        dimension <= 0 for dimension in recurrent_output.shape
+    ):
+        raise ValueError("recurrent_output must have non-empty shape [B, T, C]")
+    channels = recurrent_output.shape[2]
+    if channels % 64:
+        raise ValueError("pretrain_tmix_lnx_rkvres_xg_bf16 requires C divisible by 64")
+    for name, tensor in {
+        "receptance": receptance,
+        "key": key,
+        "value": value,
+        "gate": gate,
+    }.items():
+        if tensor.shape != recurrent_output.shape:
+            raise ValueError(f"{name} must have the same shape as recurrent_output")
+    if residual_scale.shape != (channels // 64, 64):
+        raise ValueError(f"residual_scale must have shape [{channels // 64}, 64]")
+    for name, vector in {"norm_weight": norm_weight, "norm_bias": norm_bias}.items():
+        if vector.shape != (channels,):
+            raise ValueError(f"{name} must have shape [{channels}]")
+    if any(tensor.device != recurrent_output.device for tensor in tensors.values()):
+        raise ValueError("all fused TimeMix output tensors must share a device")
+    if not recurrent_output.is_cuda:
+        raise ValueError("pretrain_tmix_lnx_rkvres_xg_bf16 requires CUDA tensors")
 
 
 class _PretrainTmixAGateBf16Function(torch.autograd.Function):
@@ -332,6 +411,60 @@ class _PretrainTmixKkPreBf16Function(torch.autograd.Function):
             grad_new_key.contiguous(),
             grad_negative_direction.contiguous(),
             grad_scaled_direction.contiguous(),
+            *ctx.saved_tensors,
+        )
+        return tuple(
+            gradient if needed else None
+            for gradient, needed in zip(gradients, ctx.needs_input_grad, strict=True)
+        )
+
+
+class _PretrainTmixLnxRkvresXgBf16Function(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        recurrent_output: torch.Tensor,
+        receptance: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        residual_scale: torch.Tensor,
+        norm_weight: torch.Tensor,
+        norm_bias: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        output, mean, reciprocal_std = (
+            _extension.pretrain_tmix_lnx_rkvres_xg_bf16_forward(
+                recurrent_output,
+                receptance,
+                key,
+                value,
+                residual_scale,
+                norm_weight,
+                norm_bias,
+                gate,
+            )
+        )
+        ctx.save_for_backward(
+            recurrent_output,
+            receptance,
+            key,
+            value,
+            residual_scale,
+            norm_weight,
+            norm_bias,
+            gate,
+            mean,
+            reciprocal_std,
+        )
+        return output
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, ...]:
+        gradients = _extension.pretrain_tmix_lnx_rkvres_xg_bf16_backward(
+            grad_output.contiguous(),
             *ctx.saved_tensors,
         )
         return tuple(

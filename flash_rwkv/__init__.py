@@ -27,6 +27,7 @@ from .registry import (
 from .time_mix import (
     pretrain_tmix_a_gate_bf16,
     pretrain_tmix_kk_pre_bf16,
+    pretrain_tmix_lnx_rkvres_xg_bf16,
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "pretrain_recurrent_fp32io16_forward",
     "pretrain_tmix_a_gate_bf16",
     "pretrain_tmix_kk_pre_bf16",
+    "pretrain_tmix_lnx_rkvres_xg_bf16",
     "pretrain_tmix_mix6_bf16",
     "pretrain_tmix_vres_gate_bf16",
     "rwkv7",
