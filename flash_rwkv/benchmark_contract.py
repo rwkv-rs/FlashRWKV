@@ -4,10 +4,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from math import isfinite
 from typing import Final
-
 
 ALBATROSS_BT_MATRIX: Final[tuple[tuple[int, int], ...]] = (
     (1, 1),
@@ -105,4 +105,22 @@ def summarize_samples(
         p50_ms=p50_ms,
         p90_ms=percentile(samples_ms, 0.90),
         tok_s_p50=batch_size * token_count * 1000.0 / p50_ms,
+    )
+
+
+def format_result(row: Mapping[str, object]) -> str:
+    """Format one benchmark row as the stable human RESULT line."""
+
+    missing = tuple(field for field in ALBATROSS_ROW_FIELDS if field not in row)
+    if missing:
+        raise ValueError(f"benchmark row is missing RESULT fields: {missing}")
+
+    def metric(field: str) -> str:
+        return str(round(float(row[field]), 6))
+
+    return (
+        f"RESULT B={row['B']} T={row['T']} iters={row['iters']} "
+        f"p10_ms={metric('p10_ms')} p50_ms={metric('p50_ms')} "
+        f"p90_ms={metric('p90_ms')} tok_s_p50={metric('tok_s_p50')} "
+        f"label={row['label']}"
     )

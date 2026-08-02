@@ -7,11 +7,12 @@ import pytest
 from flash_rwkv.registry import (
     KERNEL_SPECS,
     REFERENCE_ORACLES,
+    TRAINING_OPERATOR_SPECS,
     WRAPPER_KERNELS,
     KernelSpec,
     get_kernel_spec,
+    training_operator_specs,
 )
-
 
 EXPECTED_IDENTITIES = {
     ("rwkv-lm", "pretrain_recurrent_fp32io16_forward"),
@@ -28,6 +29,39 @@ EXPECTED_IDENTITIES = {
 
 def test_registry_contains_exact_provider_specific_identities() -> None:
     assert {spec.identity for spec in KERNEL_SPECS} == EXPECTED_IDENTITIES
+
+
+def test_cmix_is_a_distinct_source_attributed_training_operator() -> None:
+    assert training_operator_specs() == TRAINING_OPERATOR_SPECS
+    spec = next(
+        operator for operator in TRAINING_OPERATOR_SPECS if operator.family == "cmix"
+    )
+    assert spec.identity == ("rwkv-lm", "pretrain_cmix_bf16")
+    assert spec.family == "cmix"
+    assert spec.autograd is True
+    assert spec.source_revision == "952102498e9ed367ea0a59ee64106916d474d30f"
+    assert spec.native_ops == (
+        "rwkv7_cmix_bf16_v5::forward",
+        "rwkv7_cmix_bf16_v5::backward",
+    )
+    assert spec.identity not in {kernel.identity for kernel in KERNEL_SPECS}
+
+
+def test_l2wrap_ce_preserves_its_distinct_loss_identity() -> None:
+    spec = next(
+        operator
+        for operator in TRAINING_OPERATOR_SPECS
+        if operator.family == "l2wrap_ce"
+    )
+    assert spec.identity == ("rwkv-lm", "pretrain_l2wrap_ce_bf16")
+    assert spec.native_ops == (
+        "rwkv7_l2wrap_ce_bf16_v2::forward",
+        "rwkv7_l2wrap_ce_bf16_v2::backward",
+    )
+    assert spec.output_contract == (
+        "mean_cross_entropy[]",
+        "L2Wrap surrogate gradient",
+    )
 
 
 def test_duplicate_canonical_name_requires_provider() -> None:

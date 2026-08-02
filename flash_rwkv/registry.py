@@ -8,11 +8,12 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-
-Provider = Literal["rwkv-lm", "vllm-rwkv", "flashkda-derived", "fla"]
+Provider = Literal["rwkv-lm", "vllm-rwkv", "flashkda-derived", "fla", "albatross"]
 Maturity = Literal["stable", "experimental", "external"]
 Layout = Literal["fixed", "packed"]
 StateBehavior = Literal["functional"]
+OperatorFamily = Literal["tmix", "cmix", "l2wrap_ce", "head_l2wrap_ce"]
+InferenceStateBehavior = Literal["functional", "mutates_shift"]
 
 _NAME_PATTERN = re.compile(
     r"^(pretrain|infer)_(recurrent|chunk)_"
@@ -49,6 +50,65 @@ class KernelSpec:
             raise ValueError(f"{self.name}: backward kernels must support autograd")
         if not self.stages or any(not stage for stage in self.stages):
             raise ValueError(f"{self.name}: stages must be non-empty")
+
+    @property
+    def identity(self) -> tuple[Provider, str]:
+        return self.provider, self.name
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingOperatorSpec:
+    """A source-attributed non-recurrence training operator family."""
+
+    provider: Provider
+    name: str
+    family: OperatorFamily
+    dtype: str
+    autograd: bool
+    native_ops: tuple[str, ...]
+    source_revision: str
+    input_contract: tuple[str, ...]
+    output_contract: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        expected_prefix = f"pretrain_{self.family}_"
+        if not self.name.startswith(expected_prefix):
+            raise ValueError(f"{self.name!r} must start with {expected_prefix!r}")
+        if not re.fullmatch(r"[0-9a-f]{40}", self.source_revision):
+            raise ValueError("source_revision must be a canonical full Git OID")
+        if not self.native_ops or len(set(self.native_ops)) != len(self.native_ops):
+            raise ValueError("native_ops must be non-empty and unique")
+        if not self.input_contract or not self.output_contract:
+            raise ValueError("input and output contracts must be non-empty")
+
+    @property
+    def identity(self) -> tuple[Provider, str]:
+        return self.provider, self.name
+
+
+@dataclass(frozen=True, slots=True)
+class InferenceOperatorSpec:
+    """A source-attributed fused inference block outside the WKV recurrence."""
+
+    provider: Provider
+    name: str
+    family: Literal["tmix", "cmix"]
+    dtype: str
+    state_behavior: InferenceStateBehavior
+    native_op: str
+    source_revision: str
+    input_contract: tuple[str, ...]
+    output_contract: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.name.startswith(f"infer_{self.family}_"):
+            raise ValueError(f"{self.name!r} does not match family {self.family!r}")
+        if not self.native_op.startswith("rwkv7_fast_ops_fp16::"):
+            raise ValueError("native_op must use the imported Albatross namespace")
+        if not re.fullmatch(r"[0-9a-f]{40}", self.source_revision):
+            raise ValueError("source_revision must be a canonical full Git OID")
+        if not self.input_contract or not self.output_contract:
+            raise ValueError("input and output contracts must be non-empty")
 
     @property
     def identity(self) -> tuple[Provider, str]:
@@ -139,6 +199,180 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
     ),
 )
 
+TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_head_l2wrap_ce_bf16",
+        family="head_l2wrap_ce",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=("rwkv7_head_l2wrap_ce_bf16_v4::forward",),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("hidden[B,T,C]", "weight[65536,C]", "targets[B,T]"),
+        output_contract=("mean_cross_entropy[]", "L2Wrap surrogate gradients"),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_tmix_a_gate_bf16",
+        family="tmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_tmix_a_gate_bf16::forward",
+            "rwkv7_tmix_a_gate_bf16::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("a0[C]", "a12[B,T,C]"),
+        output_contract=("sigmoid_gate[B,T,C]",),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_tmix_mix6_bf16",
+        family="tmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_tmix_mix6_bf16_v5::forward",
+            "rwkv7_tmix_mix6_bf16_v5::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("x[B,T,C]", "x_{r,w,k,v,a,g}[C]"),
+        output_contract=("mixed_{r,w,k,v,a,g}[B,T,C]",),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_tmix_kk_pre_bf16",
+        family="tmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_tmix_kk_pre_bf16_v5::forward",
+            "rwkv7_tmix_kk_pre_bf16_v5::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("key[B,T,H,64]", "key_scale[C]", "a[B,T,C]", "a_scale[C]"),
+        output_contract=(
+            "key[B,T,C]",
+            "negative_direction[B,T,C]",
+            "scaled_direction[B,T,C]",
+        ),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_tmix_vres_gate_bf16",
+        family="tmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_tmix_vres_gate_bf16_v3::forward",
+            "rwkv7_tmix_vres_gate_bf16_v3::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("value[B,T,C]", "first_value[B,T,C]", "v0[C]", "v12[B,T,C]"),
+        output_contract=("blended_value[B,T,C]",),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_tmix_lnx_rkvres_xg_bf16",
+        family="tmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_tmix_lnx_rkvres_xg_bf16_v1::forward",
+            "rwkv7_tmix_lnx_rkvres_xg_bf16_v1::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("x,r,k,v,g[B,T,C]", "r_k[H,64]", "norm_weight,bias[C]"),
+        output_contract=("normalized_gated_residual[B,T,C]",),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_cmix_bf16",
+        family="cmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_cmix_bf16_v5::forward",
+            "rwkv7_cmix_bf16_v5::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("x[B,T,C]", "x_k[C]", "key[4C,C]", "value[C,4C]"),
+        output_contract=("output[B,T,C]",),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_l2wrap_ce_bf16",
+        family="l2wrap_ce",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_l2wrap_ce_bf16_v2::forward",
+            "rwkv7_l2wrap_ce_bf16_v2::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("logits[...,V]", "targets[...]"),
+        output_contract=("mean_cross_entropy[]", "L2Wrap surrogate gradient"),
+    ),
+)
+
+INFERENCE_OPERATOR_SPECS: tuple[InferenceOperatorSpec, ...] = (
+    InferenceOperatorSpec(
+        provider="albatross",
+        name="infer_tmix_mix6_fp16_forward",
+        family="tmix",
+        dtype="float16",
+        state_behavior="mutates_shift",
+        native_op="rwkv7_fast_ops_fp16::tmix_mix6",
+        source_revision="ee3308f6922e59f2166c7fac3c5a192340a2b48e",
+        input_contract=("x[B,T,C]", "shift_state[B,C]", "six mix vectors[C]"),
+        output_contract=("six mixed tensors[B,T,C]", "updated shift_state[B,C]"),
+    ),
+    InferenceOperatorSpec(
+        provider="albatross",
+        name="infer_tmix_kk_a_gate_fp16_forward",
+        family="tmix",
+        dtype="float16",
+        state_behavior="functional",
+        native_op="rwkv7_fast_ops_fp16::tmix_kk_a_gate",
+        source_revision="ee3308f6922e59f2166c7fac3c5a192340a2b48e",
+        input_contract=("key[B,T,H*64]", "key/gate vectors[C]"),
+        output_contract=("key[B,T,C]", "negative_direction[B,T,C]", "gate[B,T,C]"),
+    ),
+    InferenceOperatorSpec(
+        provider="albatross",
+        name="infer_tmix_lnx_rkvres_xg_fp16_forward",
+        family="tmix",
+        dtype="float16",
+        state_behavior="functional",
+        native_op="rwkv7_fast_ops_fp16::tmix_lnx_rkvres_xg",
+        source_revision="ee3308f6922e59f2166c7fac3c5a192340a2b48e",
+        input_contract=("x,r,k,v,g[B,T,H*64]", "norm/residual vectors[C]"),
+        output_contract=("normalized_gated_residual[B,T,C]",),
+    ),
+    InferenceOperatorSpec(
+        provider="albatross",
+        name="infer_tmix_vres_gate_fp16_forward",
+        family="tmix",
+        dtype="float16",
+        state_behavior="functional",
+        native_op="rwkv7_fast_ops_fp16::tmix_vres_gate",
+        source_revision="ee3308f6922e59f2166c7fac3c5a192340a2b48e",
+        input_contract=("value/first_value/gate_delta[B,T,C]", "gate_bias[C]"),
+        output_contract=("blended_value[B,T,C]",),
+    ),
+    InferenceOperatorSpec(
+        provider="albatross",
+        name="infer_cmix_mix_fp16_forward",
+        family="cmix",
+        dtype="float16",
+        state_behavior="mutates_shift",
+        native_op="rwkv7_fast_ops_fp16::cmix_mix",
+        source_revision="ee3308f6922e59f2166c7fac3c5a192340a2b48e",
+        input_contract=("x[B,T,C]", "shift_state[B,C]", "mix[C]"),
+        output_contract=("mixed[B,T,C]", "updated shift_state[B,C]"),
+    ),
+)
+
 _BY_IDENTITY = {spec.identity: spec for spec in KERNEL_SPECS}
 if len(_BY_IDENTITY) != len(KERNEL_SPECS):
     raise RuntimeError("kernel registry contains a duplicate provider/name identity")
@@ -148,6 +382,18 @@ def kernel_specs() -> tuple[KernelSpec, ...]:
     """Return the immutable provider-specific kernel registry."""
 
     return KERNEL_SPECS
+
+
+def training_operator_specs() -> tuple[TrainingOperatorSpec, ...]:
+    """Return imported training operators that are not WKV recurrences."""
+
+    return TRAINING_OPERATOR_SPECS
+
+
+def inference_operator_specs() -> tuple[InferenceOperatorSpec, ...]:
+    """Return imported fused inference blocks outside the WKV recurrence."""
+
+    return INFERENCE_OPERATOR_SPECS
 
 
 def get_kernel_spec(name: str, *, provider: Provider | None = None) -> KernelSpec:

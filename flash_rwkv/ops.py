@@ -16,8 +16,10 @@ from .config import (
     training_chunk_config,
 )
 from .reference import rwkv7_reference
-from .validation import ValidatedLayout, validate_rwkv7_inputs
-
+from .validation import (
+    ValidatedLayout,
+    validate_rwkv7_inputs,
+)
 
 _HEAD_SIZE = 64
 
@@ -153,24 +155,10 @@ def rwkv7(
             f"unsupported mode {mode!r}; supported modes: 'fp32io16', 'fp16'"
         )
     if algorithm == "auto":
-        layout = validate_rwkv7_inputs(
-            r,
-            log_decay,
-            k,
-            v,
-            a,
-            b,
-            scale=scale,
-            initial_state=initial_state,
-            cu_seqlens=cu_seqlens,
-            state_indices=state_indices,
-        )
         algorithm = select_algorithm(
             algorithm,
             mode=mode,
-            max_sequence_length=max(
-                end - start for start, end in layout.sequence_ranges
-            ),
+            max_sequence_length=0,
         )
     if algorithm == "reference":
         if mode != "fp32io16":
@@ -234,19 +222,27 @@ def rwkv7(
 def _cuda_metadata(
     layout: ValidatedLayout,
     device: torch.device,
+    cu_seqlens: torch.Tensor | None,
+    state_indices: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    offsets = [layout.sequence_ranges[0][0]]
-    offsets.extend(end for _, end in layout.sequence_ranges)
-    if offsets[-1] > torch.iinfo(torch.int32).max:
-        raise ValueError("packed token count must fit in int32")
-    query_start_loc = torch.tensor(offsets, device=device, dtype=torch.int32)
-    indices = (
-        tuple(range(layout.num_sequences))
-        if layout.state_indices is None
-        else layout.state_indices
+    if cu_seqlens is None:
+        if layout.sequence_length > torch.iinfo(torch.int32).max:
+            raise ValueError("sequence length must fit in int32")
+        query_start_loc = torch.arange(
+            0,
+            (layout.batch_size + 1) * layout.sequence_length,
+            layout.sequence_length,
+            device=device,
+            dtype=torch.int32,
+        )
+    else:
+        query_start_loc = cu_seqlens
+    cuda_state_indices = (
+        torch.arange(layout.num_sequences, device=device, dtype=torch.int32)
+        if state_indices is None
+        else state_indices
     )
-    state_indices = torch.tensor(indices, device=device, dtype=torch.int32)
-    return query_start_loc, state_indices
+    return query_start_loc, cuda_state_indices
 
 
 def _check_cuda_forward_only(tensors: tuple[torch.Tensor | None, ...]) -> None:
@@ -265,6 +261,8 @@ def _cuda_chunk_metadata(
     if isinstance(chunk_size, bool) or chunk_size not in {16, 32, 64}:
         raise ValueError("chunk_size must be one of 16, 32, or 64")
 
+    if layout.sequence_ranges is None:
+        raise ValueError("chunk metadata requires strict packed validation")
     sequence_chunk_offsets = [0]
     chunk_token_starts: list[int] = []
     chunk_token_ends: list[int] = []
@@ -464,6 +462,10 @@ def _rwkv7_recurrent_cuda(
     mode: str,
     mutate_state: bool,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if mode not in {"fp32io16", "fp16"}:
+        raise ValueError(
+            f"unsupported mode {mode!r}; supported modes: 'fp32io16', 'fp16'"
+        )
     layout = validate_rwkv7_inputs(
         r,
         log_decay,
@@ -476,6 +478,7 @@ def _rwkv7_recurrent_cuda(
         cu_seqlens=cu_seqlens,
         state_indices=state_indices,
         required_head_size=_HEAD_SIZE,
+        strict_packed_metadata=False,
     )
     if not r.is_cuda:
         raise ValueError("algorithm='recurrent' requires CUDA inputs")
@@ -504,7 +507,12 @@ def _rwkv7_recurrent_cuda(
     else:
         working_state = initial_state.to(dtype=state_dtype).clone()
 
-    query_start_loc, cuda_state_indices = _cuda_metadata(layout, r.device)
+    query_start_loc, cuda_state_indices = _cuda_metadata(
+        layout,
+        r.device,
+        cu_seqlens,
+        state_indices,
+    )
     flattened_inputs = tuple(
         tensor.reshape(-1, layout.num_heads, _HEAD_SIZE)
         for tensor in (r, log_decay, k, v, a, b)
@@ -541,7 +549,16 @@ def rwkv7_recurrent_stateful(
     scale: float = 1.0,
     mode: str = "fp32io16",
 ) -> torch.Tensor:
-    """Run packed recurrent inference and update selected state rows in place."""
+    """Run packed recurrent inference and update selected state rows in place.
+
+    ``cu_seqlens`` and ``state_indices`` must be contiguous CUDA int32 tensors.
+    The serving path validates their Python-visible structure and passes the same
+    tensor objects to the native operator without synchronizing values to the
+    host. The native boundary checks endpoints, monotonic ranges, slot bounds,
+    and slot uniqueness on the current CUDA stream before consuming metadata.
+    Use ``validate_packed_metadata_strict`` only for synchronous debug errors
+    outside the hot path.
+    """
 
     output, _ = _rwkv7_recurrent_cuda(
         r,

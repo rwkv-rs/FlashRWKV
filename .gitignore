@@ -1,4 +1,8 @@
 build/**
+artifacts/**
+.pytest_cache/**
+.ruff_cache/**
+.venv/**
 .cache/**
 *.egg-info/**
 *.so

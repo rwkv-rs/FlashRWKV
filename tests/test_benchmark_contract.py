@@ -7,6 +7,7 @@ import pytest
 from flash_rwkv.benchmark_contract import (
     ALBATROSS_BT_MATRIX,
     ALBATROSS_ROW_FIELDS,
+    format_result,
     percentile,
     summarize_samples,
 )
@@ -54,6 +55,15 @@ def test_summary_has_exact_fields_and_throughput_definition() -> None:
     assert row.p50_ms == pytest.approx(2.0)
     assert row.p90_ms == pytest.approx(2.8)
     assert row.tok_s_p50 == pytest.approx(2 * 4 * 1000.0 / 2.0)
+    assert format_result(row.as_dict()) == (
+        "RESULT B=2 T=4 iters=3 p10_ms=1.2 p50_ms=2.0 "
+        "p90_ms=2.8 tok_s_p50=4000.0 label=B2T4"
+    )
+
+
+def test_result_formatter_rejects_incomplete_rows() -> None:
+    with pytest.raises(ValueError, match="missing RESULT fields"):
+        format_result({"B": 1, "T": 1})
 
 
 @pytest.mark.parametrize(
