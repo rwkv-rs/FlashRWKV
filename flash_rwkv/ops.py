@@ -510,6 +510,109 @@ def _rwkv7_chunk_cuda(
     return output, working_state if output_final_state else None
 
 
+def rl_infctx_chunk_fp32io16_factor_recompute(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    scale: float = 1.0,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = True,
+    cu_seqlens: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
+    chunk_size: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run the low-workspace RL-infctx factor-recompute chunk kernel.
+
+    This forward-only FP32-state operator exposes the canonical registry
+    strategy without leaking its private workspace or native ``_C`` ABI.
+    Fixed and packed inputs share the ordinary RWKV7 state contract.
+    """
+
+    layout = validate_rwkv7_inputs(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        scale=scale,
+        initial_state=initial_state,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        required_head_size=_HEAD_SIZE,
+    )
+    if not r.is_cuda:
+        raise ValueError(
+            "rl_infctx_chunk_fp32io16_factor_recompute requires CUDA inputs"
+        )
+    if r.dtype not in {torch.float16, torch.bfloat16}:
+        raise TypeError(
+            "rl_infctx_chunk_fp32io16_factor_recompute requires fp16 or bf16 "
+            "token tensors"
+        )
+    if initial_state is not None and initial_state.dtype != torch.float32:
+        raise TypeError(
+            "rl_infctx_chunk_fp32io16_factor_recompute requires an FP32 "
+            "initial_state"
+        )
+    _check_cuda_forward_only((r, log_decay, k, v, a, b, initial_state))
+
+    (
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        cuda_state_indices,
+    ) = _cuda_chunk_metadata(layout, chunk_size, r.device)
+    flattened_inputs = tuple(
+        tensor.reshape(-1, layout.num_heads, _HEAD_SIZE)
+        for tensor in (r, log_decay, k, v, a, b)
+    )
+    working_state = (
+        torch.zeros(
+            (
+                layout.num_sequences,
+                layout.num_heads,
+                _HEAD_SIZE,
+                _HEAD_SIZE,
+            ),
+            dtype=torch.float32,
+            device=r.device,
+        )
+        if initial_state is None
+        else initial_state.clone()
+    )
+    output = torch.empty_like(flattened_inputs[3])
+    boundary = torch.empty(
+        (
+            chunk_token_starts.numel(),
+            layout.num_heads,
+            _HEAD_SIZE,
+            _HEAD_SIZE,
+        ),
+        dtype=torch.float32,
+        device=r.device,
+    )
+    _extension.recompute_chunk_fp32(
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        cuda_state_indices,
+        working_state,
+        *flattened_inputs,
+        output,
+        boundary,
+        float(scale),
+    )
+    return (
+        output.reshape(v.shape),
+        working_state if output_final_state else None,
+    )
+
+
 def _rwkv7_recurrent_cuda(
     r: torch.Tensor,
     log_decay: torch.Tensor,

@@ -7,16 +7,16 @@ from pathlib import Path
 
 import pytest
 import torch
-import torch.nn.functional as functional
+from torch.nn import functional
 
-from flash_rwkv import _extension
 from flash_rwkv import (
     ChunkConfig,
+    _extension,
     enumerate_chunk_configs,
+    rl_infctx_chunk_fp32io16_factor_recompute,
     rwkv7,
     rwkv7_reference,
 )
-
 
 HEAD_SIZE = 64
 TOLERANCE = json.loads(
@@ -325,12 +325,13 @@ def test_recompute_packed_slot_mapping_matches_reference() -> None:
         cu_seqlens=cu_seqlens,
         state_indices=state_indices,
     )
-    actual_output, actual_state, _ = _run_recompute_chunk(
-        inputs,
-        initial_state,
-        sequence_lengths=sequence_lengths,
-        chunk_size=16,
+    actual_output, actual_state = rl_infctx_chunk_fp32io16_factor_recompute(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
         state_indices=state_indices,
+        chunk_size=16,
     )
     torch.cuda.synchronize()
 
