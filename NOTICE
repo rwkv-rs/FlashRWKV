@@ -18,10 +18,10 @@ The following files contain material adapted from the vLLM project and its
 RWKV/Albatross integration at rwkv-rs/vllm-rwkv commit
 6d683f9e49a2997e405c47edc147872c8609513b:
 
-- csrc/infer/wkv7/infer_common_recurrent_varlen_bindings.cpp
-- csrc/infer/wkv7/infer_common_recurrent_fp32io16_forward_varlen.cu
-- csrc/infer/wkv7/infer_sm80_recurrent_fp16_forward_varlen.cu
-- benchmarks/infer/wkv7/benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py
+- csrc/infer/recurrent/infer_common_recurrent_varlen_bindings.cpp
+- csrc/infer/recurrent/infer_common_recurrent_fp32io16_forward_varlen.cu
+- csrc/infer/recurrent/infer_sm80_recurrent_fp16_forward_varlen.cu
+- benchmarks/infer/recurrent/benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py
 - benchmarks/benchmark_rwkv7.py
 - benchmarks/benchmark_training.py
 - benchmarks/kernel_benchmark.py
@@ -33,8 +33,8 @@ The following fused FP16 inference block operators are adapted from
 BlinkDL/Albatross faster3a_2607 commit
 ee3308f6922e59f2166c7fac3c5a192340a2b48e:
 
-- csrc/infer/wkv7/infer_common_fused_fp16_forward_registration.cpp
-- csrc/infer/wkv7/infer_common_fused_fp16_forward.cu
+- csrc/infer/fused/infer_common_fused_fp16_forward_registration.cpp
+- csrc/infer/fused/infer_common_fused_fp16_forward.cu
 
 The already-owned FP16/FP32 WKV recurrence files from that source are not
 duplicated. These derived files are licensed under the Apache License,
