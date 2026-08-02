@@ -191,18 +191,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p artifacts build/architecture-matrix
-          if TORCH_CUDA_ARCH_LIST=8.0 .venv/bin/python setup.py build_ext \
-            --force \
-            --build-temp build/architecture-matrix/sm80-temp \
-            --build-lib build/architecture-matrix/sm80-lib \
-            > artifacts/architecture-sm80.log 2>&1; then
-            echo "SM80 build unexpectedly succeeded" >&2
-            exit 1
-          fi
-          grep -F \
-            "requires compute capability >= 9.0" \
-            artifacts/architecture-sm80.log
-          for target in 9.0 12.0; do
+          for target in 6.1 8.0 9.0 12.0; do
             label="sm${target/./}"
             TORCH_CUDA_ARCH_LIST="$target" .venv/bin/python setup.py build_ext \
               --force \
@@ -216,13 +205,14 @@ jobs:
 
           payload = {
               "schema_version": 1,
-              "wheel_minimum_architecture": "sm90",
+              "wheel_minimum_architecture": "sm60",
               "targets": [
-                  {"architecture": "sm80", "status": "fail_closed"},
+                  {"architecture": "sm61", "status": "runtime_validated"},
+                  {"architecture": "sm80", "status": "compile_only"},
                   {"architecture": "sm90", "status": "compile_only"},
                   {"architecture": "sm120", "status": "compile_only"},
               ],
-              "runtime_validated_architectures": ["sm120"],
+              "runtime_validated_architectures": ["sm61", "sm120"],
           }
           Path("artifacts/architecture-matrix.json").write_text(
               json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -323,14 +313,15 @@ jobs:
           architecture_path = Path("artifacts/architecture-matrix.json")
           architecture = json.loads(architecture_path.read_text())
           expected_architecture_targets = [
-              {"architecture": "sm80", "status": "fail_closed"},
+              {"architecture": "sm61", "status": "runtime_validated"},
+              {"architecture": "sm80", "status": "compile_only"},
               {"architecture": "sm90", "status": "compile_only"},
               {"architecture": "sm120", "status": "compile_only"},
           ]
           if (
-              architecture["wheel_minimum_architecture"] != "sm90"
+              architecture["wheel_minimum_architecture"] != "sm60"
               or architecture["targets"] != expected_architecture_targets
-              or architecture["runtime_validated_architectures"] != ["sm120"]
+              or architecture["runtime_validated_architectures"] != ["sm61", "sm120"]
           ):
               raise SystemExit(f"invalid architecture matrix: {architecture}")
           report.extend(
@@ -338,9 +329,11 @@ jobs:
                   f"#### `{architecture_path.name}`",
                   "",
                   "```text",
-                  "BUILD target=sm80 status=fail_closed wheel_minimum=sm90",
-                  "BUILD target=sm90 status=compile_only wheel_minimum=sm90",
-                  "BUILD target=sm120 status=compile_only wheel_minimum=sm90",
+                  "BUILD target=sm61 status=runtime_validated wheel_minimum=sm60",
+                  "BUILD target=sm80 status=compile_only wheel_minimum=sm60",
+                  "BUILD target=sm90 status=compile_only wheel_minimum=sm60",
+                  "BUILD target=sm120 status=compile_only wheel_minimum=sm60",
+                  "RUNTIME architecture=sm61 status=validated",
                   "RUNTIME architecture=sm120 status=validated",
                   "```",
                   "",

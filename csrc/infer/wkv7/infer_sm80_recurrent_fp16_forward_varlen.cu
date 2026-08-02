@@ -29,6 +29,7 @@ __device__ __forceinline__ void cp_async(
     const void* global,
     bool predicate) {
   static_assert(Bytes == 16 || Bytes == 8 || Bytes == 4);
+#if __CUDA_ARCH__ >= 800
   const int copied_bytes = predicate ? Bytes : 0;
   const unsigned int shared_address = __cvta_generic_to_shared(shared);
   if constexpr (Bytes == 16) {
@@ -48,19 +49,34 @@ __device__ __forceinline__ void cp_async(
           "n"(Bytes),
           "r"(copied_bytes));
   }
+#else
+  if (predicate) {
+    if constexpr (Bytes == 16) {
+      *reinterpret_cast<int4*>(shared) = *reinterpret_cast<const int4*>(global);
+    } else if constexpr (Bytes == 8) {
+      *reinterpret_cast<int2*>(shared) = *reinterpret_cast<const int2*>(global);
+    } else {
+      *reinterpret_cast<int*>(shared) = *reinterpret_cast<const int*>(global);
+    }
+  }
+#endif
 }
 
 __device__ __forceinline__ void cp_commit() {
+#if __CUDA_ARCH__ >= 800
   asm volatile("cp.async.commit_group;\n" ::);
+#endif
 }
 
 template <int NumPending>
 __device__ __forceinline__ void cp_wait() {
+#if __CUDA_ARCH__ >= 800
   if constexpr (NumPending == 0) {
     asm volatile("cp.async.wait_all;\n" ::);
   } else {
     asm volatile("cp.async.wait_group %0;\n" ::"n"(NumPending));
   }
+#endif
 }
 
 __device__ __forceinline__ void prefetch_token(

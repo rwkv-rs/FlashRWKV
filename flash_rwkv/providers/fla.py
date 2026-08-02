@@ -9,6 +9,15 @@ from collections.abc import Sequence
 import torch
 
 
+def _require_chunk_architecture(tensor: torch.Tensor) -> None:
+    if tensor.is_cuda and torch.cuda.get_device_capability(tensor.device) < (8, 0):
+        raise RuntimeError(
+            "FLA chunk_rwkv7 requires compute capability >= 8.0 because its "
+            "Triton kernels use BF16 dot/conversion operations; use the "
+            "FlashRWKV recurrent kernels on Pascal"
+        )
+
+
 def pretrain_chunk_fp32io16_forward(
     r: torch.Tensor,
     log_decay: torch.Tensor,
@@ -24,6 +33,7 @@ def pretrain_chunk_fp32io16_forward(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run FLA's fixed-length chunk forward/autograd implementation."""
 
+    _require_chunk_architecture(r)
     from fla.ops.rwkv7 import chunk_rwkv7
 
     if initial_state is not None and initial_state.dtype != torch.float32:

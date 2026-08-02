@@ -7,6 +7,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[1]
 CSRC = ROOT / "csrc"
 EXPECTED_NATIVE_OPS = {
@@ -22,6 +24,8 @@ EXPECTED_NATIVE_OPS = {
 
 
 def test_tracked_paths_and_text_do_not_use_architecture_placeholders() -> None:
+    if not (ROOT / ".git").exists():
+        pytest.skip("source checkout has no Git metadata")
     placeholder = "sm" + "xx"
     tracked = subprocess.run(
         ("git", "ls-files"),
@@ -266,11 +270,10 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert '"--untracked-files=no"' in benchmark_revision
     assert "artifacts/**" in gitignore
     assert 'TORCH_CUDA_ARCH_LIST: "12.0"' in workflow
-    assert "TORCH_CUDA_ARCH_LIST=8.0" in workflow
-    assert 'for target in 9.0 12.0' in workflow
+    assert 'for target in 6.1 8.0 9.0 12.0' in workflow
     assert "architecture-matrix.json" in workflow
-    assert '"wheel_minimum_architecture": "sm90"' in workflow
-    assert '"runtime_validated_architectures": ["sm120"]' in workflow
+    assert '"wheel_minimum_architecture": "sm60"' in workflow
+    assert '"runtime_validated_architectures": ["sm61", "sm120"]' in workflow
     assert "torch.cuda.get_device_capability(0)" in workflow
     assert "benchmark_rl_infctx_chunk_fp32io16_forward.py" in workflow
     assert "rl-infctx-benchmark.json" in workflow

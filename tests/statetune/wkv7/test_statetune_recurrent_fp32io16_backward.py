@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -16,10 +17,15 @@ from flash_rwkv import (
 )
 
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required",
-)
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
+    pytest.mark.skipif(
+        importlib.util.find_spec("fla") is None
+        or not torch.cuda.is_available()
+        or torch.cuda.get_device_capability()[0] < 8,
+        reason="FLA chunk kernels require SM80 or newer",
+    ),
+]
 
 HEAD_SIZE = 64
 TOLERANCE = json.loads(

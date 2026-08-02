@@ -131,15 +131,32 @@ copied into this repository. The fixed training adapter uses chunk size 16
 with `safe_gate=True`; benchmark inputs keep `log_decay` in FLA's documented
 safe range.
 
+On Pascal, FLA's FP16 `fused_recurrent_rwkv7` path is supported. FLA's chunk
+forward/backward path requires SM80 or newer because its Triton kernels emit
+BF16 dot/conversion operations. FlashRWKV's native recurrent and emulated-BF16
+paths remain available on Pascal.
+
 ## Installation
 
 A CUDA-enabled PyTorch environment, matching CUDA toolkit, Ninja, and a C++
 toolchain are required.
 
+The native extension supports compute capability 6.0 and newer. On Pascal
+(`sm60`/`sm61`), the FP16 recurrent kernel uses synchronous shared-memory
+loads instead of `cp.async`, and BF16 pair arithmetic is emulated through
+FP32. This is a correctness path; Ampere and newer retain their native fast
+paths.
+
 ```bash
 git clone https://github.com/rwkv-rs/FlashRWKV.git
 cd FlashRWKV
 python -m pip install -v --no-build-isolation .
+```
+
+For a Pascal-only build, set the architecture explicitly, for example:
+
+```bash
+TORCH_CUDA_ARCH_LIST=6.1 python -m pip install -v --no-build-isolation .
 ```
 
 The Helicopter product checkout installs FlashRWKV and FLA through their

@@ -17,7 +17,7 @@ StateBehavior = Literal["functional"]
 OperatorFamily = Literal["tmix", "cmix", "l2wrap_ce", "head_l2wrap_ce"]
 InferenceStateBehavior = Literal["functional", "mutates_shift"]
 TranslationUnitArchitecture = Literal["common", "sm80", "sm90"]
-ValidatedArchitecture = Literal["sm120"]
+ValidatedArchitecture = Literal["sm61", "sm120"]
 
 _NAME_PATTERN = re.compile(
     r"^(pretrain|infer)_(recurrent|chunk)_"
@@ -37,7 +37,7 @@ class KernelSpec:
     state_behavior: StateBehavior
     stages: tuple[str, ...]
     translation_unit_architecture: TranslationUnitArchitecture | None = "common"
-    package_minimum_architecture: Literal["sm90"] | None = "sm90"
+    package_minimum_architecture: Literal["sm60"] | None = "sm60"
     validated_architectures: tuple[ValidatedArchitecture, ...] = (
         RUNTIME_VALIDATED_ARCHITECTURES
     )
@@ -70,7 +70,7 @@ class KernelSpec:
                 )
         elif (
             self.translation_unit_architecture not in {"common", "sm80", "sm90"}
-            or self.package_minimum_architecture != "sm90"
+            or self.package_minimum_architecture != "sm60"
             or self.validated_architectures != RUNTIME_VALIDATED_ARCHITECTURES
         ):
             raise ValueError(
@@ -97,7 +97,7 @@ class TrainingOperatorSpec:
     input_contract: tuple[str, ...]
     output_contract: tuple[str, ...]
     translation_unit_architecture: TranslationUnitArchitecture = "common"
-    package_minimum_architecture: Literal["sm90"] = "sm90"
+    package_minimum_architecture: Literal["sm60"] = "sm60"
     validated_architectures: tuple[ValidatedArchitecture, ...] = (
         RUNTIME_VALIDATED_ARCHITECTURES
     )
@@ -114,7 +114,7 @@ class TrainingOperatorSpec:
             raise ValueError("input and output contracts must be non-empty")
         if (
             self.translation_unit_architecture not in {"common", "sm80", "sm90"}
-            or self.package_minimum_architecture != "sm90"
+            or self.package_minimum_architecture != "sm60"
             or self.validated_architectures != RUNTIME_VALIDATED_ARCHITECTURES
         ):
             raise ValueError("invalid training operator architecture contract")
@@ -138,7 +138,7 @@ class InferenceOperatorSpec:
     input_contract: tuple[str, ...]
     output_contract: tuple[str, ...]
     translation_unit_architecture: TranslationUnitArchitecture = "common"
-    package_minimum_architecture: Literal["sm90"] = "sm90"
+    package_minimum_architecture: Literal["sm60"] = "sm60"
     validated_architectures: tuple[ValidatedArchitecture, ...] = (
         RUNTIME_VALIDATED_ARCHITECTURES
     )
@@ -154,7 +154,7 @@ class InferenceOperatorSpec:
             raise ValueError("input and output contracts must be non-empty")
         if (
             self.translation_unit_architecture not in {"common", "sm80", "sm90"}
-            or self.package_minimum_architecture != "sm90"
+            or self.package_minimum_architecture != "sm60"
             or self.validated_architectures != RUNTIME_VALIDATED_ARCHITECTURES
         ):
             raise ValueError("invalid inference operator architecture contract")
@@ -200,7 +200,6 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
         autograd=False,
         state_behavior="functional",
         stages=("forward recurrence",),
-        translation_unit_architecture="sm80",
     ),
     KernelSpec(
         provider="flashkda-derived",
@@ -297,7 +296,6 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
         source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
         input_contract=("x[B,T,C]", "x_{r,w,k,v,a,g}[C]"),
         output_contract=("mixed_{r,w,k,v,a,g}[B,T,C]",),
-        translation_unit_architecture="sm90",
     ),
     TrainingOperatorSpec(
         provider="rwkv-lm",
@@ -316,7 +314,6 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
             "negative_direction[B,T,C]",
             "scaled_direction[B,T,C]",
         ),
-        translation_unit_architecture="sm90",
     ),
     TrainingOperatorSpec(
         provider="rwkv-lm",
@@ -359,7 +356,6 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
         source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
         input_contract=("x[B,T,C]", "x_k[C]", "key[4C,C]", "value[C,4C]"),
         output_contract=("output[B,T,C]",),
-        translation_unit_architecture="sm90",
     ),
     TrainingOperatorSpec(
         provider="rwkv-lm",
