@@ -395,3 +395,40 @@ def pretrain_tmix_a_gate_bf16_backward(
         a12,
     )
     return gradients[0], gradients[1]
+
+
+def pretrain_tmix_vres_gate_bf16_forward(
+    value: torch.Tensor,
+    first_value: torch.Tensor,
+    v0: torch.Tensor,
+    v12: torch.Tensor,
+) -> torch.Tensor:
+    """Call the RWKV-LM TimeMix value-residual gate forward operator."""
+
+    _load_extension()
+    return torch.ops.rwkv7_tmix_vres_gate_bf16_v3.forward(
+        value,
+        first_value,
+        v0,
+        v12,
+    )
+
+
+def pretrain_tmix_vres_gate_bf16_backward(
+    grad_output: torch.Tensor,
+    value: torch.Tensor,
+    first_value: torch.Tensor,
+    v0: torch.Tensor,
+    v12: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Call the paired RWKV-LM TimeMix value-residual gate backward operator."""
+
+    _load_extension()
+    gradients = torch.ops.rwkv7_tmix_vres_gate_bf16_v3.backward(
+        grad_output,
+        value,
+        first_value,
+        v0,
+        v12,
+    )
+    return gradients[0], gradients[1], gradients[2], gradients[3]

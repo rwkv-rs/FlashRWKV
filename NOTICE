@@ -40,6 +40,8 @@ methods adapted from BlinkDL/RWKV-LM commit
 - csrc/pretrain/l2wrap_ce/rwkv7_l2wrap_ce_bf16_v2.cu
 - csrc/pretrain/tmix_a_gate/rwkv7_tmix_a_gate_bf16_registration.cpp
 - csrc/pretrain/tmix_a_gate/rwkv7_tmix_a_gate_bf16.cu
+- csrc/pretrain/tmix_vres_gate/rwkv7_tmix_vres_gate_bf16_v3_registration.cpp
+- csrc/pretrain/tmix_vres_gate/rwkv7_tmix_vres_gate_bf16_v3.cu
 
 Those derived files are licensed under the Apache License, Version 2.0 and
 retain SPDX/source-revision headers. See LICENSES/Apache-2.0.txt.

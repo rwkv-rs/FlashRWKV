@@ -186,6 +186,20 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
     ),
     TrainingOperatorSpec(
         provider="rwkv-lm",
+        name="pretrain_tmix_vres_gate_bf16",
+        family="tmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_tmix_vres_gate_bf16_v3::forward",
+            "rwkv7_tmix_vres_gate_bf16_v3::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("value[B,T,C]", "first_value[B,T,C]", "v0[C]", "v12[B,T,C]"),
+        output_contract=("blended_value[B,T,C]",),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
         name="pretrain_cmix_bf16",
         family="cmix",
         dtype="bfloat16",

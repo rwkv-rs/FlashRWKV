@@ -25,6 +25,8 @@ setup(
                 "csrc/pretrain/l2wrap_ce/rwkv7_l2wrap_ce_bf16_v2.cu",
                 "csrc/pretrain/tmix_a_gate/rwkv7_tmix_a_gate_bf16_registration.cpp",
                 "csrc/pretrain/tmix_a_gate/rwkv7_tmix_a_gate_bf16.cu",
+                "csrc/pretrain/tmix_vres_gate/rwkv7_tmix_vres_gate_bf16_v3_registration.cpp",
+                "csrc/pretrain/tmix_vres_gate/rwkv7_tmix_vres_gate_bf16_v3.cu",
                 "csrc/recurrent/recurrent_fp16.cu",
                 "csrc/recurrent/recurrent_fp32.cu",
             ],
