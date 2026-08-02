@@ -19,6 +19,8 @@ setup(
                 "csrc/kda/infer_chunk_bf16_forward_k2_recurrence.cu",
                 "csrc/pretrain/recurrent_fp32io16_backward.cu",
                 "csrc/pretrain/recurrent_fp32io16_forward.cu",
+                "csrc/pretrain/cmix/rwkv7_cmix_bf16_v5_registration.cpp",
+                "csrc/pretrain/cmix/rwkv7_cmix_bf16_v5.cu",
                 "csrc/recurrent/recurrent_fp16.cu",
                 "csrc/recurrent/recurrent_fp32.cu",
             ],

@@ -295,3 +295,45 @@ def recompute_chunk_fp32(
         boundary,
         scale,
     )
+
+
+def pretrain_cmix_bf16_forward(
+    x: torch.Tensor,
+    x_k: torch.Tensor,
+    key_weight: torch.Tensor,
+    value_weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Call the RWKV-LM ChannelMix forward operator."""
+
+    _load_extension()
+    output = torch.ops.rwkv7_cmix_bf16_v5.forward(
+        x,
+        x_k,
+        key_weight,
+        value_weight,
+    )
+    return output[0], output[1], output[2]
+
+
+def pretrain_cmix_bf16_backward(
+    grad_output: torch.Tensor,
+    x: torch.Tensor,
+    x_k: torch.Tensor,
+    key_weight: torch.Tensor,
+    value_weight: torch.Tensor,
+    mixed: torch.Tensor,
+    activation: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Call the RWKV-LM ChannelMix backward operator."""
+
+    _load_extension()
+    gradients = torch.ops.rwkv7_cmix_bf16_v5.backward(
+        grad_output,
+        x,
+        x_k,
+        key_weight,
+        value_weight,
+        mixed,
+        activation,
+    )
+    return gradients[0], gradients[1], gradients[2], gradients[3]

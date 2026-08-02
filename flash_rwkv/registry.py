@@ -8,11 +8,11 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-
 Provider = Literal["rwkv-lm", "vllm-rwkv", "flashkda-derived", "fla"]
 Maturity = Literal["stable", "experimental", "external"]
 Layout = Literal["fixed", "packed"]
 StateBehavior = Literal["functional"]
+OperatorFamily = Literal["tmix", "cmix", "l2wrap_ce", "head_l2wrap_ce"]
 
 _NAME_PATTERN = re.compile(
     r"^(pretrain|infer)_(recurrent|chunk)_"
@@ -49,6 +49,36 @@ class KernelSpec:
             raise ValueError(f"{self.name}: backward kernels must support autograd")
         if not self.stages or any(not stage for stage in self.stages):
             raise ValueError(f"{self.name}: stages must be non-empty")
+
+    @property
+    def identity(self) -> tuple[Provider, str]:
+        return self.provider, self.name
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingOperatorSpec:
+    """A source-attributed non-recurrence training operator family."""
+
+    provider: Provider
+    name: str
+    family: OperatorFamily
+    dtype: str
+    autograd: bool
+    native_ops: tuple[str, ...]
+    source_revision: str
+    input_contract: tuple[str, ...]
+    output_contract: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        expected_prefix = f"pretrain_{self.family}_"
+        if not self.name.startswith(expected_prefix):
+            raise ValueError(f"{self.name!r} must start with {expected_prefix!r}")
+        if not re.fullmatch(r"[0-9a-f]{40}", self.source_revision):
+            raise ValueError("source_revision must be a canonical full Git OID")
+        if not self.native_ops or len(set(self.native_ops)) != len(self.native_ops):
+            raise ValueError("native_ops must be non-empty and unique")
+        if not self.input_contract or not self.output_contract:
+            raise ValueError("input and output contracts must be non-empty")
 
     @property
     def identity(self) -> tuple[Provider, str]:
@@ -139,6 +169,23 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
     ),
 )
 
+TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
+        name="pretrain_cmix_bf16",
+        family="cmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_cmix_bf16_v5::forward",
+            "rwkv7_cmix_bf16_v5::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("x[B,T,C]", "x_k[C]", "key[4C,C]", "value[C,4C]"),
+        output_contract=("output[B,T,C]",),
+    ),
+)
+
 _BY_IDENTITY = {spec.identity: spec for spec in KERNEL_SPECS}
 if len(_BY_IDENTITY) != len(KERNEL_SPECS):
     raise RuntimeError("kernel registry contains a duplicate provider/name identity")
@@ -148,6 +195,12 @@ def kernel_specs() -> tuple[KernelSpec, ...]:
     """Return the immutable provider-specific kernel registry."""
 
     return KERNEL_SPECS
+
+
+def training_operator_specs() -> tuple[TrainingOperatorSpec, ...]:
+    """Return imported training operators that are not WKV recurrences."""
+
+    return TRAINING_OPERATOR_SPECS
 
 
 def get_kernel_spec(name: str, *, provider: Provider | None = None) -> KernelSpec:

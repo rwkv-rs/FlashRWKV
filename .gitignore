@@ -1,4 +1,5 @@
 build/**
+.venv/**
 .cache/**
 *.egg-info/**
 *.so

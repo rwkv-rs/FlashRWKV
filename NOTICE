@@ -34,6 +34,8 @@ methods adapted from BlinkDL/RWKV-LM commit
 
 - csrc/pretrain/recurrent_fp32io16_forward.cu
 - csrc/pretrain/recurrent_fp32io16_backward.cu
+- csrc/pretrain/cmix/rwkv7_cmix_bf16_v5_registration.cpp
+- csrc/pretrain/cmix/rwkv7_cmix_bf16_v5.cu
 
 Those derived files are licensed under the Apache License, Version 2.0 and
 retain SPDX/source-revision headers. See LICENSES/Apache-2.0.txt.

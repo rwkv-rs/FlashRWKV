@@ -6,7 +6,6 @@ import ast
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[1]
 CSRC = ROOT / "csrc"
 EXPECTED_NATIVE_OPS = {
@@ -94,6 +93,19 @@ def test_binding_responsibilities_have_distinct_translation_units() -> None:
     assert "RecurrentDimensions check_recurrent_layout(" not in bindings
     assert "PYBIND11_MODULE" in registration
     assert "check_recurrent_layout(" in validation
+
+
+def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
+    sources = _extension_sources()
+    expected = {
+        "csrc/pretrain/cmix/rwkv7_cmix_bf16_v5_registration.cpp",
+        "csrc/pretrain/cmix/rwkv7_cmix_bf16_v5.cu",
+    }
+    assert expected <= sources
+    for source in expected:
+        contents = (ROOT / source).read_text()
+        assert "SPDX-License-Identifier: Apache-2.0" in contents
+        assert "952102498e9ed367ea0a59ee64106916d474d30f" in contents
 
 
 def test_registration_preserves_exact_native_operator_surface() -> None:
