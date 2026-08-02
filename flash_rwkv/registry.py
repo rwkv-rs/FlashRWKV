@@ -10,7 +10,14 @@ from typing import Literal
 
 from .architecture import RUNTIME_VALIDATED_ARCHITECTURES
 
-Provider = Literal["rwkv-lm", "vllm-rwkv", "flashkda-derived", "fla", "albatross"]
+Provider = Literal[
+    "rwkv-lm",
+    "vllm-rwkv",
+    "flashkda-derived",
+    "flash_rwkv",
+    "fla",
+    "albatross",
+]
 Maturity = Literal["stable", "experimental", "external"]
 Layout = Literal["fixed", "packed"]
 StateBehavior = Literal["functional"]
@@ -20,8 +27,10 @@ TranslationUnitArchitecture = Literal["common", "sm80", "sm90"]
 ValidatedArchitecture = Literal["sm120"]
 
 _NAME_PATTERN = re.compile(
-    r"^(pretrain|infer)_(recurrent|chunk)_"
-    r"(fp32io16|fp16|bf16)_(forward|backward)(_varlen)?$"
+    r"^(pretrain|infer|rl_infctx|statetune)_(recurrent|chunk)_"
+    r"(fp32io16|fp16|bf16)_"
+    r"(forward|backward|forward_backward|materialized|factor_recompute|recurrent)"
+    r"(_varlen)?$"
 )
 
 
@@ -53,9 +62,9 @@ class KernelSpec:
             raise ValueError(
                 f"{self.name}: _varlen identity requires exactly packed layout"
             )
-        if workload == "pretrain" and not self.autograd:
-            raise ValueError(f"{self.name}: pretrain kernels must support autograd")
-        if direction == "backward" and not self.autograd:
+        if workload in {"pretrain", "statetune"} and not self.autograd:
+            raise ValueError(f"{self.name}: {workload} kernels must support autograd")
+        if direction in {"backward", "forward_backward"} and not self.autograd:
             raise ValueError(f"{self.name}: backward kernels must support autograd")
         if not self.stages or any(not stage for stage in self.stages):
             raise ValueError(f"{self.name}: stages must be non-empty")
@@ -255,6 +264,42 @@ KERNEL_SPECS: tuple[KernelSpec, ...] = (
         translation_unit_architecture=None,
         package_minimum_architecture=None,
         validated_architectures=(),
+    ),
+    KernelSpec(
+        provider="flash_rwkv",
+        name="statetune_recurrent_fp32io16_forward_backward",
+        maturity="stable",
+        layouts=("fixed",),
+        autograd=True,
+        state_behavior="functional",
+        stages=("nonzero-state forward recurrence", "initial-state backward"),
+    ),
+    KernelSpec(
+        provider="flash_rwkv",
+        name="rl_infctx_chunk_fp32io16_materialized",
+        maturity="experimental",
+        layouts=("fixed", "packed"),
+        autograd=False,
+        state_behavior="functional",
+        stages=("materialized chunk transform", "chunk recurrence"),
+    ),
+    KernelSpec(
+        provider="flash_rwkv",
+        name="rl_infctx_chunk_fp32io16_factor_recompute",
+        maturity="experimental",
+        layouts=("fixed", "packed"),
+        autograd=False,
+        state_behavior="functional",
+        stages=("factor recompute", "chunk recurrence"),
+    ),
+    KernelSpec(
+        provider="flash_rwkv",
+        name="rl_infctx_chunk_fp32io16_recurrent",
+        maturity="experimental",
+        layouts=("fixed", "packed"),
+        autograd=False,
+        state_behavior="functional",
+        stages=("recurrent baseline",),
     ),
 )
 

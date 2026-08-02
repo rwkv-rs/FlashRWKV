@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from flash_rwkv.registry import (
@@ -24,7 +26,12 @@ EXPECTED_IDENTITIES = {
     ("fla", "pretrain_chunk_fp32io16_forward"),
     ("fla", "pretrain_chunk_fp32io16_backward"),
     ("fla", "infer_recurrent_fp32io16_forward_varlen"),
+    ("flash_rwkv", "statetune_recurrent_fp32io16_forward_backward"),
+    ("flash_rwkv", "rl_infctx_chunk_fp32io16_materialized"),
+    ("flash_rwkv", "rl_infctx_chunk_fp32io16_factor_recompute"),
+    ("flash_rwkv", "rl_infctx_chunk_fp32io16_recurrent"),
 }
+ROOT = Path(__file__).parents[1]
 
 
 def test_registry_contains_exact_provider_specific_identities() -> None:
@@ -76,6 +83,35 @@ def test_reference_and_stateful_helpers_are_not_kernel_identities() -> None:
     names = {spec.name for spec in KERNEL_SPECS}
     assert set(REFERENCE_ORACLES).isdisjoint(names)
     assert set(WRAPPER_KERNELS).isdisjoint(names)
+
+
+def test_workload_benchmark_identities_resolve_through_canonical_registry() -> None:
+    statetune = get_kernel_spec(
+        "statetune_recurrent_fp32io16_forward_backward",
+        provider="flash_rwkv",
+    )
+    assert statetune.autograd is True
+    assert statetune.layouts == ("fixed",)
+
+    for strategy in ("materialized", "factor_recompute", "recurrent"):
+        rl_infctx = get_kernel_spec(
+            f"rl_infctx_chunk_fp32io16_{strategy}",
+            provider="flash_rwkv",
+        )
+        assert rl_infctx.layouts == ("fixed", "packed")
+        assert rl_infctx.maturity == "experimental"
+
+    statetune_source = (
+        ROOT
+        / "benchmarks/statetune/wkv7/benchmark_statetune_recurrent_fp32io16_backward.py"
+    ).read_text()
+    rl_infctx_source = (
+        ROOT
+        / "benchmarks/rl_infctx/wkv7/benchmark_rl_infctx_chunk_fp32io16_forward.py"
+    ).read_text()
+    assert "OPERATOR_SPEC = get_kernel_spec(" in statetune_source
+    assert "OPERATOR_SPECS = {" in rl_infctx_source
+    assert '"provider": "flash_rwkv"' not in rl_infctx_source
 
 
 @pytest.mark.parametrize(

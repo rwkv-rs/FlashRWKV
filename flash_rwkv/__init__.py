@@ -28,6 +28,7 @@ from .ops import (
     rwkv7,
     rwkv7_from_decay_logits,
     rwkv7_recurrent_stateful,
+    statetune_recurrent_fp32io16_forward,
 )
 from .reference import rwkv7_reference
 from .registry import (
@@ -81,6 +82,7 @@ __all__ = [
     "rwkv7_from_decay_logits",
     "rwkv7_recurrent_stateful",
     "rwkv7_reference",
+    "statetune_recurrent_fp32io16_forward",
     "training_operator_specs",
     "validate_packed_metadata_strict",
 ]

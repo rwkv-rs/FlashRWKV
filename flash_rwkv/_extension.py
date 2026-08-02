@@ -111,6 +111,40 @@ def pretrain_recurrent_fp32io16_forward(
     )
 
 
+def statetune_recurrent_fp32io16_forward(
+    sequence_chunk_offsets: torch.Tensor,
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    state: torch.Tensor,
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    output: torch.Tensor,
+    boundary: torch.Tensor,
+    state_dot_a: torch.Tensor,
+    scale: float,
+) -> None:
+    _load_extension().statetune_recurrent_fp32io16_forward(
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        state,
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        output,
+        boundary,
+        state_dot_a,
+        scale,
+    )
+
+
 def materialized_chunk_fp32(
     sequence_chunk_offsets: torch.Tensor,
     chunk_token_starts: torch.Tensor,
@@ -182,6 +216,56 @@ def pretrain_recurrent_fp32io16_backward(
     scale: float,
 ) -> None:
     _load_extension().pretrain_recurrent_fp32io16_backward(
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        final_state,
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        state_dot_a,
+        grad_output,
+        grad_final_state,
+        boundary,
+        grad_r,
+        grad_log_decay,
+        grad_k,
+        grad_v,
+        grad_a,
+        grad_b,
+        grad_initial_state,
+        scale,
+    )
+
+
+def statetune_recurrent_fp32io16_backward(
+    sequence_chunk_offsets: torch.Tensor,
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    final_state: torch.Tensor,
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    state_dot_a: torch.Tensor,
+    grad_output: torch.Tensor | None,
+    grad_final_state: torch.Tensor | None,
+    boundary: torch.Tensor,
+    grad_r: torch.Tensor | None,
+    grad_log_decay: torch.Tensor | None,
+    grad_k: torch.Tensor | None,
+    grad_v: torch.Tensor | None,
+    grad_a: torch.Tensor | None,
+    grad_b: torch.Tensor | None,
+    grad_initial_state: torch.Tensor | None,
+    scale: float,
+) -> None:
+    _load_extension().statetune_recurrent_fp32io16_backward(
         sequence_chunk_offsets,
         chunk_token_starts,
         chunk_token_ends,

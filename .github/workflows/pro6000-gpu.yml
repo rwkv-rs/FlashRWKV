@@ -98,6 +98,8 @@ jobs:
           import subprocess
           from pathlib import Path
 
+          from flash_rwkv.registry import get_kernel_spec
+
           def git(*arguments):
               return subprocess.run(
                   ("git", *arguments),
@@ -369,6 +371,16 @@ jobs:
                       raise SystemExit(
                           f"{path.name} RESULT row lacks fields: {missing}"
                       )
+                  if path.name in {
+                      "statetune-benchmark.json",
+                      "rl-infctx-benchmark.json",
+                  }:
+                      try:
+                          get_kernel_spec(row["name"], provider=row["provider"])
+                      except (KeyError, ValueError) as error:
+                          raise SystemExit(
+                              f"unregistered workload RESULT identity: {row}"
+                          ) from error
                   if (
                       path.name == "statetune-benchmark.json"
                       and (

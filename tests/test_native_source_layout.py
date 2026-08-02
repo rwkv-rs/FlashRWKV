@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 import subprocess
 from pathlib import Path
@@ -18,6 +19,8 @@ EXPECTED_NATIVE_OPS = {
     "recompute_chunk_fp32",
     "recurrent_fp16",
     "recurrent_fp32",
+    "statetune_recurrent_fp32io16_backward",
+    "statetune_recurrent_fp32io16_forward",
 }
 
 
@@ -69,6 +72,11 @@ EXPECTED_ARGUMENTS = {
         "state", "r", "log_decay", "k", "v", "a", "b", "output",
         "boundary", "state_dot_a", "scale",
     ),
+    "statetune_recurrent_fp32io16_forward": (
+        "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
+        "state", "r", "log_decay", "k", "v", "a", "b", "output",
+        "boundary", "state_dot_a", "scale",
+    ),
     "materialized_chunk_fp32": (
         "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
         "state_indices", "state", "r", "log_decay", "k", "v", "a", "b",
@@ -76,6 +84,13 @@ EXPECTED_ARGUMENTS = {
         "state_tile", "scale", "state_dot_a",
     ),
     "pretrain_recurrent_fp32io16_backward": (
+        "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
+        "final_state", "r", "log_decay", "k", "v", "a", "b",
+        "state_dot_a", "grad_output", "grad_final_state", "boundary",
+        "grad_r", "grad_log_decay", "grad_k", "grad_v", "grad_a", "grad_b",
+        "grad_initial_state", "scale",
+    ),
+    "statetune_recurrent_fp32io16_backward": (
         "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
         "final_state", "r", "log_decay", "k", "v", "a", "b",
         "state_dot_a", "grad_output", "grad_final_state", "boundary",
@@ -142,6 +157,7 @@ def test_binding_responsibilities_have_distinct_translation_units() -> None:
     assert "torch::Tensor" not in bindings
     assert "register_infer_recurrent_bindings(module)" in bindings
     assert "register_pretrain_recurrent_bindings(module)" in bindings
+    assert "register_statetune_recurrent_bindings(module)" in bindings
     assert "register_rl_infctx_experimental_bindings(module)" in bindings
     assert "register_infer_experimental_bindings(module)" in bindings
     assert "RecurrentDimensions check_recurrent_layout(" not in bindings
@@ -204,6 +220,8 @@ def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
     assert "decode_b2048" in workflow
     assert "B=2048 packed validator evidence is incomplete" in workflow
     assert "invalid StateTune RESULT identity" in workflow
+    assert "unregistered workload RESULT identity" in workflow
+    assert "from flash_rwkv.registry import get_kernel_spec" in workflow
     assert (
         "tests/infer/wkv7/"
         "test_infer_recurrent_fp16_fp32io16_forward_varlen.py"
@@ -302,7 +320,7 @@ def test_l2wrap_sources_are_built_from_the_pretrain_family() -> None:
         assert "952102498e9ed367ea0a59ee64106916d474d30f" in contents
 
 
-def test_native_sources_are_owned_by_workload_and_infer_family_trees() -> None:
+def test_native_sources_are_owned_by_workload_infer_and_shared_trees() -> None:
     sources = _extension_sources()
     workload_sources = {
         source
@@ -321,6 +339,7 @@ def test_native_sources_are_owned_by_workload_and_infer_family_trees() -> None:
         source.startswith(
             (
                 "csrc/pretrain/wkv7/",
+                "csrc/common/wkv7/",
                 "csrc/rl_infctx/wkv7/",
                 "csrc/statetune/wkv7/",
                 "csrc/infer/wkv7/",
@@ -338,22 +357,27 @@ def test_native_sources_are_owned_by_workload_and_infer_family_trees() -> None:
     )
 
 
-def test_statetune_registration_points_to_shared_recurrence_sources() -> None:
-    source = (
-        CSRC
-        / "statetune/wkv7/statetune_common_recurrent_fp32io16_registration.cpp"
-    )
+def test_statetune_owns_public_native_bindings_over_shared_recurrence() -> None:
+    from flash_rwkv import statetune_recurrent_fp32io16_forward
+
+    source = CSRC / "statetune/wkv7/statetune_common_recurrent_fp32io16_bindings.cpp"
     contents = source.read_text()
-    assert source.relative_to(ROOT).as_posix() in _extension_sources()
-    assert (
-        "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_forward.cu"
-        in contents
+    sources = _extension_sources()
+    assert source.relative_to(ROOT).as_posix() in sources
+    assert "statetune_recurrent_fp32io16_forward" in contents
+    assert "statetune_recurrent_fp32io16_backward" in contents
+    assert "&recurrent_common_fp32io16_forward" in contents
+    assert "&recurrent_common_fp32io16_backward" in contents
+    assert "_statetune_recurrent_source_manifest" not in contents
+    assert {
+        "csrc/common/wkv7/recurrent_common_fp32io16.cpp",
+        "csrc/common/wkv7/recurrent_common_fp32io16_forward.cu",
+        "csrc/common/wkv7/recurrent_common_fp32io16_backward.cu",
+    } <= sources
+    assert tuple(inspect.signature(statetune_recurrent_fp32io16_forward).parameters) == (
+        "r", "log_decay", "k", "v", "a", "b", "scale", "initial_state",
+        "output_final_state",
     )
-    assert (
-        "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_backward.cu"
-        in contents
-    )
-    assert "_statetune_recurrent_source_manifest" in contents
 
 
 def test_training_workloads_own_wkv7_csrc_tests_and_benchmarks() -> None:
@@ -414,6 +438,7 @@ def test_registration_preserves_exact_native_operator_surface() -> None:
         "csrc/infer/wkv7/infer_common_recurrent_varlen_bindings.cpp",
         "csrc/infer/wkv7/infer_common_chunk_bf16_bindings.cpp",
         "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_bindings.cpp",
+        "csrc/statetune/wkv7/statetune_common_recurrent_fp32io16_bindings.cpp",
         "csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_bindings.cpp",
     }
     assert binding_sources <= _extension_sources()
