@@ -25,6 +25,7 @@ from .validation import (
 )
 
 _HEAD_SIZE = 64
+RWKV7_RECURRENT_HEAD_SIZES = (64, 128, 256)
 
 
 def decay_logits_to_log_decay(decay_logits: torch.Tensor) -> torch.Tensor:
@@ -62,7 +63,7 @@ def pretrain_recurrent_fp32io16_forward(
         initial_state=initial_state,
         cu_seqlens=None,
         state_indices=None,
-        required_head_size=_HEAD_SIZE,
+        required_head_size=RWKV7_RECURRENT_HEAD_SIZES,
     )
     if not r.is_cuda:
         raise ValueError(
@@ -125,7 +126,7 @@ def statetune_recurrent_fp32io16_forward(
         initial_state=initial_state,
         cu_seqlens=None,
         state_indices=None,
-        required_head_size=_HEAD_SIZE,
+        required_head_size=RWKV7_RECURRENT_HEAD_SIZES,
     )
     if not r.is_cuda:
         raise ValueError("statetune_recurrent_fp32io16_forward requires CUDA inputs")
@@ -540,7 +541,7 @@ def _rwkv7_recurrent_cuda(
         initial_state=initial_state,
         cu_seqlens=cu_seqlens,
         state_indices=state_indices,
-        required_head_size=_HEAD_SIZE,
+        required_head_size=RWKV7_RECURRENT_HEAD_SIZES,
         strict_packed_metadata=False,
     )
     if not r.is_cuda:
@@ -550,13 +551,14 @@ def _rwkv7_recurrent_cuda(
     _check_cuda_forward_only((r, log_decay, k, v, a, b, initial_state))
 
     state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
+    head_size = layout.key_size
     if initial_state is None:
         working_state = torch.zeros(
             (
                 layout.num_sequences,
                 layout.num_heads,
-                _HEAD_SIZE,
-                _HEAD_SIZE,
+                head_size,
+                head_size,
             ),
             dtype=state_dtype,
             device=r.device,
@@ -577,7 +579,7 @@ def _rwkv7_recurrent_cuda(
         state_indices,
     )
     flattened_inputs = tuple(
-        tensor.reshape(-1, layout.num_heads, _HEAD_SIZE)
+        tensor.reshape(-1, layout.num_heads, head_size)
         for tensor in (r, log_decay, k, v, a, b)
     )
     output = torch.empty_like(flattened_inputs[3])

@@ -14,8 +14,6 @@
 
 namespace {
 
-constexpr int kHeadSize = 64;
-
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
   return static_cast<float>(value);
@@ -26,8 +24,8 @@ __device__ __forceinline__ io_t from_float(float value) {
   return static_cast<io_t>(value);
 }
 
-template <typename io_t>
-__global__ __launch_bounds__(kHeadSize, 1)
+template <int HeadSize, typename io_t>
+__global__ __launch_bounds__(HeadSize, 1)
 void recurrent_common_fp32io16_forward_kernel(
     int num_heads,
     const int* __restrict__ sequence_chunk_offsets,
@@ -50,19 +48,19 @@ void recurrent_common_fp32io16_forward_kernel(
 
   const int64_t state_base =
       (static_cast<int64_t>(sequence_index) * num_heads + head_index) *
-      kHeadSize * kHeadSize;
-  float state[kHeadSize];
+      HeadSize * HeadSize;
+  float state[HeadSize];
 #pragma unroll
-  for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+  for (int key_index = 0; key_index < HeadSize; ++key_index) {
     state[key_index] =
-        state_ptr[state_base + key_index * kHeadSize + value_index];
+        state_ptr[state_base + key_index * HeadSize + value_index];
   }
 
-  __shared__ float r[kHeadSize];
-  __shared__ float decay[kHeadSize];
-  __shared__ float k[kHeadSize];
-  __shared__ float a[kHeadSize];
-  __shared__ float b[kHeadSize];
+  __shared__ float r[HeadSize];
+  __shared__ float decay[HeadSize];
+  __shared__ float k[HeadSize];
+  __shared__ float a[HeadSize];
+  __shared__ float b[HeadSize];
 
   const int chunk_start = sequence_chunk_offsets[sequence_index];
   const int chunk_end = sequence_chunk_offsets[sequence_index + 1];
@@ -71,11 +69,11 @@ void recurrent_common_fp32io16_forward_kernel(
        ++chunk_index) {
     const int64_t boundary_base =
         (static_cast<int64_t>(chunk_index) * num_heads + head_index) *
-        kHeadSize * kHeadSize;
+        HeadSize * HeadSize;
 #pragma unroll
-    for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+    for (int key_index = 0; key_index < HeadSize; ++key_index) {
       boundary_ptr[
-          boundary_base + key_index * kHeadSize + value_index] =
+          boundary_base + key_index * HeadSize + value_index] =
           state[key_index];
     }
 
@@ -86,7 +84,7 @@ void recurrent_common_fp32io16_forward_kernel(
          ++token_index) {
       const int64_t input_index =
           (static_cast<int64_t>(token_index) * num_heads + head_index) *
-              kHeadSize +
+              HeadSize +
           value_index;
       r[value_index] = to_float(r_ptr[input_index]);
       decay[value_index] =
@@ -98,7 +96,7 @@ void recurrent_common_fp32io16_forward_kernel(
 
       float state_dot_a = 0.0f;
 #pragma unroll
-      for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+      for (int key_index = 0; key_index < HeadSize; ++key_index) {
         state_dot_a = fmaf(a[key_index], state[key_index], state_dot_a);
       }
       state_dot_a_ptr[input_index] = state_dot_a;
@@ -106,7 +104,7 @@ void recurrent_common_fp32io16_forward_kernel(
       const float value = to_float(v_ptr[input_index]);
       float output = 0.0f;
 #pragma unroll
-      for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+      for (int key_index = 0; key_index < HeadSize; ++key_index) {
         const float updated =
             decay[key_index] * state[key_index] +
             b[key_index] * state_dot_a +
@@ -120,13 +118,13 @@ void recurrent_common_fp32io16_forward_kernel(
   }
 
 #pragma unroll
-  for (int key_index = 0; key_index < kHeadSize; ++key_index) {
-    state_ptr[state_base + key_index * kHeadSize + value_index] =
+  for (int key_index = 0; key_index < HeadSize; ++key_index) {
+    state_ptr[state_base + key_index * HeadSize + value_index] =
         state[key_index];
   }
 }
 
-template <typename io_t>
+template <int HeadSize, typename io_t>
 void launch_recurrent_common_fp32io16_forward(
     int num_sequences,
     int num_heads,
@@ -145,8 +143,8 @@ void launch_recurrent_common_fp32io16_forward(
     torch::Tensor& state_dot_a,
     float scale,
     cudaStream_t stream) {
-  recurrent_common_fp32io16_forward_kernel<io_t>
-      <<<dim3(num_heads, num_sequences), kHeadSize, 0, stream>>>(
+  recurrent_common_fp32io16_forward_kernel<HeadSize, io_t>
+      <<<dim3(num_heads, num_sequences), HeadSize, 0, stream>>>(
           num_heads,
           sequence_chunk_offsets.data_ptr<int>(),
           chunk_token_starts.data_ptr<int>(),
@@ -193,24 +191,29 @@ void recurrent_common_fp32io16_forward_cuda(
       r.scalar_type(),
       "flash_rwkv_recurrent_common_fp32io16_forward",
       [&] {
-        launch_recurrent_common_fp32io16_forward<scalar_t>(
-            num_sequences,
-            num_heads,
-            sequence_chunk_offsets,
-            chunk_token_starts,
-            chunk_token_ends,
-            state,
-            r,
-            log_decay,
-            k,
-            v,
-            a,
-            b,
-            output,
-            boundary,
-            state_dot_a,
-            static_cast<float>(scale),
-            stream);
+        switch (state.size(2)) {
+          case 64:
+            launch_recurrent_common_fp32io16_forward<64, scalar_t>(
+                num_sequences, num_heads, sequence_chunk_offsets,
+                chunk_token_starts, chunk_token_ends, state, r, log_decay,
+                k, v, a, b, output, boundary, state_dot_a,
+                static_cast<float>(scale), stream);
+            break;
+          case 128:
+            launch_recurrent_common_fp32io16_forward<128, scalar_t>(
+                num_sequences, num_heads, sequence_chunk_offsets,
+                chunk_token_starts, chunk_token_ends, state, r, log_decay,
+                k, v, a, b, output, boundary, state_dot_a,
+                static_cast<float>(scale), stream);
+            break;
+          case 256:
+            launch_recurrent_common_fp32io16_forward<256, scalar_t>(
+                num_sequences, num_heads, sequence_chunk_offsets,
+                chunk_token_starts, chunk_token_ends, state, r, log_decay,
+                k, v, a, b, output, boundary, state_dot_a,
+                static_cast<float>(scale), stream);
+            break;
+        }
       });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

@@ -83,7 +83,8 @@ void materialized_chunk_fp32(
       a,
       b,
       output,
-      scale);
+      scale,
+      kHeadSize);
   const int64_t num_chunks = check_chunk_metadata(
       chunk_token_starts,
       chunk_token_ends,
@@ -192,7 +193,8 @@ void recompute_chunk_fp32(
       a,
       b,
       output,
-      scale);
+      scale,
+      kHeadSize);
   const int64_t num_chunks = check_chunk_metadata(
       chunk_token_starts,
       chunk_token_ends,

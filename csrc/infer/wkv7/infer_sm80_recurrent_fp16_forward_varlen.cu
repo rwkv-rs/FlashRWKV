@@ -280,6 +280,113 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
   }
 }
 
+template <int HeadSize>
+__global__ __launch_bounds__(HeadSize, 1)
+void recurrent_fp16_generic_kernel(
+    int num_heads,
+    int64_t output_elements,
+    const int* __restrict__ query_start_loc,
+    const int* __restrict__ state_indices,
+    const int* __restrict__ metadata_status,
+    half* __restrict__ state_ptr,
+    const half* __restrict__ r_ptr,
+    const half* __restrict__ log_decay_ptr,
+    const half* __restrict__ k_ptr,
+    const half* __restrict__ v_ptr,
+    const half* __restrict__ a_ptr,
+    const half* __restrict__ b_ptr,
+    half* __restrict__ output_ptr,
+    float scale) {
+  const int head_index = static_cast<int>(blockIdx.x);
+  const int sequence_index = static_cast<int>(blockIdx.y);
+  const int value_index = static_cast<int>(threadIdx.x);
+
+  if (metadata_status[0] != 0) {
+    const int64_t block_index =
+        static_cast<int64_t>(sequence_index) * num_heads + head_index;
+    const int64_t block_count =
+        static_cast<int64_t>(gridDim.x) * gridDim.y;
+    for (int64_t output_index = block_index * blockDim.x + value_index;
+         output_index < output_elements;
+         output_index += block_count * blockDim.x) {
+      output_ptr[output_index] =
+          __float2half(__int_as_float(0x7fffffff));
+    }
+    return;
+  }
+
+  __shared__ int token_start;
+  __shared__ int token_end;
+  __shared__ int state_slot;
+  if (value_index == 0) {
+    token_start = query_start_loc[sequence_index];
+    token_end = query_start_loc[sequence_index + 1];
+    state_slot = state_indices[sequence_index];
+  }
+  __syncthreads();
+
+  half* state_base =
+      state_ptr +
+      (static_cast<int64_t>(state_slot) * num_heads + head_index) *
+          HeadSize * HeadSize;
+  half state[HeadSize];
+#pragma unroll
+  for (int key_index = 0; key_index < HeadSize; ++key_index) {
+    state[key_index] = state_base[key_index * HeadSize + value_index];
+  }
+
+  __shared__ half r[HeadSize];
+  __shared__ half decay[HeadSize];
+  __shared__ half k[HeadSize];
+  __shared__ half a[HeadSize];
+  __shared__ half b[HeadSize];
+
+  for (int token_index = token_start; token_index < token_end; ++token_index) {
+    const int64_t input_index =
+        (static_cast<int64_t>(token_index) * num_heads + head_index) *
+            HeadSize +
+        value_index;
+    r[value_index] = r_ptr[input_index];
+    decay[value_index] = __float2half_rn(
+        expf(__half2float(log_decay_ptr[input_index])));
+    k[value_index] = k_ptr[input_index];
+    a[value_index] = a_ptr[input_index];
+    b[value_index] = b_ptr[input_index];
+    __syncthreads();
+
+    float state_dot_a = 0.0f;
+#pragma unroll
+    for (int key_index = 0; key_index < HeadSize; ++key_index) {
+      state_dot_a = fmaf(
+          __half2float(a[key_index]),
+          __half2float(state[key_index]),
+          state_dot_a);
+    }
+
+    const float value = __half2float(v_ptr[input_index]);
+    float output = 0.0f;
+#pragma unroll
+    for (int key_index = 0; key_index < HeadSize; ++key_index) {
+      const float updated =
+          __half2float(decay[key_index]) * __half2float(state[key_index]) +
+          __half2float(b[key_index]) * state_dot_a +
+          __half2float(k[key_index]) * value;
+      state[key_index] = __float2half_rn(updated);
+      output = fmaf(
+          __half2float(r[key_index]),
+          __half2float(state[key_index]),
+          output);
+    }
+    output_ptr[input_index] = __float2half_rn(scale * output);
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int key_index = 0; key_index < HeadSize; ++key_index) {
+    state_base[key_index * HeadSize + value_index] = state[key_index];
+  }
+}
+
 }  // namespace
 
 void recurrent_fp16_cuda(
@@ -297,24 +404,61 @@ void recurrent_fp16_cuda(
     double scale) {
   const c10::cuda::CUDAGuard device_guard(state.device());
   const auto stream = at::cuda::getCurrentCUDAStream();
-  recurrent_fp16_kernel<<<
-      dim3(static_cast<int>(state.size(1)), static_cast<int>(state_indices.numel())),
-      dim3(kHeadSize),
-      0,
-      stream>>>(
+  const dim3 grid(
       static_cast<int>(state.size(1)),
-      output.numel(),
-      query_start_loc.data_ptr<int>(),
-      state_indices.data_ptr<int>(),
-      metadata_status.data_ptr<int>(),
-      reinterpret_cast<half*>(state.data_ptr()),
-      reinterpret_cast<const half*>(r.data_ptr()),
-      reinterpret_cast<const half*>(log_decay.data_ptr()),
-      reinterpret_cast<const half*>(k.data_ptr()),
-      reinterpret_cast<const half*>(v.data_ptr()),
-      reinterpret_cast<const half*>(a.data_ptr()),
-      reinterpret_cast<const half*>(b.data_ptr()),
-      reinterpret_cast<half*>(output.data_ptr()),
-      static_cast<float>(scale));
+      static_cast<int>(state_indices.numel()));
+  switch (state.size(2)) {
+    case 64:
+      recurrent_fp16_kernel<<<grid, kHeadSize, 0, stream>>>(
+          static_cast<int>(state.size(1)),
+          output.numel(),
+          query_start_loc.data_ptr<int>(),
+          state_indices.data_ptr<int>(),
+          metadata_status.data_ptr<int>(),
+          reinterpret_cast<half*>(state.data_ptr()),
+          reinterpret_cast<const half*>(r.data_ptr()),
+          reinterpret_cast<const half*>(log_decay.data_ptr()),
+          reinterpret_cast<const half*>(k.data_ptr()),
+          reinterpret_cast<const half*>(v.data_ptr()),
+          reinterpret_cast<const half*>(a.data_ptr()),
+          reinterpret_cast<const half*>(b.data_ptr()),
+          reinterpret_cast<half*>(output.data_ptr()),
+          static_cast<float>(scale));
+      break;
+    case 128:
+      recurrent_fp16_generic_kernel<128><<<grid, 128, 0, stream>>>(
+          static_cast<int>(state.size(1)),
+          output.numel(),
+          query_start_loc.data_ptr<int>(),
+          state_indices.data_ptr<int>(),
+          metadata_status.data_ptr<int>(),
+          reinterpret_cast<half*>(state.data_ptr()),
+          reinterpret_cast<const half*>(r.data_ptr()),
+          reinterpret_cast<const half*>(log_decay.data_ptr()),
+          reinterpret_cast<const half*>(k.data_ptr()),
+          reinterpret_cast<const half*>(v.data_ptr()),
+          reinterpret_cast<const half*>(a.data_ptr()),
+          reinterpret_cast<const half*>(b.data_ptr()),
+          reinterpret_cast<half*>(output.data_ptr()),
+          static_cast<float>(scale));
+      break;
+    case 256:
+      recurrent_fp16_generic_kernel<256><<<grid, 256, 0, stream>>>(
+          static_cast<int>(state.size(1)),
+          output.numel(),
+          query_start_loc.data_ptr<int>(),
+          state_indices.data_ptr<int>(),
+          metadata_status.data_ptr<int>(),
+          reinterpret_cast<half*>(state.data_ptr()),
+          reinterpret_cast<const half*>(r.data_ptr()),
+          reinterpret_cast<const half*>(log_decay.data_ptr()),
+          reinterpret_cast<const half*>(k.data_ptr()),
+          reinterpret_cast<const half*>(v.data_ptr()),
+          reinterpret_cast<const half*>(a.data_ptr()),
+          reinterpret_cast<const half*>(b.data_ptr()),
+          reinterpret_cast<half*>(output.data_ptr()),
+          static_cast<float>(scale));
+      break;
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

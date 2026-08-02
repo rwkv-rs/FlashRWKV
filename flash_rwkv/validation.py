@@ -113,7 +113,7 @@ def validate_rwkv7_inputs(
     initial_state: torch.Tensor | None,
     cu_seqlens: torch.Tensor | None,
     state_indices: torch.Tensor | None,
-    required_head_size: int | None = None,
+    required_head_size: int | tuple[int, ...] | None = None,
     strict_packed_metadata: bool = True,
 ) -> ValidatedLayout:
     tensors = dict(zip(_CORE_NAMES, (r, log_decay, k, v, a, b), strict=True))
@@ -142,13 +142,22 @@ def validate_rwkv7_inputs(
         raise ValueError("v must have shape [B, T, H, V] matching r")
     value_size = v.shape[3]
 
-    if required_head_size is not None and (
-        key_size != required_head_size or value_size != required_head_size
-    ):
-        raise ValueError(
-            f"accelerated RWKV-7 requires K = V = {required_head_size}, "
-            f"got K = {key_size}, V = {value_size}"
+    if required_head_size is not None:
+        required_head_sizes = (
+            (required_head_size,)
+            if isinstance(required_head_size, int)
+            else required_head_size
         )
+        if key_size != value_size or key_size not in required_head_sizes:
+            if len(required_head_sizes) == 1:
+                requirement = f"K = V = {required_head_sizes[0]}"
+            else:
+                sizes = ", ".join(str(size) for size in required_head_sizes)
+                requirement = f"equal K and V in {{{sizes}}}"
+            raise ValueError(
+                f"accelerated RWKV-7 requires {requirement}, "
+                f"got K = {key_size}, V = {value_size}"
+            )
 
     device = r.device
     dtype = r.dtype

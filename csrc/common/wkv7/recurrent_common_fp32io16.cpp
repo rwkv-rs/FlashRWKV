@@ -54,8 +54,24 @@ using flash_rwkv::validation::check_chunk_metadata;
 using flash_rwkv::validation::check_cuda_contiguous;
 using flash_rwkv::validation::check_optional_like;
 using flash_rwkv::validation::check_same_device;
-using flash_rwkv::validation::kHeadSize;
 using flash_rwkv::validation::RecurrentDimensions;
+
+namespace {
+
+int64_t check_recurrent_head_size(const torch::Tensor& state) {
+  TORCH_CHECK(
+      state.dim() == 4 && state.size(0) > 0 && state.size(1) > 0 &&
+          state.size(2) == state.size(3),
+      "state must have square shape [B,H,D,D]");
+  const int64_t head_size = state.size(2);
+  TORCH_CHECK(
+      head_size == 64 || head_size == 128 || head_size == 256,
+      "recurrent head size must be 64, 128, or 256, got ",
+      head_size);
+  return head_size;
+}
+
+}  // namespace
 
 void recurrent_common_fp32io16_forward(
     torch::Tensor sequence_chunk_offsets,
@@ -96,12 +112,7 @@ void recurrent_common_fp32io16_forward(
           chunk_token_starts.scalar_type() == torch::kInt32 &&
           chunk_token_ends.scalar_type() == torch::kInt32,
       "pretrain chunk metadata must be int32");
-  TORCH_CHECK(
-      state.dim() == 4 && state.size(0) > 0 &&
-          state.size(1) > 0 &&
-          state.size(2) == kHeadSize &&
-          state.size(3) == kHeadSize,
-      "state must have shape [B,H,64,64]");
+  const int64_t head_size = check_recurrent_head_size(state);
   TORCH_CHECK(state.scalar_type() == torch::kFloat32, "state must be fp32");
 
   const int64_t num_sequences = state.size(0);
@@ -110,7 +121,8 @@ void recurrent_common_fp32io16_forward(
       sequence_chunk_offsets.dim() == 1 &&
           sequence_chunk_offsets.numel() == num_sequences + 1,
       "sequence_chunk_offsets must have shape [B+1]");
-  const RecurrentDimensions dimensions{num_sequences, num_heads};
+  const RecurrentDimensions dimensions{
+      num_sequences, num_heads, head_size};
   const int64_t num_chunks = check_chunk_metadata(
       chunk_token_starts,
       chunk_token_ends,
@@ -119,8 +131,8 @@ void recurrent_common_fp32io16_forward(
   TORCH_CHECK(
       r.dim() == 3 && r.size(0) > 0 &&
           r.size(1) == num_heads &&
-          r.size(2) == kHeadSize,
-      "r must have shape [B*T,H,64]");
+          r.size(2) == head_size,
+      "r must have shape [B*T,H,D] matching state head size");
   TORCH_CHECK(
       r.sizes() == log_decay.sizes() &&
           r.sizes() == k.sizes() &&
@@ -145,13 +157,13 @@ void recurrent_common_fp32io16_forward(
   const std::vector<int64_t> boundary_shape{
       num_chunks,
       num_heads,
-      kHeadSize,
-      kHeadSize,
+      head_size,
+      head_size,
   };
   TORCH_CHECK(
       boundary.sizes().vec() == boundary_shape &&
           boundary.scalar_type() == torch::kFloat32,
-      "boundary must be fp32 with shape [C,H,64,64]");
+      "boundary must be fp32 with shape [C,H,D,D]");
   TORCH_CHECK(
       state_dot_a.sizes() == r.sizes() &&
           state_dot_a.scalar_type() == torch::kFloat32,
@@ -231,12 +243,7 @@ void recurrent_common_fp32io16_backward(
   TORCH_CHECK(
       sequence_chunk_offsets.scalar_type() == torch::kInt32,
       "sequence_chunk_offsets must be int32");
-  TORCH_CHECK(
-      final_state.dim() == 4 && final_state.size(0) > 0 &&
-          final_state.size(1) > 0 &&
-          final_state.size(2) == kHeadSize &&
-          final_state.size(3) == kHeadSize,
-      "final_state must have shape [B,H,64,64]");
+  const int64_t head_size = check_recurrent_head_size(final_state);
   TORCH_CHECK(
       final_state.scalar_type() == torch::kFloat32,
       "final_state must be fp32");
@@ -247,7 +254,8 @@ void recurrent_common_fp32io16_backward(
       sequence_chunk_offsets.dim() == 1 &&
           sequence_chunk_offsets.numel() == num_sequences + 1,
       "sequence_chunk_offsets must have shape [B+1]");
-  const RecurrentDimensions dimensions{num_sequences, num_heads};
+  const RecurrentDimensions dimensions{
+      num_sequences, num_heads, head_size};
   const int64_t num_chunks = check_chunk_metadata(
       chunk_token_starts,
       chunk_token_ends,
@@ -257,8 +265,8 @@ void recurrent_common_fp32io16_backward(
   TORCH_CHECK(
       r.dim() == 3 && r.size(0) > 0 &&
           r.size(1) == num_heads &&
-          r.size(2) == kHeadSize,
-      "r must have shape [total_tokens,H,64]");
+          r.size(2) == head_size,
+      "r must have shape [total_tokens,H,D] matching state head size");
   TORCH_CHECK(
       r.sizes() == log_decay.sizes() &&
           r.sizes() == k.sizes() &&
@@ -284,13 +292,13 @@ void recurrent_common_fp32io16_backward(
   const std::vector<int64_t> boundary_shape{
       num_chunks,
       num_heads,
-      kHeadSize,
-      kHeadSize,
+      head_size,
+      head_size,
   };
   TORCH_CHECK(
       boundary.sizes().vec() == boundary_shape &&
           boundary.scalar_type() == torch::kFloat32,
-      "boundary must be fp32 with shape [C,H,64,64]");
+      "boundary must be fp32 with shape [C,H,D,D]");
   TORCH_CHECK(
       grad_output.has_value() || grad_final_state.has_value(),
       "at least one upstream gradient must be provided");
