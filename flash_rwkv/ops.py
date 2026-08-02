@@ -7,7 +7,10 @@ import math
 import torch
 
 from . import _extension
-from ._autograd import pretrain_recurrent_fp32io16_autograd
+from ._autograd import (
+    pretrain_recurrent_fp32io16_autograd,
+    statetune_recurrent_fp32io16_autograd,
+)
 from .config import (
     ChunkConfig,
     chunk_tuning_key,
@@ -82,6 +85,66 @@ def pretrain_recurrent_fp32io16_forward(
         _,
     ) = _cuda_chunk_metadata(layout, 16, r.device)
     output, final_state = pretrain_recurrent_fp32io16_autograd(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        initial_state=initial_state,
+        sequence_chunk_offsets=sequence_chunk_offsets,
+        chunk_token_starts=chunk_token_starts,
+        chunk_token_ends=chunk_token_ends,
+        scale=float(scale),
+    )
+    return output, final_state if output_final_state else None
+
+
+def statetune_recurrent_fp32io16_forward(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    scale: float = 1.0,
+    initial_state: torch.Tensor,
+    output_final_state: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run StateTune recurrence with a nonzero FP32 initial state."""
+
+    layout = validate_rwkv7_inputs(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        scale=scale,
+        initial_state=initial_state,
+        cu_seqlens=None,
+        state_indices=None,
+        required_head_size=_HEAD_SIZE,
+    )
+    if not r.is_cuda:
+        raise ValueError("statetune_recurrent_fp32io16_forward requires CUDA inputs")
+    if r.dtype not in {torch.float16, torch.bfloat16}:
+        raise TypeError(
+            "statetune_recurrent_fp32io16_forward requires fp16 or bf16 "
+            "token tensors"
+        )
+    if initial_state.dtype != torch.float32:
+        raise TypeError(
+            "statetune_recurrent_fp32io16_forward requires an FP32 initial_state"
+        )
+    (
+        sequence_chunk_offsets,
+        chunk_token_starts,
+        chunk_token_ends,
+        _,
+    ) = _cuda_chunk_metadata(layout, 16, r.device)
+    output, final_state = statetune_recurrent_fp32io16_autograd(
         r,
         log_decay,
         k,

@@ -25,6 +25,7 @@ from flash_rwkv.config import (
     chunk_tuning_key,
     select_chunk_config,
 )
+from flash_rwkv.registry import get_kernel_spec
 
 HEAD_SIZE = 64
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
@@ -40,6 +41,13 @@ PROFILES: dict[str, tuple[str, tuple[int, ...]]] = {
 DTYPES = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
+}
+OPERATOR_SPECS = {
+    strategy: get_kernel_spec(
+        f"rl_infctx_chunk_fp32io16_{strategy}",
+        provider="flash_rwkv",
+    )
+    for strategy in ("materialized", "factor_recompute", "recurrent")
 }
 SOURCE_PATHS = (
     Path("setup.py"),
@@ -719,10 +727,11 @@ def run(config: BenchmarkConfig) -> dict[str, object]:
         for strategy, measurement in result["measurements"].items():
             samples_ms = measurement["raw_samples_ms"]
             p50_ms = percentile(samples_ms, 0.50)
+            operator = OPERATOR_SPECS[strategy]
             rows.append(
                 {
-                    "provider": "flash_rwkv",
-                    "name": f"rl_infctx_chunk_fp32io16_{strategy}",
+                    "provider": operator.provider,
+                    "name": operator.name,
                     "source_revision": source["leaf_revision"],
                     "mode": "fp32io16",
                     "dtype": result["dtype"],

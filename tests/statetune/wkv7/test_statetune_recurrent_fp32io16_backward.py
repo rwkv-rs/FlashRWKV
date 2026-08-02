@@ -8,13 +8,9 @@ from pathlib import Path
 
 import pytest
 import torch
-import torch.nn.functional as functional
+from torch.nn import functional
 
-from flash_rwkv import (
-    pretrain_recurrent_fp32io16_forward,
-    rwkv7_reference,
-)
-
+from flash_rwkv import rwkv7_reference, statetune_recurrent_fp32io16_forward
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -119,7 +115,7 @@ def _run_backward(
             output_final_state=True,
         )
     elif implementation == "flash":
-        output, final_state = pretrain_recurrent_fp32io16_forward(
+        output, final_state = statetune_recurrent_fp32io16_forward(
             *inputs,
             scale=scale,
             initial_state=initial_state,
@@ -162,7 +158,7 @@ def _run_backward(
         (torch.float16, 257, True, 1203),
     ],
 )
-def test_pretrain_recurrent_autograd_matches_torch_and_fla(
+def test_statetune_recurrent_autograd_matches_torch_and_fla(
     dtype: torch.dtype,
     sequence_length: int,
     include_final_state_loss: bool,
@@ -229,7 +225,7 @@ def test_pretrain_recurrent_autograd_matches_torch_and_fla(
             )
 
 
-def test_pretrain_recurrent_only_materializes_requested_gradients() -> None:
+def test_statetune_recurrent_only_materializes_requested_gradients() -> None:
     inputs, initial_state = _inputs(
         batch_size=2,
         sequence_length=17,

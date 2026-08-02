@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import torch
 
 from . import _extension
@@ -23,7 +25,70 @@ def pretrain_recurrent_fp32io16_autograd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the RWKV-LM-derived fixed-length recurrent autograd boundary."""
 
-    return _PretrainRecurrentFp32io16Function.apply(
+    return _recurrent_fp32io16_autograd(
+        "pretrain",
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        initial_state=initial_state,
+        sequence_chunk_offsets=sequence_chunk_offsets,
+        chunk_token_starts=chunk_token_starts,
+        chunk_token_ends=chunk_token_ends,
+        scale=scale,
+    )
+
+
+def statetune_recurrent_fp32io16_autograd(
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    initial_state: torch.Tensor,
+    sequence_chunk_offsets: torch.Tensor,
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the StateTune nonzero-state recurrent autograd boundary."""
+
+    return _recurrent_fp32io16_autograd(
+        "statetune",
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        initial_state=initial_state,
+        sequence_chunk_offsets=sequence_chunk_offsets,
+        chunk_token_starts=chunk_token_starts,
+        chunk_token_ends=chunk_token_ends,
+        scale=scale,
+    )
+
+
+def _recurrent_fp32io16_autograd(
+    workload: Literal["pretrain", "statetune"],
+    r: torch.Tensor,
+    log_decay: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    initial_state: torch.Tensor | None,
+    sequence_chunk_offsets: torch.Tensor,
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _RecurrentFp32io16Function.apply(
         r,
         log_decay,
         k,
@@ -35,10 +100,11 @@ def pretrain_recurrent_fp32io16_autograd(
         chunk_token_starts,
         chunk_token_ends,
         scale,
+        workload,
     )
 
 
-class _PretrainRecurrentFp32io16Function(torch.autograd.Function):
+class _RecurrentFp32io16Function(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
@@ -53,6 +119,7 @@ class _PretrainRecurrentFp32io16Function(torch.autograd.Function):
         chunk_token_starts: torch.Tensor,
         chunk_token_ends: torch.Tensor,
         scale: float,
+        workload: Literal["pretrain", "statetune"],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, _, num_heads, head_size = r.shape
         flattened = tuple(
@@ -89,7 +156,12 @@ class _PretrainRecurrentFp32io16Function(torch.autograd.Function):
         )
         output = torch.empty_like(flattened[3])
 
-        _extension.pretrain_recurrent_fp32io16_forward(
+        forward = (
+            _extension.statetune_recurrent_fp32io16_forward
+            if workload == "statetune"
+            else _extension.pretrain_recurrent_fp32io16_forward
+        )
+        forward(
             sequence_chunk_offsets,
             chunk_token_starts,
             chunk_token_ends,
@@ -113,6 +185,7 @@ class _PretrainRecurrentFp32io16Function(torch.autograd.Function):
         )
         ctx.input_shape = tuple(r.shape)
         ctx.scale = float(scale)
+        ctx.workload = workload
         return output.reshape(v.shape), working_state
 
     @staticmethod
@@ -155,7 +228,12 @@ class _PretrainRecurrentFp32io16Function(torch.autograd.Function):
             else grad_final_state.contiguous()
         )
 
-        _extension.pretrain_recurrent_fp32io16_backward(
+        backward = (
+            _extension.statetune_recurrent_fp32io16_backward
+            if ctx.workload == "statetune"
+            else _extension.pretrain_recurrent_fp32io16_backward
+        )
+        backward(
             sequence_chunk_offsets,
             chunk_token_starts,
             chunk_token_ends,
@@ -183,6 +261,7 @@ class _PretrainRecurrentFp32io16Function(torch.autograd.Function):
         return (
             *shaped_gradients,
             grad_initial_state,
+            None,
             None,
             None,
             None,

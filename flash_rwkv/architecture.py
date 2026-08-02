@@ -17,6 +17,8 @@ BUILD_TARGET_MATRIX = (
 
 TRANSLATION_UNIT_ARCHITECTURES = {
     "csrc/validation/recurrent_metadata.cu": "common",
+    "csrc/common/wkv7/recurrent_common_fp32io16_backward.cu": "common",
+    "csrc/common/wkv7/recurrent_common_fp32io16_forward.cu": "common",
     "csrc/infer/wkv7/infer_common_chunk_bf16_forward_k1_prepare.cu": "common",
     "csrc/infer/wkv7/infer_common_chunk_bf16_forward_k2_recurrence.cu": "common",
     "csrc/infer/tmix/infer_common_tmix_fp16_forward.cu": "common",
@@ -26,8 +28,6 @@ TRANSLATION_UNIT_ARCHITECTURES = {
     "csrc/infer/wkv7/infer_sm80_recurrent_fp16_forward_varlen.cu": "sm80",
     "csrc/pretrain/wkv7/pretrain_common_head_l2wrap_ce_bf16_forward.cu": "common",
     "csrc/pretrain/wkv7/pretrain_common_l2wrap_ce_bf16_forward_backward.cu": "common",
-    "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_backward.cu": "common",
-    "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_forward.cu": "common",
     "csrc/pretrain/wkv7/pretrain_common_tmix_a_gate_bf16_forward_backward.cu": "common",
     "csrc/pretrain/wkv7/pretrain_common_tmix_lnx_rkvres_xg_bf16_forward_backward.cu": "common",
     "csrc/pretrain/wkv7/pretrain_common_tmix_vres_gate_bf16_forward_backward.cu": "common",

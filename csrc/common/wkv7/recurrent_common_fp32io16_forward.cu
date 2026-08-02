@@ -28,7 +28,7 @@ __device__ __forceinline__ io_t from_float(float value) {
 
 template <typename io_t>
 __global__ __launch_bounds__(kHeadSize, 1)
-void pretrain_recurrent_fp32io16_forward_kernel(
+void recurrent_common_fp32io16_forward_kernel(
     int num_heads,
     const int* __restrict__ sequence_chunk_offsets,
     const int* __restrict__ chunk_token_starts,
@@ -127,7 +127,7 @@ void pretrain_recurrent_fp32io16_forward_kernel(
 }
 
 template <typename io_t>
-void launch_pretrain_recurrent_fp32io16_forward(
+void launch_recurrent_common_fp32io16_forward(
     int num_sequences,
     int num_heads,
     const torch::Tensor& sequence_chunk_offsets,
@@ -145,7 +145,7 @@ void launch_pretrain_recurrent_fp32io16_forward(
     torch::Tensor& state_dot_a,
     float scale,
     cudaStream_t stream) {
-  pretrain_recurrent_fp32io16_forward_kernel<io_t>
+  recurrent_common_fp32io16_forward_kernel<io_t>
       <<<dim3(num_heads, num_sequences), kHeadSize, 0, stream>>>(
           num_heads,
           sequence_chunk_offsets.data_ptr<int>(),
@@ -166,7 +166,7 @@ void launch_pretrain_recurrent_fp32io16_forward(
 
 }  // namespace
 
-void pretrain_recurrent_fp32io16_forward_cuda(
+void recurrent_common_fp32io16_forward_cuda(
     torch::Tensor sequence_chunk_offsets,
     torch::Tensor chunk_token_starts,
     torch::Tensor chunk_token_ends,
@@ -191,9 +191,9 @@ void pretrain_recurrent_fp32io16_forward_cuda(
       at::ScalarType::Half,
       at::ScalarType::BFloat16,
       r.scalar_type(),
-      "flash_rwkv_pretrain_recurrent_fp32io16_forward",
+      "flash_rwkv_recurrent_common_fp32io16_forward",
       [&] {
-        launch_pretrain_recurrent_fp32io16_forward<scalar_t>(
+        launch_recurrent_common_fp32io16_forward<scalar_t>(
             num_sequences,
             num_heads,
             sequence_chunk_offsets,

@@ -16,15 +16,18 @@ from pathlib import Path
 import torch
 from torch.nn import functional
 
-from flash_rwkv import pretrain_recurrent_fp32io16_forward, rwkv7_reference
+from flash_rwkv import rwkv7_reference, statetune_recurrent_fp32io16_forward
 from flash_rwkv.benchmark_contract import format_result, summarize_samples
 from flash_rwkv.provenance import imported_source_family
+from flash_rwkv.registry import get_kernel_spec
 
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
 HEAD_SIZE = 64
 HEAD_COUNT = 2
-PROVIDER = "flash_rwkv"
-OPERATOR_NAME = "statetune_recurrent_fp32io16_forward_backward"
+OPERATOR_SPEC = get_kernel_spec(
+    "statetune_recurrent_fp32io16_forward_backward",
+    provider="flash_rwkv",
+)
 MODE = "fp32io16"
 
 
@@ -114,7 +117,7 @@ def _run(
     operation = (
         rwkv7_reference
         if implementation == "torch"
-        else pretrain_recurrent_fp32io16_forward
+        else statetune_recurrent_fp32io16_forward
     )
     output, final_state = operation(
         *inputs,
@@ -187,7 +190,7 @@ def _measure(
     def launch() -> None:
         for tensor in (*leaves, state_leaf):
             tensor.grad = None
-        output, final_state = pretrain_recurrent_fp32io16_forward(
+        output, final_state = statetune_recurrent_fp32io16_forward(
             *leaves,
             initial_state=state_leaf,
             output_final_state=True,
@@ -268,8 +271,8 @@ def main() -> None:
             samples_ms=samples,
         ).as_dict()
         row.update(
-            provider=PROVIDER,
-            name=OPERATOR_NAME,
+            provider=OPERATOR_SPEC.provider,
+            name=OPERATOR_SPEC.name,
             source_revision=source_revision,
             mode=MODE,
         )
