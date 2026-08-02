@@ -25,7 +25,15 @@ from flash_rwkv import (
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
     rwkv7_recurrent_stateful,
+    statetune_recurrent_fp32io16_forward,
 )
+from flash_rwkv.registry import get_kernel_spec
+
+STATETUNE_OPERATOR_SPEC = get_kernel_spec(
+    "statetune_recurrent_fp32io16_forward_backward",
+    provider="flash_rwkv",
+)
+STATETUNE_MODE = "fp32io16"
 
 HOSTILE_METADATA_CASES = (
     ("malformed_start", (1, 2, 3), (0, 1)),
@@ -53,6 +61,69 @@ def _bf16(shape: tuple[int, ...], *, scale: float = 0.2) -> torch.Tensor:
 
 def _fp16(shape: tuple[int, ...], *, scale: float = 0.2) -> torch.Tensor:
     return torch.randn(*shape, device="cuda", dtype=torch.float16).mul_(scale)
+
+
+def _training_token(
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    *,
+    scale: float = 0.02,
+) -> torch.Tensor:
+    return (
+        torch.randn(*shape, device="cuda", dtype=dtype).mul_(scale).requires_grad_(True)
+    )
+
+
+def run_statetune_recurrent() -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    shape = (1, 2, 1, 64)
+    state_shape = (1, 1, 64, 64)
+    for input_dtype in (torch.float16, torch.bfloat16):
+        inputs = (
+            _training_token(shape, input_dtype),
+            torch.empty(shape, device="cuda", dtype=input_dtype)
+            .uniform_(-0.2, -0.05)
+            .requires_grad_(True),
+            *(_training_token(shape, input_dtype) for _ in range(4)),
+        )
+        initial_state = torch.full(
+            state_shape,
+            0.02,
+            device="cuda",
+            dtype=torch.float32,
+            requires_grad=True,
+        )
+
+        output, final_state = statetune_recurrent_fp32io16_forward(
+            *inputs,
+            initial_state=initial_state,
+            output_final_state=True,
+        )
+        if final_state is None:
+            raise AssertionError("StateTune recurrent call omitted final state")
+        loss = output.float().square().mean() + final_state.square().mean()
+        loss.backward()
+        torch.cuda.synchronize()
+
+        initial_state_gradient = initial_state.grad
+        if initial_state_gradient is None:
+            raise AssertionError(
+                "StateTune recurrent call omitted initial-state gradient"
+            )
+        if not torch.isfinite(initial_state_gradient).all().item():
+            raise AssertionError("StateTune initial-state gradient is non-finite")
+        if torch.count_nonzero(initial_state_gradient).item() == 0:
+            raise AssertionError("StateTune initial-state gradient is zero")
+
+        results.append(
+            {
+                "provider": STATETUNE_OPERATOR_SPEC.provider,
+                "name": STATETUNE_OPERATOR_SPEC.name,
+                "mode": STATETUNE_MODE,
+                "input_dtype": str(input_dtype).removeprefix("torch."),
+            }
+        )
+    return results
 
 
 def run_training() -> list[str]:
@@ -250,8 +321,10 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required")
     torch.manual_seed(20260801)
+    statetune_results = run_statetune_recurrent()
     operators = [
         *run_training(),
+        *(f"{result['name']}_{result['input_dtype']}" for result in statetune_results),
         *run_inference(),
         *run_hostile_packed_metadata(),
     ]
@@ -260,6 +333,7 @@ def main() -> None:
             {
                 "operators": operators,
                 "operator_count": len(operators),
+                "statetune_results": statetune_results,
                 "device": torch.cuda.get_device_name(),
             },
             sort_keys=True,
