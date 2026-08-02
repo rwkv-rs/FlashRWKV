@@ -31,8 +31,9 @@ def _inputs(
     sequence_length: int,
     dtype: torch.dtype,
     seed: int,
+    head_size: int = HEAD_SIZE,
 ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-    shape = (batch_size, sequence_length, 2, HEAD_SIZE)
+    shape = (batch_size, sequence_length, 2, head_size)
     generator = torch.Generator(device="cuda").manual_seed(seed)
 
     def normal(scale: float) -> torch.Tensor:
@@ -67,8 +68,8 @@ def _inputs(
     initial_state = 0.02 * torch.randn(
         batch_size,
         2,
-        HEAD_SIZE,
-        HEAD_SIZE,
+        head_size,
+        head_size,
         dtype=torch.float32,
         device="cuda",
         generator=generator,
@@ -278,3 +279,60 @@ def test_statetune_recurrent_only_materializes_requested_gradients() -> None:
                 _relative_rmse(gradient, expected_gradient)
                 <= TOLERANCE["gradient_relative_rmse"]
             )
+
+
+@pytest.mark.parametrize("head_size", [128, 256])
+def test_large_head_statetune_forward_backward_matches_torch(
+    head_size: int,
+) -> None:
+    inputs, initial_state = _inputs(
+        batch_size=1,
+        sequence_length=2,
+        dtype=torch.float16,
+        seed=2000 + head_size,
+        head_size=head_size,
+    )
+    generator = torch.Generator(device="cuda").manual_seed(3000 + head_size)
+    grad_output = 0.05 * torch.randn(
+        inputs[3].shape,
+        dtype=torch.float32,
+        device="cuda",
+        generator=generator,
+    )
+    grad_final_state = 0.02 * torch.randn(
+        initial_state.shape,
+        dtype=torch.float32,
+        device="cuda",
+        generator=generator,
+    )
+    expected = _run_backward(
+        "torch",
+        inputs,
+        initial_state,
+        requires_grad=(True,) * 7,
+        grad_output=grad_output,
+        grad_final_state=grad_final_state,
+        include_final_state_loss=True,
+        scale=0.125,
+    )
+    actual = _run_backward(
+        "flash",
+        inputs,
+        initial_state,
+        requires_grad=(True,) * 7,
+        grad_output=grad_output,
+        grad_final_state=grad_final_state,
+        include_final_state_loss=True,
+        scale=0.125,
+    )
+    torch.cuda.synchronize()
+
+    assert _relative_rmse(actual[0], expected[0]) <= TOLERANCE["output_relative_rmse"]
+    assert _relative_rmse(actual[1], expected[1]) <= TOLERANCE["state_relative_rmse"]
+    for actual_gradient, expected_gradient in zip(actual[2], expected[2], strict=True):
+        assert actual_gradient is not None
+        assert expected_gradient is not None
+        assert (
+            _relative_rmse(actual_gradient, expected_gradient)
+            <= TOLERANCE["gradient_relative_rmse"]
+        )

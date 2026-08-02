@@ -14,8 +14,6 @@
 
 namespace {
 
-constexpr int kHeadSize = 64;
-
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
   return static_cast<float>(value);
@@ -26,8 +24,9 @@ __device__ __forceinline__ io_t from_float(float value) {
   return static_cast<io_t>(value);
 }
 
-template <typename io_t>
-__global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp32_kernel(
+template <int HeadSize, typename io_t>
+__global__ __launch_bounds__(HeadSize, HeadSize == 64 ? 2 : 1)
+void recurrent_fp32_kernel(
     int num_heads,
     int64_t output_elements,
     const int* __restrict__ query_start_loc,
@@ -73,23 +72,23 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp32_kernel(
   float* state_base =
       state_ptr +
       (static_cast<int64_t>(state_slot) * num_heads + head_index) *
-          kHeadSize * kHeadSize;
-  float state[kHeadSize];
+          HeadSize * HeadSize;
+  float state[HeadSize];
 #pragma unroll
-  for (int key_index = 0; key_index < kHeadSize; ++key_index) {
-    state[key_index] = state_base[key_index * kHeadSize + value_index];
+  for (int key_index = 0; key_index < HeadSize; ++key_index) {
+    state[key_index] = state_base[key_index * HeadSize + value_index];
   }
 
-  __shared__ float r[kHeadSize];
-  __shared__ float decay[kHeadSize];
-  __shared__ float k[kHeadSize];
-  __shared__ float a[kHeadSize];
-  __shared__ float b[kHeadSize];
+  __shared__ float r[HeadSize];
+  __shared__ float decay[HeadSize];
+  __shared__ float k[HeadSize];
+  __shared__ float a[HeadSize];
+  __shared__ float b[HeadSize];
 
   for (int token_index = token_start; token_index < token_end; ++token_index) {
     const int64_t input_index =
         (static_cast<int64_t>(token_index) * num_heads + head_index) *
-            kHeadSize +
+            HeadSize +
         value_index;
     r[value_index] = to_float(r_ptr[input_index]);
     decay[value_index] = expf(to_float(log_decay_ptr[input_index]));
@@ -100,14 +99,14 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp32_kernel(
 
     float a_state = 0.0f;
 #pragma unroll
-    for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+    for (int key_index = 0; key_index < HeadSize; ++key_index) {
       a_state += a[key_index] * state[key_index];
     }
 
     const float value = to_float(v_ptr[input_index]);
     float output = 0.0f;
 #pragma unroll
-    for (int key_index = 0; key_index < kHeadSize; ++key_index) {
+    for (int key_index = 0; key_index < HeadSize; ++key_index) {
       const float updated =
           decay[key_index] * state[key_index] +
           b[key_index] * a_state +
@@ -120,12 +119,12 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp32_kernel(
   }
 
 #pragma unroll
-  for (int key_index = 0; key_index < kHeadSize; ++key_index) {
-    state_base[key_index * kHeadSize + value_index] = state[key_index];
+  for (int key_index = 0; key_index < HeadSize; ++key_index) {
+    state_base[key_index * HeadSize + value_index] = state[key_index];
   }
 }
 
-template <typename io_t>
+template <int HeadSize, typename io_t>
 void launch_recurrent_fp32(
     int num_sequences,
     int num_heads,
@@ -142,8 +141,8 @@ void launch_recurrent_fp32(
     const torch::Tensor& metadata_status,
     float scale,
     cudaStream_t stream) {
-  recurrent_fp32_kernel<io_t>
-      <<<dim3(num_heads, num_sequences), dim3(kHeadSize), 0, stream>>>(
+  recurrent_fp32_kernel<HeadSize, io_t>
+      <<<dim3(num_heads, num_sequences), dim3(HeadSize), 0, stream>>>(
           num_heads,
           output.numel(),
           query_start_loc.data_ptr<int>(),
@@ -186,22 +185,26 @@ void recurrent_fp32_cuda(
       r.scalar_type(),
       "flash_rwkv_recurrent_fp32",
       [&] {
-        launch_recurrent_fp32<scalar_t>(
-            num_sequences,
-            num_heads,
-            query_start_loc,
-            state_indices,
-            state,
-            r,
-            log_decay,
-            k,
-            v,
-            a,
-            b,
-            output,
-            metadata_status,
-            static_cast<float>(scale),
-            stream);
+        switch (state.size(2)) {
+          case 64:
+            launch_recurrent_fp32<64, scalar_t>(
+                num_sequences, num_heads, query_start_loc, state_indices,
+                state, r, log_decay, k, v, a, b, output, metadata_status,
+                static_cast<float>(scale), stream);
+            break;
+          case 128:
+            launch_recurrent_fp32<128, scalar_t>(
+                num_sequences, num_heads, query_start_loc, state_indices,
+                state, r, log_decay, k, v, a, b, output, metadata_status,
+                static_cast<float>(scale), stream);
+            break;
+          case 256:
+            launch_recurrent_fp32<256, scalar_t>(
+                num_sequences, num_heads, query_start_loc, state_indices,
+                state, r, log_decay, k, v, a, b, output, metadata_status,
+                static_cast<float>(scale), stream);
+            break;
+        }
       });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

@@ -54,7 +54,8 @@ RecurrentDimensions check_recurrent_layout(
     torch::Tensor a,
     torch::Tensor b,
     torch::Tensor output,
-    double scale) {
+    double scale,
+    int64_t required_head_size) {
   check_cuda_contiguous(query_start_loc, "query_start_loc");
   check_cuda_contiguous(state_indices, "state_indices");
   check_cuda_contiguous(state, "state");
@@ -85,8 +86,22 @@ RecurrentDimensions check_recurrent_layout(
       "query_start_loc must have shape [N+1]");
   TORCH_CHECK(
       state.dim() == 4 && state.size(0) > 0 && state.size(1) > 0 &&
-          state.size(2) == kHeadSize && state.size(3) == kHeadSize,
-      "state must have shape [slots,H,64,64]");
+          state.size(2) == state.size(3),
+      "state must have square shape [slots,H,D,D]");
+  const int64_t head_size = state.size(2);
+  if (required_head_size > 0) {
+    TORCH_CHECK(
+        head_size == required_head_size,
+        "this operator requires head size ",
+        required_head_size,
+        ", got ",
+        head_size);
+  } else {
+    TORCH_CHECK(
+        head_size == 64 || head_size == 128 || head_size == 256,
+        "recurrent head size must be 64, 128, or 256, got ",
+        head_size);
+  }
   TORCH_CHECK(
       state.size(0) <= std::numeric_limits<int>::max(),
       "state slot count must fit in int32");
@@ -97,8 +112,8 @@ RecurrentDimensions check_recurrent_layout(
       "head count must fit in int32");
   TORCH_CHECK(
       r.dim() == 3 && r.size(0) > 0 && r.size(1) == num_heads &&
-          r.size(2) == kHeadSize,
-      "r must have shape [total_tokens,H,64]");
+          r.size(2) == head_size,
+      "r must have shape [total_tokens,H,D] matching state head size");
   TORCH_CHECK(
       r.size(0) <= std::numeric_limits<int>::max(),
       "token count must fit in int32");
@@ -131,7 +146,7 @@ RecurrentDimensions check_recurrent_layout(
     check_same_device(state, *item.first, item.second);
   }
 
-  return RecurrentDimensions{num_sequences, num_heads};
+  return RecurrentDimensions{num_sequences, num_heads, head_size};
 }
 
 int64_t check_chunk_metadata(

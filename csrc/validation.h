@@ -14,6 +14,7 @@ constexpr int64_t kHeadSize = 64;
 struct RecurrentDimensions {
   int64_t num_sequences;
   int64_t num_heads;
+  int64_t head_size;
 };
 
 void check_cuda_contiguous(const torch::Tensor& tensor, const char* name);
@@ -36,7 +37,8 @@ RecurrentDimensions check_recurrent_layout(
     torch::Tensor a,
     torch::Tensor b,
     torch::Tensor output,
-    double scale);
+    double scale,
+    int64_t required_head_size = 0);
 int64_t check_chunk_metadata(
     torch::Tensor chunk_token_starts,
     torch::Tensor chunk_token_ends,

@@ -18,6 +18,7 @@ from .inference_blocks import (
 )
 from .l2wrap_ce import pretrain_l2wrap_ce_bf16
 from .ops import (
+    RWKV7_RECURRENT_HEAD_SIZES,
     decay_logits_to_log_decay,
     infer_chunk_bf16_forward,
     infer_chunk_bf16_forward_varlen,
@@ -51,6 +52,7 @@ __all__ = [
     "BUILD_TARGET_MATRIX",
     "MINIMUM_WHEEL_ARCHITECTURE",
     "RUNTIME_VALIDATED_ARCHITECTURES",
+    "RWKV7_RECURRENT_HEAD_SIZES",
     "TRANSLATION_UNIT_ARCHITECTURES",
     "ChunkConfig",
     "KernelSpec",

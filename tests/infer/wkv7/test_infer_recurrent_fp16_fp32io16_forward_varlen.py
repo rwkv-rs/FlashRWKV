@@ -53,10 +53,11 @@ def _inputs(
     batch_size: int,
     sequence_length: int,
     num_heads: int = 1,
+    head_size: int = HEAD_SIZE,
     seed: int = 42,
 ) -> tuple[torch.Tensor, ...]:
     generator = torch.Generator(device="cuda").manual_seed(seed)
-    shape = (batch_size, sequence_length, num_heads, HEAD_SIZE)
+    shape = (batch_size, sequence_length, num_heads, head_size)
     r = 0.1 * torch.randn(shape, generator=generator, device="cuda")
     log_decay = -0.1 * torch.rand(shape, generator=generator, device="cuda")
     k = 0.1 * torch.randn(shape, generator=generator, device="cuda")
@@ -229,6 +230,61 @@ def test_stateful_recurrent_updates_only_selected_rows(
         state_pool.index_select(0, untouched),
         initial_state.index_select(0, untouched),
     )
+
+
+@pytest.mark.parametrize("head_size", [128, 256])
+@pytest.mark.parametrize("mode", ["fp32io16", "fp16"])
+def test_large_head_stateful_recurrent_matches_fp32_reference(
+    head_size: int,
+    mode: str,
+) -> None:
+    inputs = _inputs(
+        batch_size=1,
+        sequence_length=3,
+        head_size=head_size,
+        seed=head_size,
+    )
+    cu_seqlens = torch.tensor([0, 1, 3], device="cuda", dtype=torch.int32)
+    state_indices = torch.tensor([2, 0], device="cuda", dtype=torch.int32)
+    state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
+    state_pool = 0.01 * torch.randn(
+        4,
+        1,
+        head_size,
+        head_size,
+        device="cuda",
+        dtype=state_dtype,
+    )
+    initial_state = state_pool.clone()
+    expected_output, expected_pool = rwkv7_reference(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+    )
+
+    actual_output = rwkv7_recurrent_stateful(
+        *inputs,
+        state_pool=state_pool,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        mode=mode,
+    )
+    torch.cuda.synchronize()
+
+    tolerance = RECURRENT_TOLERANCES[mode]
+    _assert_relative_rmse_close(
+        actual_output,
+        expected_output,
+        threshold=tolerance["output_relative_rmse"],
+    )
+    _assert_relative_rmse_close(
+        state_pool,
+        expected_pool,
+        threshold=tolerance["state_relative_rmse"],
+    )
+    assert torch.equal(state_pool[[1, 3]], initial_state[[1, 3]])
 
 
 @pytest.mark.parametrize(
