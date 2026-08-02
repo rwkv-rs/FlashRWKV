@@ -211,6 +211,24 @@ TRAINING_OPERATOR_SPECS: tuple[TrainingOperatorSpec, ...] = (
     ),
     TrainingOperatorSpec(
         provider="rwkv-lm",
+        name="pretrain_tmix_kk_pre_bf16",
+        family="tmix",
+        dtype="bfloat16",
+        autograd=True,
+        native_ops=(
+            "rwkv7_tmix_kk_pre_bf16_v5::forward",
+            "rwkv7_tmix_kk_pre_bf16_v5::backward",
+        ),
+        source_revision="952102498e9ed367ea0a59ee64106916d474d30f",
+        input_contract=("key[B,T,H,64]", "key_scale[C]", "a[B,T,C]", "a_scale[C]"),
+        output_contract=(
+            "key[B,T,C]",
+            "negative_direction[B,T,C]",
+            "scaled_direction[B,T,C]",
+        ),
+    ),
+    TrainingOperatorSpec(
+        provider="rwkv-lm",
         name="pretrain_tmix_vres_gate_bf16",
         family="tmix",
         dtype="bfloat16",

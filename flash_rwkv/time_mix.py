@@ -52,6 +52,23 @@ def pretrain_tmix_mix6_bf16(
     return _PretrainTmixMix6Bf16Function.apply(x, *mixes)
 
 
+def pretrain_tmix_kk_pre_bf16(
+    key: torch.Tensor,
+    key_scale: torch.Tensor,
+    learning_rate: torch.Tensor,
+    learning_rate_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Normalize the RWKV-7 key direction and form recurrent key operands."""
+
+    _validate_kk_pre_inputs(key, key_scale, learning_rate, learning_rate_scale)
+    return _PretrainTmixKkPreBf16Function.apply(
+        key,
+        key_scale,
+        learning_rate,
+        learning_rate_scale,
+    )
+
+
 def _validate_a_gate_inputs(a0: torch.Tensor, a12: torch.Tensor) -> None:
     for name, tensor in {"a0": a0, "a12": a12}.items():
         if not isinstance(tensor, torch.Tensor):
@@ -136,6 +153,43 @@ def _validate_mix6_inputs(
             raise ValueError(f"{name} must be on the same device as x")
     if not x.is_cuda:
         raise ValueError("pretrain_tmix_mix6_bf16 requires CUDA tensors")
+
+
+def _validate_kk_pre_inputs(
+    key: torch.Tensor,
+    key_scale: torch.Tensor,
+    learning_rate: torch.Tensor,
+    learning_rate_scale: torch.Tensor,
+) -> None:
+    tensors = {
+        "key": key,
+        "key_scale": key_scale,
+        "learning_rate": learning_rate,
+        "learning_rate_scale": learning_rate_scale,
+    }
+    for name, tensor in tensors.items():
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor")
+        if tensor.dtype != torch.bfloat16:
+            raise TypeError(f"{name} must have dtype torch.bfloat16")
+        if not tensor.is_contiguous():
+            raise ValueError(f"{name} must be contiguous")
+    if key.ndim != 3 or any(dimension <= 0 for dimension in key.shape):
+        raise ValueError("key must have non-empty shape [B, T, C]")
+    if key.shape[2] % 64:
+        raise ValueError("pretrain_tmix_kk_pre_bf16 requires C divisible by 64")
+    if learning_rate.shape != key.shape:
+        raise ValueError("learning_rate must have the same shape as key")
+    for name, vector in {
+        "key_scale": key_scale,
+        "learning_rate_scale": learning_rate_scale,
+    }.items():
+        if vector.shape != (key.shape[2],):
+            raise ValueError(f"{name} must have shape [{key.shape[2]}]")
+    if any(tensor.device != key.device for tensor in tensors.values()):
+        raise ValueError("all TimeMix key-preparation tensors must share a device")
+    if not key.is_cuda:
+        raise ValueError("pretrain_tmix_kk_pre_bf16 requires CUDA tensors")
 
 
 class _PretrainTmixAGateBf16Function(torch.autograd.Function):
@@ -233,6 +287,51 @@ class _PretrainTmixMix6Bf16Function(torch.autograd.Function):
     ) -> tuple[torch.Tensor | None, ...]:
         gradients = _extension.pretrain_tmix_mix6_bf16_backward(
             *(gradient.contiguous() for gradient in grad_outputs),
+            *ctx.saved_tensors,
+        )
+        return tuple(
+            gradient if needed else None
+            for gradient, needed in zip(gradients, ctx.needs_input_grad, strict=True)
+        )
+
+
+class _PretrainTmixKkPreBf16Function(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        key: torch.Tensor,
+        key_scale: torch.Tensor,
+        learning_rate: torch.Tensor,
+        learning_rate_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        new_key, negative_direction, scaled_direction, inverse_norm = (
+            _extension.pretrain_tmix_kk_pre_bf16_forward(
+                key,
+                key_scale,
+                learning_rate,
+                learning_rate_scale,
+            )
+        )
+        ctx.save_for_backward(
+            key,
+            key_scale,
+            learning_rate,
+            learning_rate_scale,
+            inverse_norm,
+        )
+        return new_key, negative_direction, scaled_direction
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_new_key: torch.Tensor,
+        grad_negative_direction: torch.Tensor,
+        grad_scaled_direction: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, ...]:
+        gradients = _extension.pretrain_tmix_kk_pre_bf16_backward(
+            grad_new_key.contiguous(),
+            grad_negative_direction.contiguous(),
+            grad_scaled_direction.contiguous(),
             *ctx.saved_tensors,
         )
         return tuple(

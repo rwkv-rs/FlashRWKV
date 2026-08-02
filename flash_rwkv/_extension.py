@@ -512,3 +512,50 @@ def pretrain_tmix_mix6_bf16_backward(
             x_g,
         )
     )
+
+
+def pretrain_tmix_kk_pre_bf16_forward(
+    key: torch.Tensor,
+    key_scale: torch.Tensor,
+    learning_rate: torch.Tensor,
+    learning_rate_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Call the RWKV-LM TimeMix key-preparation forward operator."""
+
+    _load_extension()
+    result = torch.ops.rwkv7_tmix_kk_pre_bf16_v5.forward(
+        key,
+        key_scale,
+        learning_rate,
+        learning_rate_scale,
+        64,
+    )
+    return result[0], result[1], result[2], result[3]
+
+
+def pretrain_tmix_kk_pre_bf16_backward(
+    grad_new_key: torch.Tensor,
+    grad_negative_direction: torch.Tensor,
+    grad_scaled_direction: torch.Tensor,
+    key: torch.Tensor,
+    key_scale: torch.Tensor,
+    learning_rate: torch.Tensor,
+    learning_rate_scale: torch.Tensor,
+    inverse_norm: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Call the paired RWKV-LM TimeMix key-preparation backward operator."""
+
+    _load_extension()
+    return tuple(
+        torch.ops.rwkv7_tmix_kk_pre_bf16_v5.backward(
+            grad_new_key,
+            grad_negative_direction,
+            grad_scaled_direction,
+            key,
+            key_scale,
+            learning_rate,
+            learning_rate_scale,
+            inverse_norm,
+            64,
+        )
+    )
