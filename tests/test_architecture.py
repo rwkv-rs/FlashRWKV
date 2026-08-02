@@ -47,11 +47,12 @@ def _extension_cuda_sources() -> set[str]:
 
 
 def test_architecture_contract_separates_build_and_runtime_evidence() -> None:
-    assert MINIMUM_WHEEL_ARCHITECTURE == "sm90"
+    assert MINIMUM_WHEEL_ARCHITECTURE == "sm60"
     assert COMPILE_ONLY_ARCHITECTURES == ("sm90", "sm120")
-    assert RUNTIME_VALIDATED_ARCHITECTURES == ("sm120",)
+    assert RUNTIME_VALIDATED_ARCHITECTURES == ("sm61", "sm120")
     assert BUILD_TARGET_MATRIX == (
-        ("sm80", "fail_closed"),
+        ("sm61", "runtime_validated"),
+        ("sm80", "compile_only"),
         ("sm90", "compile_only"),
         ("sm120", "runtime_validated"),
     )
@@ -63,18 +64,12 @@ def test_every_cuda_translation_unit_has_exact_minimum_architecture_metadata() -
         path
         for path, architecture in TRANSLATION_UNIT_ARCHITECTURES.items()
         if architecture == "sm80"
-    } == {
-        "csrc/infer/wkv7/infer_sm80_recurrent_fp16_forward_varlen.cu",
-    }
+    } == set()
     assert {
         path
         for path, architecture in TRANSLATION_UNIT_ARCHITECTURES.items()
         if architecture == "sm90"
-    } == {
-        "csrc/pretrain/wkv7/pretrain_sm90_cmix_bf16_forward_backward.cu",
-        "csrc/pretrain/wkv7/pretrain_sm90_tmix_kk_pre_bf16_forward_backward.cu",
-        "csrc/pretrain/wkv7/pretrain_sm90_tmix_mix6_bf16_forward_backward.cu",
-    }
+    } == set()
 
 
 def test_architecture_specific_translation_units_retain_their_isa_evidence() -> None:
@@ -83,18 +78,17 @@ def test_architecture_specific_translation_units_retain_their_isa_evidence() -> 
     ).read_text(encoding="utf-8")
     assert "cp.async.cg.shared.global" in sm80
     assert "cp.async.wait_group" in sm80
+    assert "#if __CUDA_ARCH__ >= 800" in sm80
 
-    for path, architecture in TRANSLATION_UNIT_ARCHITECTURES.items():
-        if architecture != "sm90":
-            continue
-        source = (ROOT / path).read_text(encoding="utf-8")
-        assert "atomicAdd(reinterpret_cast<float2*>" in source
+    compat = (ROOT / "csrc/bf16_compat.cuh").read_text(encoding="utf-8")
+    assert "__CUDA_ARCH__ >= 800" in compat
+    assert "__bfloat162float(value.x)" in compat
 
 
-def test_complete_wheel_rejects_targets_below_sm90() -> None:
-    with pytest.raises(RuntimeError, match="requires compute capability >= 9.0"):
-        validate_wheel_architectures("8.0")
-    assert validate_wheel_architectures("9.0;12.0+PTX") == ((9, 0), (12, 0))
+def test_complete_wheel_rejects_targets_below_sm60() -> None:
+    with pytest.raises(RuntimeError, match="requires compute capability >= 6.0"):
+        validate_wheel_architectures("5.2")
+    assert validate_wheel_architectures("6.1;12.0+PTX") == ((6, 1), (12, 0))
     assert validate_wheel_architectures(None, detected=(12, 0)) == ((12, 0),)
 
 
@@ -145,7 +139,7 @@ def test_setup_native_commands_without_architecture_or_device_fail_closed(
     )
     assert result.returncode != 0
     assert "require TORCH_CUDA_ARCH_LIST" in result.stderr
-    assert ">= 9.0 (SM90 minimum)" in result.stderr
+    assert ">= 6.0 (SM60 minimum)" in result.stderr
 
 
 def test_sdist_contains_complete_native_sources_and_preserves_build_contract(
@@ -230,7 +224,7 @@ def test_sdist_contains_complete_native_sources_and_preserves_build_contract(
     )
     assert extracted_build.returncode != 0
     assert "require TORCH_CUDA_ARCH_LIST" in extracted_build.stderr
-    assert ">= 9.0 (SM90 minimum)" in extracted_build.stderr
+    assert ">= 6.0 (SM60 minimum)" in extracted_build.stderr
 
 
 @pytest.mark.parametrize("value", ["", "Ampere", "9", "sm90", "9.0+sass"])
@@ -243,10 +237,10 @@ def test_registry_does_not_turn_compile_targets_into_runtime_claims() -> None:
     internal_kernels = tuple(spec for spec in KERNEL_SPECS if spec.maturity != "external")
     external_kernels = tuple(spec for spec in KERNEL_SPECS if spec.maturity == "external")
     assert all(
-        spec.validated_architectures == ("sm120",) for spec in internal_kernels
+        spec.validated_architectures == ("sm61", "sm120") for spec in internal_kernels
     )
     assert all(
-        spec.package_minimum_architecture == "sm90" for spec in internal_kernels
+        spec.package_minimum_architecture == "sm60" for spec in internal_kernels
     )
     assert all(
         spec.translation_unit_architecture is None
@@ -255,20 +249,16 @@ def test_registry_does_not_turn_compile_targets_into_runtime_claims() -> None:
         for spec in external_kernels
     )
     assert all(
-        spec.validated_architectures == ("sm120",)
+        spec.validated_architectures == ("sm61", "sm120")
         for spec in (*TRAINING_OPERATOR_SPECS, *INFERENCE_OPERATOR_SPECS)
     )
     assert all(
-        spec.package_minimum_architecture == "sm90"
+        spec.package_minimum_architecture == "sm60"
         for spec in (*TRAINING_OPERATOR_SPECS, *INFERENCE_OPERATOR_SPECS)
     )
-    sm90_operators = {
+    architecture_specific_operators = {
         spec.name
         for spec in TRAINING_OPERATOR_SPECS
-        if spec.translation_unit_architecture == "sm90"
+        if spec.translation_unit_architecture != "common"
     }
-    assert sm90_operators == {
-        "pretrain_cmix_bf16",
-        "pretrain_tmix_kk_pre_bf16",
-        "pretrain_tmix_mix6_bf16",
-    }
+    assert architecture_specific_operators == set()

@@ -8,6 +8,8 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+#include "../../bf16_compat.cuh"
+
 #include <cstdlib>
 #include <vector>
 
@@ -21,7 +23,8 @@ __device__ inline void store_bf16x2(at::BFloat16* ptr, __nv_bfloat162 value) {
 }
 
 __device__ inline void atomic_add_float2(float* ptr, float x0, float x1) {
-    atomicAdd(reinterpret_cast<float2*>(ptr), make_float2(x0, x1));
+    atomicAdd(ptr, x0);
+    atomicAdd(ptr + 1, x1);
 }
 
 inline int64_t ceil_div(int64_t n, int64_t d) {

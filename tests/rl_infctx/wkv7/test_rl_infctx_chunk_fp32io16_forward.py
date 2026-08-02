@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -503,6 +504,12 @@ def test_auto_family_dispatch_matches_explicit_algorithm(
 
 
 @pytest.mark.parametrize("chunk_size", [16, 32, 64])
+@pytest.mark.skipif(
+    importlib.util.find_spec("fla") is None
+    or not torch.cuda.is_available()
+    or torch.cuda.get_device_capability()[0] < 8,
+    reason="FLA chunk kernels require SM80 or newer",
+)
 def test_fixed_chunk_matches_fla(chunk_size: int) -> None:
     from fla.ops.rwkv7 import chunk_rwkv7
 
@@ -547,6 +554,12 @@ def test_fixed_chunk_matches_fla(chunk_size: int) -> None:
     )
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("fla") is None
+    or not torch.cuda.is_available()
+    or torch.cuda.get_device_capability()[0] < 8,
+    reason="FLA chunk kernels require SM80 or newer",
+)
 def test_packed_chunk_matches_fla() -> None:
     from fla.ops.rwkv7 import chunk_rwkv7
 
