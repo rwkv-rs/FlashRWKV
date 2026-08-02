@@ -74,8 +74,8 @@ def validate_wheel_architectures(
         capabilities = (detected,)
     else:
         raise ValueError(
-            "FlashRWKV CUDA builds require TORCH_CUDA_ARCH_LIST when no CUDA "
-            "device is available"
+            "FlashRWKV native builds require TORCH_CUDA_ARCH_LIST with targets "
+            ">= 9.0 (SM90 minimum) when no CUDA device is available"
         )
     unsupported = tuple(capability for capability in capabilities if capability < (9, 0))
     if unsupported:
