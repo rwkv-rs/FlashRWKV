@@ -28,6 +28,17 @@ RWKV/Albatross integration at rwkv-rs/vllm-rwkv commit
 The FP16 recurrent lineage includes BlinkDL/Albatross faster3a_2607 commit
 63c53f4abf2cd891dd3a18c8f44f5b2cccc8c64b.
 
+The following fused FP16 inference block operators are adapted from
+BlinkDL/Albatross faster3a_2607 commit
+ee3308f6922e59f2166c7fac3c5a192340a2b48e:
+
+- csrc/infer/wkv7/infer_smxx_fused_fp16_forward_registration.cpp
+- csrc/infer/wkv7/infer_smxx_fused_fp16_forward.cu
+
+The already-owned FP16/FP32 WKV recurrence files from that source are not
+duplicated. These derived files are licensed under the Apache License,
+Version 2.0; see LICENSES/Apache-2.0.txt.
+
 The following files contain recurrent checkpoint and reverse-recurrence
 methods adapted from BlinkDL/RWKV-LM commit
 952102498e9ed367ea0a59ee64106916d474d30f:

@@ -17,6 +17,8 @@ setup(
                 "csrc/chunk/replay_fp32.cu",
                 "csrc/kda/infer_chunk_bf16_forward_k1_prepare.cu",
                 "csrc/kda/infer_chunk_bf16_forward_k2_recurrence.cu",
+                "csrc/infer/wkv7/infer_smxx_fused_fp16_forward_registration.cpp",
+                "csrc/infer/wkv7/infer_smxx_fused_fp16_forward.cu",
                 "csrc/pretrain/recurrent_fp32io16_backward.cu",
                 "csrc/pretrain/recurrent_fp32io16_forward.cu",
                 "csrc/pretrain/head_l2wrap_ce/rwkv7_head_l2wrap_ce_bf16_v4_registration.cpp",
