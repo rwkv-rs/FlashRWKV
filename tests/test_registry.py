@@ -106,12 +106,34 @@ def test_workload_benchmark_identities_resolve_through_canonical_registry() -> N
         / "benchmarks/statetune/wkv7/benchmark_statetune_recurrent_fp32io16_backward.py"
     ).read_text()
     rl_infctx_source = (
-        ROOT
-        / "benchmarks/rl_infctx/wkv7/benchmark_rl_infctx_chunk_fp32io16_forward.py"
+        ROOT / "benchmarks/rl_infctx/wkv7/benchmark_rl_infctx_chunk_fp32io16_forward.py"
     ).read_text()
     assert "OPERATOR_SPEC = get_kernel_spec(" in statetune_source
     assert "OPERATOR_SPECS = {" in rl_infctx_source
     assert '"provider": "flash_rwkv"' not in rl_infctx_source
+
+
+def test_racecheck_covers_registered_statetune_result_identity() -> None:
+    statetune = get_kernel_spec(
+        "statetune_recurrent_fp32io16_forward_backward",
+        provider="flash_rwkv",
+    )
+    source = (ROOT / "tests/racecheck/fused_operators.py").read_text()
+
+    assert "STATETUNE_OPERATOR_SPEC = get_kernel_spec(" in source
+    assert f'    "{statetune.name}",' in source
+    assert f'    provider="{statetune.provider}",' in source
+    assert "for input_dtype in (torch.float16, torch.bfloat16):" in source
+    assert "output, final_state = statetune_recurrent_fp32io16_forward(" in source
+    assert (
+        "loss = output.float().square().mean() + final_state.square().mean()" in source
+    )
+    assert "initial_state_gradient = initial_state.grad" in source
+    assert '"provider": STATETUNE_OPERATOR_SPEC.provider' in source
+    assert '"name": STATETUNE_OPERATOR_SPEC.name' in source
+    assert '"mode": STATETUNE_MODE' in source
+    assert '"input_dtype": str(input_dtype).removeprefix("torch.")' in source
+    assert '"statetune_results": statetune_results' in source
 
 
 @pytest.mark.parametrize(
