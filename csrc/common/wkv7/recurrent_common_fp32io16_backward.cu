@@ -162,6 +162,7 @@ void recurrent_common_fp32io16_backward_kernel(
             shared.state_dot_a[other_value],
             grad_b);
       }
+      __syncthreads();
 
       float grad_v = 0.0f;
       float adjoint_dot_b = 0.0f;
