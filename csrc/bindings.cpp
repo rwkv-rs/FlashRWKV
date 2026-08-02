@@ -21,6 +21,7 @@ void recurrent_fp32_cuda(
     torch::Tensor a,
     torch::Tensor b,
     torch::Tensor output,
+    torch::Tensor metadata_status,
     double scale);
 
 void recurrent_fp16_cuda(
@@ -34,6 +35,7 @@ void recurrent_fp16_cuda(
     torch::Tensor a,
     torch::Tensor b,
     torch::Tensor output,
+    torch::Tensor metadata_status,
     double scale);
 
 void pretrain_recurrent_fp32io16_forward_cuda(
@@ -147,6 +149,7 @@ using flash_rwkv::validation::check_recurrent_layout;
 using flash_rwkv::validation::check_same_device;
 using flash_rwkv::validation::kHeadSize;
 using flash_rwkv::validation::RecurrentDimensions;
+using flash_rwkv::validation::validate_recurrent_metadata_cuda;
 
 void recurrent_fp32(
     torch::Tensor query_start_loc,
@@ -179,6 +182,8 @@ void recurrent_fp32(
           r.scalar_type() == torch::kFloat32,
       "FP32-state token tensors must be fp16, bf16, or fp32");
 
+  auto metadata_status = validate_recurrent_metadata_cuda(
+      query_start_loc, state_indices, r.size(0), state.size(0));
   recurrent_fp32_cuda(
       query_start_loc,
       state_indices,
@@ -190,6 +195,7 @@ void recurrent_fp32(
       a,
       b,
       output,
+      metadata_status,
       scale);
 }
 
@@ -222,6 +228,8 @@ void recurrent_fp16(
       r.scalar_type() == torch::kFloat16,
       "FP16-state token tensors must be fp16");
 
+  auto metadata_status = validate_recurrent_metadata_cuda(
+      query_start_loc, state_indices, r.size(0), state.size(0));
   recurrent_fp16_cuda(
       query_start_loc,
       state_indices,
@@ -233,6 +241,7 @@ void recurrent_fp16(
       a,
       b,
       output,
+      metadata_status,
       scale);
 }
 

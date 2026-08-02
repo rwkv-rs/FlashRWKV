@@ -87,6 +87,9 @@ RecurrentDimensions check_recurrent_layout(
       state.dim() == 4 && state.size(0) > 0 && state.size(1) > 0 &&
           state.size(2) == kHeadSize && state.size(3) == kHeadSize,
       "state must have shape [slots,H,64,64]");
+  TORCH_CHECK(
+      state.size(0) <= std::numeric_limits<int>::max(),
+      "state slot count must fit in int32");
 
   const int64_t num_heads = state.size(1);
   TORCH_CHECK(
@@ -96,6 +99,9 @@ RecurrentDimensions check_recurrent_layout(
       r.dim() == 3 && r.size(0) > 0 && r.size(1) == num_heads &&
           r.size(2) == kHeadSize,
       "r must have shape [total_tokens,H,64]");
+  TORCH_CHECK(
+      r.size(0) <= std::numeric_limits<int>::max(),
+      "token count must fit in int32");
   TORCH_CHECK(
       r.sizes() == log_decay.sizes() && r.sizes() == k.sizes() &&
           r.sizes() == v.sizes() && r.sizes() == a.sizes() &&

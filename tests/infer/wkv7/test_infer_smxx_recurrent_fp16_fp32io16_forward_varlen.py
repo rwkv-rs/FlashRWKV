@@ -28,6 +28,14 @@ RECURRENT_TOLERANCES = {
     "fp32io16": TOLERANCES["fp32io16_recurrent"],
     "fp16": TOLERANCES["fp16"],
 }
+HOSTILE_METADATA_CASES = (
+    ("malformed-start", (1, 2, 3), (0, 1)),
+    ("malformed-end", (0, 1, 2), (0, 1)),
+    ("nonmonotonic-overlap", (0, 2, 1, 3), (0, 1, 2)),
+    ("negative-slot", (0, 1, 3), (-1, 1)),
+    ("out-of-range-slot", (0, 1, 3), (0, 5)),
+    ("duplicate-slot", (0, 1, 3), (2, 2)),
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -267,6 +275,52 @@ def test_strict_debug_validation_rejects_duplicate_state_indices() -> None:
             total_tokens=2,
             state_pool_size=2,
         )
+
+
+@pytest.mark.parametrize("mode", ["fp32io16", "fp16"])
+@pytest.mark.parametrize(
+    ("case", "offsets", "slots"),
+    HOSTILE_METADATA_CASES,
+    ids=tuple(case[0] for case in HOSTILE_METADATA_CASES),
+)
+def test_raw_recurrent_native_op_fails_closed_for_hostile_metadata(
+    mode: str,
+    case: str,
+    offsets: tuple[int, ...],
+    slots: tuple[int, ...],
+) -> None:
+    from flash_rwkv import _C
+
+    del case
+    inputs = _inputs(batch_size=1, sequence_length=3, seed=59)
+    flattened = tuple(tensor.reshape(3, 1, HEAD_SIZE) for tensor in inputs)
+    state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
+    state = torch.randn(
+        5,
+        1,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=state_dtype,
+    )
+    state_before = state.clone()
+    output = torch.ones_like(flattened[3])
+    query_start_loc = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    state_indices = torch.tensor(slots, device="cuda", dtype=torch.int32)
+    operator = _C.recurrent_fp32 if mode == "fp32io16" else _C.recurrent_fp16
+
+    operator(
+        query_start_loc,
+        state_indices,
+        state,
+        *flattened,
+        output,
+        1.0,
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(state, state_before)
+    assert torch.isnan(output).all()
 
 
 def test_stateful_recurrent_passes_device_metadata_by_identity(

@@ -94,6 +94,7 @@ def test_binding_responsibilities_have_distinct_translation_units() -> None:
         "csrc/bindings.cpp",
         "csrc/registration.cpp",
         "csrc/validation.cpp",
+        "csrc/validation/recurrent_metadata.cu",
     } <= sources
 
     bindings = (CSRC / "bindings.cpp").read_text()
@@ -157,6 +158,11 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert ".tolist(" not in validation
     assert "query_start_loc = cu_seqlens" in metadata
     assert "else state_indices" in metadata
+    native_validation = (CSRC / "validation/recurrent_metadata.cu").read_text()
+    assert ".cpu(" not in native_validation
+    assert ".item(" not in native_validation
+    assert "validate_recurrent_metadata_kernel" in native_validation
+    assert "kDuplicateStateSlot" in native_validation
     assert "command -v compute-sanitizer" in workflow
     assert "packed-recurrent-benchmark.json" in workflow
     assert "Verify clean tracked source checkout" in workflow
@@ -208,6 +214,7 @@ def test_native_sources_are_owned_by_workload_wkv7_trees() -> None:
             "csrc/bindings.cpp",
             "csrc/registration.cpp",
             "csrc/validation.cpp",
+            "csrc/validation/recurrent_metadata.cu",
         }
     }
     assert workload_sources

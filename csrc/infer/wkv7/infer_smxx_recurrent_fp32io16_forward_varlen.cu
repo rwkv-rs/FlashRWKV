@@ -29,8 +29,10 @@ __device__ __forceinline__ io_t from_float(float value) {
 template <typename io_t>
 __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp32_kernel(
     int num_heads,
+    int64_t output_elements,
     const int* __restrict__ query_start_loc,
     const int* __restrict__ state_indices,
+    const int* __restrict__ metadata_status,
     float* __restrict__ state_ptr,
     const io_t* __restrict__ r_ptr,
     const io_t* __restrict__ log_decay_ptr,
@@ -43,6 +45,20 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp32_kernel(
   const int head_index = static_cast<int>(blockIdx.x);
   const int sequence_index = static_cast<int>(blockIdx.y);
   const int value_index = static_cast<int>(threadIdx.x);
+
+  if (metadata_status[0] != 0) {
+    const int64_t block_index =
+        static_cast<int64_t>(sequence_index) * num_heads + head_index;
+    const int64_t block_count =
+        static_cast<int64_t>(gridDim.x) * gridDim.y;
+    for (int64_t output_index = block_index * blockDim.x + value_index;
+         output_index < output_elements;
+         output_index += block_count * blockDim.x) {
+      output_ptr[output_index] =
+          from_float<io_t>(__int_as_float(0x7fffffff));
+    }
+    return;
+  }
 
   __shared__ int token_start;
   __shared__ int token_end;
@@ -123,13 +139,16 @@ void launch_recurrent_fp32(
     const torch::Tensor& a,
     const torch::Tensor& b,
     torch::Tensor& output,
+    const torch::Tensor& metadata_status,
     float scale,
     cudaStream_t stream) {
   recurrent_fp32_kernel<io_t>
       <<<dim3(num_heads, num_sequences), dim3(kHeadSize), 0, stream>>>(
           num_heads,
+          output.numel(),
           query_start_loc.data_ptr<int>(),
           state_indices.data_ptr<int>(),
+          metadata_status.data_ptr<int>(),
           state.data_ptr<float>(),
           r.data_ptr<io_t>(),
           log_decay.data_ptr<io_t>(),
@@ -154,6 +173,7 @@ void recurrent_fp32_cuda(
     torch::Tensor a,
     torch::Tensor b,
     torch::Tensor output,
+    torch::Tensor metadata_status,
     double scale) {
   const c10::cuda::CUDAGuard device_guard(state.device());
   const auto stream = at::cuda::getCurrentCUDAStream();
@@ -179,6 +199,7 @@ void recurrent_fp32_cuda(
             a,
             b,
             output,
+            metadata_status,
             static_cast<float>(scale),
             stream);
       });

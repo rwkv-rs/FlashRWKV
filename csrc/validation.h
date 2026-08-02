@@ -42,5 +42,10 @@ int64_t check_chunk_metadata(
     torch::Tensor chunk_token_ends,
     const torch::Tensor& state,
     const RecurrentDimensions& dimensions);
+torch::Tensor validate_recurrent_metadata_cuda(
+    torch::Tensor query_start_loc,
+    torch::Tensor state_indices,
+    int64_t total_tokens,
+    int64_t state_pool_size);
 
 }  // namespace flash_rwkv::validation

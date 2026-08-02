@@ -11,6 +11,7 @@ setup(
                 "csrc/bindings.cpp",
                 "csrc/registration.cpp",
                 "csrc/validation.cpp",
+                "csrc/validation/recurrent_metadata.cu",
                 "csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_forward_materialized.cu",
                 "csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_forward_recompute.cu",
                 "csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_backward_replay.cu",

@@ -10,6 +10,7 @@ import json
 import torch
 
 from flash_rwkv import (
+    _C,
     infer_cmix_mix_fp16,
     infer_tmix_kk_a_gate_fp16,
     infer_tmix_lnx_rkvres_xg_fp16,
@@ -24,6 +25,15 @@ from flash_rwkv import (
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
     rwkv7_recurrent_stateful,
+)
+
+HOSTILE_METADATA_CASES = (
+    ("malformed_start", (1, 2, 3), (0, 1)),
+    ("malformed_end", (0, 1, 2), (0, 1)),
+    ("nonmonotonic_overlap", (0, 2, 1, 3), (0, 1, 2)),
+    ("negative_slot", (0, 1, 3), (-1, 1)),
+    ("out_of_range_slot", (0, 1, 3), (0, 5)),
+    ("duplicate_slot", (0, 1, 3), (2, 2)),
 )
 
 
@@ -187,11 +197,64 @@ def run_inference() -> list[str]:
     return names
 
 
+def run_hostile_packed_metadata() -> list[str]:
+    names: list[str] = []
+    packed_shape = (1, 3, 1, 64)
+    flattened_inputs = tuple(
+        tensor.reshape(3, 1, 64)
+        for tensor in (_fp16(packed_shape, scale=0.02) for _ in range(6))
+    )
+    for mode, state_dtype, operator in (
+        ("fp32io16", torch.float32, _C.recurrent_fp32),
+        ("fp16", torch.float16, _C.recurrent_fp16),
+    ):
+        for case, offsets, slots in HOSTILE_METADATA_CASES:
+            state = torch.randn(
+                5,
+                1,
+                64,
+                64,
+                device="cuda",
+                dtype=state_dtype,
+            )
+            state_before = state.clone()
+            output = torch.ones_like(flattened_inputs[3])
+            query_start_loc = torch.tensor(
+                offsets,
+                device="cuda",
+                dtype=torch.int32,
+            )
+            state_indices = torch.tensor(
+                slots,
+                device="cuda",
+                dtype=torch.int32,
+            )
+            operator(
+                query_start_loc,
+                state_indices,
+                state,
+                *flattened_inputs,
+                output,
+                1.0,
+            )
+            torch.cuda.synchronize()
+            if not torch.equal(state, state_before):
+                raise AssertionError(f"hostile {case}/{mode} mutated state")
+            if not torch.isnan(output).all().item():
+                raise AssertionError(f"hostile {case}/{mode} did not fail closed")
+            names.append(f"rwkv7_recurrent_raw_hostile_{case}_{mode}")
+    return names
+
+
 def main() -> None:
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required")
     torch.manual_seed(20260801)
-    operators = [*run_training(), *run_inference()]
+    operators = [
+        *run_training(),
+        *run_inference(),
+        *run_hostile_packed_metadata(),
+    ]
     print(
         json.dumps(
             {

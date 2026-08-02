@@ -100,8 +100,10 @@ __device__ __forceinline__ void prefetch_token(
 
 __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
     int num_heads,
+    int64_t output_elements,
     const int* __restrict__ query_start_loc,
     const int* __restrict__ state_indices,
+    const int* __restrict__ metadata_status,
     half* __restrict__ state_ptr,
     const half* __restrict__ r_ptr,
     const half* __restrict__ log_decay_ptr,
@@ -115,6 +117,20 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
   const int sequence_index = static_cast<int>(blockIdx.y);
   const int thread = static_cast<int>(threadIdx.x);
   const int lane = thread & 31;
+
+  if (metadata_status[0] != 0) {
+    const int64_t block_index =
+        static_cast<int64_t>(sequence_index) * num_heads + head_index;
+    const int64_t block_count =
+        static_cast<int64_t>(gridDim.x) * gridDim.y;
+    for (int64_t output_index = block_index * blockDim.x + thread;
+         output_index < output_elements;
+         output_index += block_count * blockDim.x) {
+      output_ptr[output_index] =
+          __float2half(__int_as_float(0x7fffffff));
+    }
+    return;
+  }
 
   int token_start = 0;
   int token_end = 0;
@@ -277,6 +293,7 @@ void recurrent_fp16_cuda(
     torch::Tensor a,
     torch::Tensor b,
     torch::Tensor output,
+    torch::Tensor metadata_status,
     double scale) {
   const c10::cuda::CUDAGuard device_guard(state.device());
   const auto stream = at::cuda::getCurrentCUDAStream();
@@ -286,8 +303,10 @@ void recurrent_fp16_cuda(
       0,
       stream>>>(
       static_cast<int>(state.size(1)),
+      output.numel(),
       query_start_loc.data_ptr<int>(),
       state_indices.data_ptr<int>(),
+      metadata_status.data_ptr<int>(),
       reinterpret_cast<half*>(state.data_ptr()),
       reinterpret_cast<const half*>(r.data_ptr()),
       reinterpret_cast<const half*>(log_decay.data_ptr()),
