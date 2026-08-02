@@ -1,0 +1,7 @@
+include LICENSE
+include NOTICE
+include README.md
+include pyproject.toml
+include setup.py
+recursive-include LICENSES *.txt
+recursive-include csrc *.cpp *.cu *.cuh *.h *.hpp

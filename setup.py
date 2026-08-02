@@ -28,7 +28,21 @@ requested_architectures = os.environ.get("TORCH_CUDA_ARCH_LIST")
 detected_architecture = (
     tuple(torch.cuda.get_device_capability()) if torch.cuda.is_available() else None
 )
-build_commands = {"bdist_wheel", "build_ext", "develop", "editable_wheel", "install"}
+build_commands = {
+    "bdist",
+    "bdist_egg",
+    "bdist_rpm",
+    "bdist_wheel",
+    "build",
+    "build_clib",
+    "build_ext",
+    "build_py",
+    "build_scripts",
+    "develop",
+    "editable_wheel",
+    "install",
+    "install_lib",
+}
 native_build = bool(build_commands.intersection(sys.argv[1:]))
 if native_build:
     architecture.validate_wheel_architectures(

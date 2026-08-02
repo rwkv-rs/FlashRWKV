@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ast
 import os
+import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -111,12 +113,30 @@ def test_setup_metadata_works_without_cuda_architecture_input() -> None:
     assert result.stdout.strip().splitlines()[-1] == "flash-rwkv"
 
 
-def test_setup_build_ext_without_architecture_or_device_fails_closed() -> None:
+@pytest.mark.parametrize(
+    "command",
+    (
+        "build",
+        "build_ext",
+        "build_py",
+        "bdist",
+        "bdist_egg",
+        "bdist_rpm",
+        "bdist_wheel",
+        "develop",
+        "editable_wheel",
+        "install",
+        "install_lib",
+    ),
+)
+def test_setup_native_commands_without_architecture_or_device_fail_closed(
+    command: str,
+) -> None:
     environment = os.environ.copy()
     environment.pop("TORCH_CUDA_ARCH_LIST", None)
     environment["CUDA_VISIBLE_DEVICES"] = ""
     result = subprocess.run(
-        (sys.executable, "setup.py", "build_ext"),
+        (sys.executable, "setup.py", command),
         cwd=ROOT,
         env=environment,
         check=False,
@@ -125,6 +145,92 @@ def test_setup_build_ext_without_architecture_or_device_fails_closed() -> None:
     )
     assert result.returncode != 0
     assert "require TORCH_CUDA_ARCH_LIST" in result.stderr
+    assert ">= 9.0 (SM90 minimum)" in result.stderr
+
+
+def test_sdist_contains_complete_native_sources_and_preserves_build_contract(
+    tmp_path: Path,
+) -> None:
+    source_tree = tmp_path / "source"
+    shutil.copytree(
+        ROOT,
+        source_tree,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            ".cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            "__pycache__",
+            "artifacts",
+            "build",
+            "dist",
+            "*.egg-info",
+            "*.so",
+        ),
+    )
+    environment = os.environ.copy()
+    environment.pop("TORCH_CUDA_ARCH_LIST", None)
+    environment["CUDA_VISIBLE_DEVICES"] = ""
+    dist_dir = tmp_path / "dist"
+    result = subprocess.run(
+        (sys.executable, "setup.py", "sdist", "--dist-dir", str(dist_dir)),
+        cwd=source_tree,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    archives = tuple(dist_dir.glob("*.tar.gz"))
+    assert len(archives) == 1
+    with tarfile.open(archives[0], "r:gz") as archive:
+        member_names = tuple(archive.getnames())
+        top_levels = {name.split("/", 1)[0] for name in member_names}
+        assert len(top_levels) == 1
+        prefix = f"{top_levels.pop()}/"
+        relative_members = {
+            name.removeprefix(prefix)
+            for name in member_names
+            if name.startswith(prefix)
+        }
+        extract_root = tmp_path / "extracted"
+        archive.extractall(extract_root, filter="data")
+
+    native_sources = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "csrc").rglob("*")
+        if path.is_file()
+    }
+    assert native_sources <= relative_members
+    assert {
+        "MANIFEST.in",
+        "LICENSE",
+        "LICENSES/Apache-2.0.txt",
+        "NOTICE",
+        "README.md",
+        "flash_rwkv/architecture.py",
+        "flash_rwkv/provenance.py",
+        "flash_rwkv/registry.py",
+        "pyproject.toml",
+        "setup.py",
+    } <= relative_members
+    placeholder = "sm" + "xx"
+    assert not [name for name in relative_members if placeholder in name.lower()]
+
+    extracted_source = next(extract_root.iterdir())
+    extracted_build = subprocess.run(
+        (sys.executable, "setup.py", "build"),
+        cwd=extracted_source,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert extracted_build.returncode != 0
+    assert "require TORCH_CUDA_ARCH_LIST" in extracted_build.stderr
+    assert ">= 9.0 (SM90 minimum)" in extracted_build.stderr
 
 
 @pytest.mark.parametrize("value", ["", "Ampere", "9", "sm90", "9.0+sass"])
