@@ -24,7 +24,7 @@ jobs:
         run: |
           .venv/bin/ruff check \
             benchmarks/rl_infctx/wkv7/benchmark_rl_infctx_chunk_fp32io16_forward.py \
-            benchmarks/infer/wkv7/benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py \
+            benchmarks/infer/recurrent/benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py \
             benchmarks/statetune/wkv7/benchmark_statetune_recurrent_fp32io16_backward.py \
             flash_rwkv/architecture.py \
             flash_rwkv/benchmark_contract.py \
@@ -40,8 +40,8 @@ jobs:
             tests/test_architecture.py \
             tests/pretrain/wkv7/test_pretrain_cmix_bf16_forward_backward.py \
             tests/pretrain/wkv7/test_pretrain_head_l2wrap_ce_bf16_forward.py \
-            tests/infer/wkv7/test_infer_fused_fp16_forward.py \
-            tests/infer/wkv7/test_infer_recurrent_fp16_fp32io16_forward_varlen.py \
+            tests/infer/fused/test_infer_fused_fp16_forward.py \
+            tests/infer/recurrent/test_infer_recurrent_fp16_fp32io16_forward_varlen.py \
             tests/pretrain/wkv7/test_pretrain_l2wrap_ce_bf16_forward_backward.py \
             tests/test_benchmark_contract.py \
             tests/test_native_source_layout.py \
@@ -58,8 +58,8 @@ jobs:
             tests/test_architecture.py \
             tests/test_benchmark_contract.py \
             tests/test_config.py \
-            tests/infer/wkv7/test_infer_fused_fp16_forward.py \
-            tests/infer/wkv7/test_infer_recurrent_fp16_fp32io16_forward_varlen.py \
+            tests/infer/fused/test_infer_fused_fp16_forward.py \
+            tests/infer/recurrent/test_infer_recurrent_fp16_fp32io16_forward_varlen.py \
             tests/test_native_source_layout.py \
             tests/test_provenance.py \
             tests/test_registry.py

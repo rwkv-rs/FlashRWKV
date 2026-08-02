@@ -205,7 +205,7 @@ def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
     assert "B=2048 packed validator evidence is incomplete" in workflow
     assert "invalid StateTune RESULT identity" in workflow
     assert (
-        "tests/infer/wkv7/"
+        "tests/infer/recurrent/"
         "test_infer_recurrent_fp16_fp32io16_forward_varlen.py"
         in quick_workflow
     )
@@ -218,12 +218,12 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     )
     metadata = _function_source("flash_rwkv/ops.py", "_cuda_metadata")
     benchmark_revision = _function_source(
-        "benchmarks/infer/wkv7/"
+        "benchmarks/infer/recurrent/"
         "benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py",
         "_revision_metadata",
     )
     benchmark_case = _function_source(
-        "benchmarks/infer/wkv7/"
+        "benchmarks/infer/recurrent/"
         "benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py",
         "_run_case",
     )
@@ -249,7 +249,7 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert '"kernel_launches_per_operator": 2' in benchmark_case
     assert '"decode_b2048": (1,) * 2048' in (
         ROOT
-        / "benchmarks/infer/wkv7/"
+        / "benchmarks/infer/recurrent/"
         "benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py"
     ).read_text()
     assert "command -v compute-sanitizer" in workflow
@@ -302,7 +302,7 @@ def test_l2wrap_sources_are_built_from_the_pretrain_family() -> None:
         assert "952102498e9ed367ea0a59ee64106916d474d30f" in contents
 
 
-def test_native_sources_are_owned_by_workload_wkv7_trees() -> None:
+def test_native_sources_are_owned_by_workload_and_infer_family_trees() -> None:
     sources = _extension_sources()
     workload_sources = {
         source
@@ -324,6 +324,8 @@ def test_native_sources_are_owned_by_workload_wkv7_trees() -> None:
                 "csrc/rl_infctx/wkv7/",
                 "csrc/statetune/wkv7/",
                 "csrc/infer/wkv7/",
+                "csrc/infer/fused/",
+                "csrc/infer/recurrent/",
             )
         )
         for source in workload_sources
@@ -353,8 +355,8 @@ def test_statetune_registration_points_to_shared_recurrence_sources() -> None:
     assert "_statetune_recurrent_source_manifest" in contents
 
 
-def test_all_workloads_own_csrc_tests_and_benchmarks() -> None:
-    for workload in ("pretrain", "rl_infctx", "statetune", "infer"):
+def test_training_workloads_own_wkv7_csrc_tests_and_benchmarks() -> None:
+    for workload in ("pretrain", "rl_infctx", "statetune"):
         csrc = ROOT / "csrc" / workload / "wkv7"
         tests = ROOT / "tests" / workload / "wkv7"
         benchmarks = ROOT / "benchmarks" / workload / "wkv7"
@@ -366,9 +368,30 @@ def test_all_workloads_own_csrc_tests_and_benchmarks() -> None:
         ), workload
 
 
+def test_infer_families_own_matching_csrc_tests_and_benchmarks() -> None:
+    for family in ("fused", "recurrent"):
+        csrc = ROOT / "csrc" / "infer" / family
+        tests = ROOT / "tests" / "infer" / family
+        benchmarks = ROOT / "benchmarks" / "infer" / family
+        assert any(path.is_file() for path in csrc.iterdir()), family
+        assert any(path.name.startswith("test_") for path in tests.glob("*.py")), family
+        assert any(
+            path.name.startswith(("benchmark_", "autotune_"))
+            for path in benchmarks.glob("*.py")
+        ), family
+
+    wkv7_sources = ROOT / "csrc" / "infer" / "wkv7"
+    wkv7_tests = ROOT / "tests" / "infer" / "wkv7"
+    assert any(path.is_file() for path in wkv7_sources.iterdir())
+    assert any(path.name.startswith("test_") for path in wkv7_tests.glob("*.py"))
+    kernel_benchmark = (ROOT / "benchmarks/kernel_benchmark.py").read_text()
+    assert "infer_chunk_bf16_forward" in kernel_benchmark
+    assert "infer_chunk_bf16_forward_varlen" in kernel_benchmark
+
+
 def test_registration_preserves_exact_native_operator_surface() -> None:
     binding_sources = {
-        "csrc/infer/wkv7/infer_common_recurrent_varlen_bindings.cpp",
+        "csrc/infer/recurrent/infer_common_recurrent_varlen_bindings.cpp",
         "csrc/infer/wkv7/infer_common_chunk_bf16_bindings.cpp",
         "csrc/pretrain/wkv7/pretrain_common_recurrent_fp32io16_bindings.cpp",
         "csrc/rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_bindings.cpp",

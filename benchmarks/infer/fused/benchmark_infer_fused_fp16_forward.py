@@ -243,8 +243,8 @@ def _source_digest() -> str:
     for path in sorted(
         (
             SOURCE_ROOT
-            / "csrc/infer/wkv7/infer_common_fused_fp16_forward_registration.cpp",
-            SOURCE_ROOT / "csrc/infer/wkv7/infer_common_fused_fp16_forward.cu",
+            / "csrc/infer/fused/infer_common_fused_fp16_forward_registration.cpp",
+            SOURCE_ROOT / "csrc/infer/fused/infer_common_fused_fp16_forward.cu",
             SOURCE_ROOT / "flash_rwkv/inference_blocks.py",
             Path(__file__),
         )

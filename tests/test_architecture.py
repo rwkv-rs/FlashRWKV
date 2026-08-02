@@ -64,7 +64,7 @@ def test_every_cuda_translation_unit_has_exact_minimum_architecture_metadata() -
         for path, architecture in TRANSLATION_UNIT_ARCHITECTURES.items()
         if architecture == "sm80"
     } == {
-        "csrc/infer/wkv7/infer_sm80_recurrent_fp16_forward_varlen.cu",
+        "csrc/infer/recurrent/infer_sm80_recurrent_fp16_forward_varlen.cu",
     }
     assert {
         path
@@ -79,7 +79,7 @@ def test_every_cuda_translation_unit_has_exact_minimum_architecture_metadata() -
 
 def test_architecture_specific_translation_units_retain_their_isa_evidence() -> None:
     sm80 = (
-        ROOT / "csrc/infer/wkv7/infer_sm80_recurrent_fp16_forward_varlen.cu"
+        ROOT / "csrc/infer/recurrent/infer_sm80_recurrent_fp16_forward_varlen.cu"
     ).read_text(encoding="utf-8")
     assert "cp.async.cg.shared.global" in sm80
     assert "cp.async.wait_group" in sm80
