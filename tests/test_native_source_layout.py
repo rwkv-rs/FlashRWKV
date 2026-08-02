@@ -78,6 +78,16 @@ def _extension_sources() -> set[str]:
     raise AssertionError("CUDAExtension sources list not found")
 
 
+def _function_source(relative_path: str, name: str) -> str:
+    source = (ROOT / relative_path).read_text()
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            assert node.end_lineno is not None
+            return "\n".join(source.splitlines()[node.lineno - 1:node.end_lineno])
+    raise AssertionError(f"function {name!r} not found in {relative_path}")
+
+
 def test_binding_responsibilities_have_distinct_translation_units() -> None:
     sources = _extension_sources()
     assert {
@@ -127,6 +137,22 @@ def test_gpu_workflow_owns_its_exact_fla_reference_environment() -> None:
     assert 'direct_url["url"] != "https://github.com/rwkv-rs/fla-rwkv.git"' in workflow
     assert 'for name in ("fla", "fla.ops.rwkv7")' in workflow
     assert "module_path.is_relative_to(package_root)" in workflow
+
+
+def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
+    validation = _function_source(
+        "flash_rwkv/validation.py",
+        "validate_rwkv7_inputs",
+    )
+    metadata = _function_source("flash_rwkv/ops.py", "_cuda_metadata")
+    workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
+
+    assert ".cpu(" not in validation
+    assert ".tolist(" not in validation
+    assert "query_start_loc = cu_seqlens" in metadata
+    assert "else state_indices" in metadata
+    assert "command -v compute-sanitizer" in workflow
+    assert "packed-recurrent-benchmark.json" in workflow
 
 
 def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:

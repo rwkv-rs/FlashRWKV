@@ -38,6 +38,7 @@ from .time_mix import (
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
 )
+from .validation import validate_packed_metadata_strict
 
 __all__ = [
     "ChunkConfig",
@@ -71,6 +72,7 @@ __all__ = [
     "rwkv7_recurrent_stateful",
     "rwkv7_reference",
     "training_operator_specs",
+    "validate_packed_metadata_strict",
 ]
 
 __version__ = "0.1.0"

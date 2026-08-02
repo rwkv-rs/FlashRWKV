@@ -17,14 +17,14 @@ import os
 import platform
 import statistics
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
 
-from flash_rwkv import _C
+from flash_rwkv import _C, rwkv7_recurrent_stateful
 
 HEAD_SIZE = 64
 PROFILE_LENGTHS: dict[str, tuple[int, ...]] = {
@@ -311,30 +311,27 @@ def _reference(
     return output, state_pool
 
 
-def _operator(mode: str) -> Callable[..., None]:
-    return _C.recurrent_fp32 if mode == "fp32io16" else _C.recurrent_fp16
-
-
 def _launch(
     payload: ProfilePayload,
     state: torch.Tensor,
-    output: torch.Tensor,
     *,
     mode: str,
     scale: float,
-) -> None:
-    _operator(mode)(
-        payload.query_start_loc,
-        payload.state_indices,
-        state,
-        payload.r,
-        payload.log_decay,
-        payload.k,
-        payload.v,
-        payload.a,
-        payload.b,
-        output,
-        scale,
+) -> torch.Tensor:
+    return rwkv7_recurrent_stateful(
+        *(tensor.unsqueeze(0) for tensor in (
+            payload.r,
+            payload.log_decay,
+            payload.k,
+            payload.v,
+            payload.a,
+            payload.b,
+        )),
+        state_pool=state,
+        cu_seqlens=payload.query_start_loc,
+        state_indices=payload.state_indices,
+        scale=scale,
+        mode=mode,
     )
 
 
@@ -358,11 +355,9 @@ def _correctness(
 ) -> dict[str, object]:
     expected_output, expected_state = _reference(payload, scale=scale)
     first_state = payload.initial_state.clone()
-    first_output = torch.empty_like(payload.output)
     second_state = payload.initial_state.clone()
-    second_output = torch.empty_like(payload.output)
-    _launch(payload, first_state, first_output, mode=mode, scale=scale)
-    _launch(payload, second_state, second_output, mode=mode, scale=scale)
+    first_output = _launch(payload, first_state, mode=mode, scale=scale)[0]
+    second_output = _launch(payload, second_state, mode=mode, scale=scale)[0]
     torch.cuda.synchronize()
 
     active_slots = payload.state_indices.long()
@@ -461,10 +456,10 @@ def _measure_functional(
     samples: int,
 ) -> tuple[list[float], bool]:
     state = payload.initial_state.clone()
-    output = torch.empty_like(payload.output)
+    output = payload.output
     for _ in range(warmup_iters):
         state.copy_(payload.initial_state)
-        _launch(payload, state, output, mode=mode, scale=scale)
+        output = _launch(payload, state, mode=mode, scale=scale)[0]
     torch.cuda.synchronize()
 
     latencies_ms: list[float] = []
@@ -473,7 +468,7 @@ def _measure_functional(
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        _launch(payload, state, output, mode=mode, scale=scale)
+        output = _launch(payload, state, mode=mode, scale=scale)[0]
         end.record()
         end.synchronize()
         latencies_ms.append(start.elapsed_time(end))
@@ -497,26 +492,19 @@ def _measure_stateful(
     sample_iters: int,
 ) -> tuple[list[float], bool]:
     warmup_state = payload.initial_state.clone()
-    warmup_output = torch.empty_like(payload.output)
+    output = payload.output
     for _ in range(warmup_iters):
-        _launch(
-            payload,
-            warmup_state,
-            warmup_output,
-            mode=mode,
-            scale=scale,
-        )
+        output = _launch(payload, warmup_state, mode=mode, scale=scale)[0]
     torch.cuda.synchronize()
 
     state = payload.initial_state.clone()
-    output = torch.empty_like(payload.output)
     latencies_ms: list[float] = []
     for _ in range(samples):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         for _ in range(sample_iters):
-            _launch(payload, state, output, mode=mode, scale=scale)
+            output = _launch(payload, state, mode=mode, scale=scale)[0]
         end.record()
         end.synchronize()
         latencies_ms.append(start.elapsed_time(end) / sample_iters)
@@ -528,6 +516,45 @@ def _measure_stateful(
         .all()
         .item()
     )
+
+
+def _cuda_graph_metadata_evidence(
+    payload: ProfilePayload,
+    *,
+    mode: str,
+    scale: float,
+) -> dict[str, object]:
+    state = payload.initial_state.clone()
+    cu_seqlens_data_ptr = payload.query_start_loc.data_ptr()
+    state_indices_data_ptr = payload.state_indices.data_ptr()
+    warmup_stream = torch.cuda.Stream()
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        for _ in range(3):
+            _launch(payload, state, mode=mode, scale=scale)
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_output = _launch(payload, state, mode=mode, scale=scale)
+    graph.replay()
+    torch.cuda.synchronize()
+    return {
+        "cuda_graph_capture_succeeded": True,
+        "captured_output_finite": bool(torch.isfinite(captured_output).all().item()),
+        "cu_seqlens_data_ptr": cu_seqlens_data_ptr,
+        "state_indices_data_ptr": state_indices_data_ptr,
+        "cu_seqlens_identity_preserved": (
+            payload.query_start_loc.data_ptr() == cu_seqlens_data_ptr
+        ),
+        "state_indices_identity_preserved": (
+            payload.state_indices.data_ptr() == state_indices_data_ptr
+        ),
+        "interpretation": (
+            "successful CUDA graph capture rejects host synchronization in the "
+            "public packed launch boundary"
+        ),
+    }
 
 
 def _measurement(
@@ -602,6 +629,11 @@ def _run_case(
         scale=1.0,
         limits=limits,
     )
+    metadata_evidence = (
+        _cuda_graph_metadata_evidence(payload, mode=mode, scale=1.0)
+        if profile == config.profiles[0] and correctness["passed"]
+        else None
+    )
     measurement: dict[str, object] | None = None
     invalid_reason: str | None = None
     if correctness["passed"] and config.measure:
@@ -624,9 +656,7 @@ def _run_case(
         "profile": profile,
         "mode": mode,
         "provider": (
-            "flash_rwkv._C.recurrent_fp32"
-            if mode == "fp32io16"
-            else "flash_rwkv._C.recurrent_fp16"
+            "flash_rwkv.rwkv7_recurrent_stateful"
         ),
         "state_dtype": (
             "float32" if mode == "fp32io16" else "float16"
@@ -651,6 +681,12 @@ def _run_case(
         "kernel_launches_per_operator": 1,
         "seed": seed,
         "correctness": correctness,
+        "device_metadata": {
+            "cu_seqlens_dtype": str(payload.query_start_loc.dtype),
+            "state_indices_dtype": str(payload.state_indices.dtype),
+            "device": str(payload.query_start_loc.device),
+            "cuda_graph_evidence": metadata_evidence,
+        },
         "measurement_valid": measurement is not None,
         "invalid_reason": invalid_reason,
         "measurements": measurement,
@@ -707,9 +743,11 @@ def run(config: BenchmarkConfig) -> dict[str, object]:
             "profile_file": "benchmarks/kernels/benchmark_rwkv7_wkv.py",
         },
         "operator_boundary": (
-            "direct pybind recurrent operator; excludes input generation, "
-            "validation, compilation, autotune, state reset, logging, and "
-            "serialization"
+            "public rwkv7_recurrent_stateful packed serving API; includes "
+            "structural validation, output allocation, Python dispatch, native "
+            "launch, and device metadata pass-through; excludes input "
+            "generation, strict debug metadata validation, compilation, "
+            "autotune, state reset, logging, and serialization"
         ),
         "synchronization_policy": (
             "warmup followed by explicit synchronization; CUDA start/end "
@@ -783,6 +821,27 @@ def main() -> None:
             measure=not args.correctness_only,
         )
     )
+    for result in payload["results"]:
+        measurements = result["measurements"]
+        if measurements is None:
+            continue
+        latency = measurements["stateful_steady_state"]["latency_ms"]
+        print(
+            " ".join(
+                (
+                    f"RESULT B={result['sequence_count']}",
+                    f"T={result['total_tokens']}",
+                    f"iters={args.samples * args.stateful_sample_iters}",
+                    f"p10_ms={latency['p10']:.6f}",
+                    f"p50_ms={latency['p50']:.6f}",
+                    f"p90_ms={latency['p90']:.6f}",
+                    f"tok_s_p50={latency['useful_tokens_per_s_p50']:.6f}",
+                    f"label=packed-{result['profile']}-{result['mode']}",
+                    f"provider={result['provider']}",
+                    f"mode={result['mode']}",
+                )
+            )
+        )
     print(
         json.dumps(
             {

@@ -9,13 +9,14 @@ import pytest
 import torch
 
 from flash_rwkv import (
+    _extension,
     infer_recurrent_fp16_forward_varlen,
     infer_recurrent_fp32io16_forward_varlen,
     rwkv7,
     rwkv7_recurrent_stateful,
     rwkv7_reference,
+    validate_packed_metadata_strict,
 )
-
 
 HEAD_SIZE = 64
 TOLERANCES = json.loads(
@@ -182,6 +183,8 @@ def test_stateful_recurrent_updates_only_selected_rows(
         5, 1, HEAD_SIZE, HEAD_SIZE, device="cuda", dtype=state_dtype
     )
     initial_state = state_pool.clone()
+    cu_seqlens_data_ptr = cu_seqlens.data_ptr()
+    state_indices_data_ptr = state_indices.data_ptr()
 
     expected_output, expected_pool = rwkv7_reference(
         *inputs,
@@ -198,6 +201,9 @@ def test_stateful_recurrent_updates_only_selected_rows(
         mode=mode,
     )
     torch.cuda.synchronize()
+
+    assert cu_seqlens.data_ptr() == cu_seqlens_data_ptr
+    assert state_indices.data_ptr() == state_indices_data_ptr
 
     tolerance = RECURRENT_TOLERANCES[mode]
     _assert_relative_rmse_close(
@@ -253,18 +259,87 @@ def test_named_varlen_operator_matches_legacy_dispatch(
     assert torch.equal(actual[1], expected[1])
 
 
-def test_duplicate_state_indices_fail_before_cuda_launch() -> None:
-    inputs = _inputs(batch_size=1, sequence_length=2)
+def test_strict_debug_validation_rejects_duplicate_state_indices() -> None:
     with pytest.raises(ValueError, match="must be unique"):
-        rwkv7(
-            *inputs,
-            initial_state=torch.zeros(
-                2, 1, HEAD_SIZE, HEAD_SIZE, device="cuda", dtype=torch.float32
-            ),
-            cu_seqlens=torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32),
-            state_indices=torch.tensor([0, 0], device="cuda", dtype=torch.int32),
-            algorithm="recurrent",
+        validate_packed_metadata_strict(
+            torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32),
+            torch.tensor([0, 0], device="cuda", dtype=torch.int32),
+            total_tokens=2,
+            state_pool_size=2,
         )
+
+
+def test_stateful_recurrent_passes_device_metadata_by_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _inputs(batch_size=1, sequence_length=3, seed=39)
+    cu_seqlens = torch.tensor([0, 2, 3], device="cuda", dtype=torch.int32)
+    state_indices = torch.tensor([4, 1], device="cuda", dtype=torch.int32)
+    state_pool = torch.zeros(
+        5, 1, HEAD_SIZE, HEAD_SIZE, device="cuda", dtype=torch.float32
+    )
+    observed: dict[str, torch.Tensor] = {}
+
+    def recurrent_fp32(
+        query_start_loc: torch.Tensor,
+        cuda_state_indices: torch.Tensor,
+        _state_pool: torch.Tensor,
+        *_arguments: object,
+    ) -> None:
+        observed["cu_seqlens"] = query_start_loc
+        observed["state_indices"] = cuda_state_indices
+        output = _arguments[-2]
+        assert isinstance(output, torch.Tensor)
+        output.zero_()
+
+    monkeypatch.setattr(_extension, "recurrent_fp32", recurrent_fp32)
+    rwkv7_recurrent_stateful(
+        *inputs,
+        state_pool=state_pool,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+    )
+
+    assert observed["cu_seqlens"] is cu_seqlens
+    assert observed["state_indices"] is state_indices
+
+
+@pytest.mark.parametrize("mode", ["fp32io16", "fp16"])
+def test_stateful_recurrent_packed_path_is_cuda_graph_capturable(mode: str) -> None:
+    inputs = _inputs(batch_size=1, sequence_length=3, seed=49)
+    cu_seqlens = torch.tensor([0, 2, 3], device="cuda", dtype=torch.int32)
+    state_indices = torch.tensor([4, 1], device="cuda", dtype=torch.int32)
+    state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
+    state_pool = torch.zeros(
+        5, 1, HEAD_SIZE, HEAD_SIZE, device="cuda", dtype=state_dtype
+    )
+    warmup_stream = torch.cuda.Stream()
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        for _ in range(3):
+            rwkv7_recurrent_stateful(
+                *inputs,
+                state_pool=state_pool,
+                cu_seqlens=cu_seqlens,
+                state_indices=state_indices,
+                mode=mode,
+            )
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_output = rwkv7_recurrent_stateful(
+            *inputs,
+            state_pool=state_pool,
+            cu_seqlens=cu_seqlens,
+            state_indices=state_indices,
+            mode=mode,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert captured_output.shape == inputs[3].shape
+    assert torch.isfinite(captured_output).all()
 
 
 def test_fp16_mode_rejects_non_fp16_tokens_before_cuda_launch() -> None:

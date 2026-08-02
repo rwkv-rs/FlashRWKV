@@ -23,6 +23,7 @@ from flash_rwkv import (
     pretrain_tmix_lnx_rkvres_xg_bf16,
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
+    rwkv7_recurrent_stateful,
 )
 
 
@@ -157,6 +158,32 @@ def run_inference() -> list[str]:
     infer_cmix_mix_fp16(x, _fp16((2, 128)), _fp16((128,)))
     torch.cuda.synchronize()
     names.append("infer_cmix_mix_fp16")
+
+    packed_shape = (1, 3, 1, 64)
+    packed_inputs = tuple(_fp16(packed_shape, scale=0.02) for _ in range(6))
+    cu_seqlens = torch.tensor([0, 2, 3], device="cuda", dtype=torch.int32)
+    state_indices = torch.tensor([4, 1], device="cuda", dtype=torch.int32)
+    for mode, state_dtype in (
+        ("fp32io16", torch.float32),
+        ("fp16", torch.float16),
+    ):
+        state_pool = torch.zeros(
+            5,
+            1,
+            64,
+            64,
+            device="cuda",
+            dtype=state_dtype,
+        )
+        rwkv7_recurrent_stateful(
+            *packed_inputs,
+            state_pool=state_pool,
+            cu_seqlens=cu_seqlens,
+            state_indices=state_indices,
+            mode=mode,
+        )
+        torch.cuda.synchronize()
+        names.append(f"rwkv7_recurrent_stateful_{mode}")
     return names
 
 

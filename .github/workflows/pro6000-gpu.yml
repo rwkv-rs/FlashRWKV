@@ -64,6 +64,8 @@ jobs:
           PY
       - name: Verify controlled GPU target
         run: |
+          command -v compute-sanitizer
+          compute-sanitizer --version
           .venv/bin/python - <<'PY'
           import torch
           expected = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
@@ -81,7 +83,7 @@ jobs:
         run: |
           set -o pipefail
           tests/racecheck/run.sh | tee artifacts/racecheck.log
-      - name: Run fused operator benchmark
+      - name: Run correctness-gated benchmarks
         run: |
           .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_smxx_fused_fp16_forward.py \
             --output artifacts/operator-benchmark.json
@@ -89,6 +91,13 @@ jobs:
             --output artifacts/training-operator-benchmark.json
           .venv/bin/python benchmarks/statetune/wkv7/benchmark_statetune_smxx_recurrent_fp32io16_backward.py \
             --output artifacts/statetune-benchmark.json
+          .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py \
+            --profiles decode_b320 equal_chunk16_b320 ragged_chunk16_b320 \
+            --modes fp32io16 fp16 \
+            --warmup-iters 3 \
+            --samples 10 \
+            --stateful-sample-iters 10 \
+            --output artifacts/packed-recurrent-benchmark.json
       - name: Record immutable run identity
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -132,6 +141,41 @@ jobs:
                   )
                   report.append(f"{result} {identity}".rstrip())
               report.extend(("```", ""))
+
+          packed_path = Path("artifacts/packed-recurrent-benchmark.json")
+          packed = json.loads(packed_path.read_text())
+          if not packed["all_cases_correct"]:
+              raise SystemExit("packed recurrent correctness gate failed")
+          graph_evidence = [
+              row["device_metadata"]["cuda_graph_evidence"]
+              for row in packed["results"]
+              if row["device_metadata"]["cuda_graph_evidence"] is not None
+          ]
+          if len(graph_evidence) != 2 or not all(
+              evidence["cuda_graph_capture_succeeded"]
+              and evidence["cu_seqlens_identity_preserved"]
+              and evidence["state_indices_identity_preserved"]
+              for evidence in graph_evidence
+          ):
+              raise SystemExit("packed device metadata evidence is incomplete")
+          report.extend((f"#### `{packed_path.name}`", "", "```text"))
+          for row in packed["results"]:
+              measurement = row["measurements"]
+              if measurement is None:
+                  raise SystemExit("packed recurrent measurement is missing")
+              latency = measurement["stateful_steady_state"]["latency_ms"]
+              report.append(
+                  f"RESULT B={row['sequence_count']} T={row['total_tokens']} "
+                  f"iters={packed['samples'] * packed['stateful_sample_iters']} "
+                  f"p10_ms={metric(latency['p10'])} "
+                  f"p50_ms={metric(latency['p50'])} "
+                  f"p90_ms={metric(latency['p90'])} "
+                  f"tok_s_p50={metric(latency['useful_tokens_per_s_p50'])} "
+                  f"label=packed-{row['profile']}-{row['mode']} "
+                  f"provider={row['provider']} mode={row['mode']} "
+                  f"source_revision={packed['source']['leaf_revision']}"
+              )
+          report.extend(("```", ""))
           Path("artifacts/benchmark-report.md").write_text(
               "\n".join(report), encoding="utf-8"
           )
