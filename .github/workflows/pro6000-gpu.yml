@@ -144,6 +144,8 @@ jobs:
 
           packed_path = Path("artifacts/packed-recurrent-benchmark.json")
           packed = json.loads(packed_path.read_text())
+          if packed["source"]["leaf_dirty"] is not False:
+              raise SystemExit("packed benchmark source checkout is dirty")
           if not packed["all_cases_correct"]:
               raise SystemExit("packed recurrent correctness gate failed")
           graph_evidence = [

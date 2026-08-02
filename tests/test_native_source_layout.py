@@ -146,6 +146,7 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     )
     metadata = _function_source("flash_rwkv/ops.py", "_cuda_metadata")
     workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
+    gitignore = (ROOT / ".gitignore").read_text().splitlines()
 
     assert ".cpu(" not in validation
     assert ".tolist(" not in validation
@@ -153,6 +154,8 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert "else state_indices" in metadata
     assert "command -v compute-sanitizer" in workflow
     assert "packed-recurrent-benchmark.json" in workflow
+    assert 'packed["source"]["leaf_dirty"] is not False' in workflow
+    assert "artifacts/**" in gitignore
 
 
 def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
