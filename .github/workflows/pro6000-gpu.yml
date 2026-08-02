@@ -34,6 +34,7 @@ jobs:
         run: |
           uv venv --python 3.12
           uv sync --no-install-project
+          uv pip install --python .venv/bin/python 'pytest==9.1.1'
           uv pip install --python .venv/bin/python --no-deps --no-build-isolation -e .
       - name: Verify controlled GPU target
         run: |
