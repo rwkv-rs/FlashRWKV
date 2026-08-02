@@ -32,7 +32,7 @@ from flash_rwkv.benchmark_contract import (
 from flash_rwkv.provenance import imported_source_family
 from flash_rwkv.registry import INFERENCE_OPERATOR_SPECS
 
-SOURCE_ROOT = Path(__file__).resolve().parents[3]
+SOURCE_ROOT = Path(__file__).resolve().parents[2]
 IDENTITIES = tuple(f"{spec.provider}/{spec.name}" for spec in INFERENCE_OPERATOR_SPECS)
 
 
