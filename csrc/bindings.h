@@ -7,6 +7,8 @@
 
 #include <optional>
 
+void register_statetune_recurrent_manifest(py::module_&);
+
 void recurrent_fp32(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                     torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                     torch::Tensor, torch::Tensor, double);

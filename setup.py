@@ -14,6 +14,7 @@ setup(
                 "csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_forward_materialized.cu",
                 "csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_forward_recompute.cu",
                 "csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_backward_replay.cu",
+                "csrc/statetune/wkv7/statetune_smxx_recurrent_fp32io16_registration.cpp",
                 "csrc/infer/wkv7/infer_smxx_chunk_bf16_forward_k1_prepare.cu",
                 "csrc/infer/wkv7/infer_smxx_chunk_bf16_forward_k2_recurrence.cu",
                 "csrc/infer/wkv7/infer_smxx_fused_fp16_forward_registration.cpp",

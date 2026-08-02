@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-import torch.nn.functional as functional
+from torch.nn import functional
 
 from flash_rwkv import _C
 from flash_rwkv.config import (
@@ -23,9 +23,8 @@ from flash_rwkv.config import (
     enumerate_chunk_configs,
 )
 
-
 HEAD_SIZE = 64
-SOURCE_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
 TOLERANCE_PATH = SOURCE_ROOT / "tests/fixtures/tolerances-v1.json"
 PROFILES: dict[str, tuple[str, tuple[int, ...]]] = {
     "fixed_medium": ("fixed", (64,)),

@@ -20,7 +20,7 @@ RWKV/Albatross integration at rwkv-rs/vllm-rwkv commit
 - csrc/bindings.cpp
 - csrc/infer/wkv7/infer_smxx_recurrent_fp32io16_forward_varlen.cu
 - csrc/infer/wkv7/infer_smxx_recurrent_fp16_forward_varlen.cu
-- benchmarks/benchmark_recurrent.py
+- benchmarks/infer/wkv7/benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py
 - benchmarks/benchmark_rwkv7.py
 - benchmarks/benchmark_training.py
 - benchmarks/kernel_benchmark.py

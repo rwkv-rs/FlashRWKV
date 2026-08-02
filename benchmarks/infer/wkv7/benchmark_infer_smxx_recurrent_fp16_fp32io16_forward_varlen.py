@@ -26,7 +26,6 @@ import torch
 
 from flash_rwkv import _C
 
-
 HEAD_SIZE = 64
 PROFILE_LENGTHS: dict[str, tuple[int, ...]] = {
     "decode_b1": (1,),
@@ -41,7 +40,7 @@ PROFILE_LENGTHS: dict[str, tuple[int, ...]] = {
     "ragged_skew_b32": (128,) + (1,) * 31,
 }
 MODES = ("fp32io16", "fp16")
-SOURCE_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
 TOLERANCE_PATH = SOURCE_ROOT / "tests/fixtures/tolerances-v1.json"
 NATIVE_SOURCE_PATHS = (
     Path("setup.py"),

@@ -153,6 +153,37 @@ def test_native_sources_are_owned_by_workload_wkv7_trees() -> None:
     )
 
 
+def test_statetune_registration_points_to_shared_recurrence_sources() -> None:
+    source = (
+        CSRC
+        / "statetune/wkv7/statetune_smxx_recurrent_fp32io16_registration.cpp"
+    )
+    contents = source.read_text()
+    assert source.relative_to(ROOT).as_posix() in _extension_sources()
+    assert (
+        "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_forward.cu"
+        in contents
+    )
+    assert (
+        "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_backward.cu"
+        in contents
+    )
+    assert "_statetune_recurrent_source_manifest" in contents
+
+
+def test_all_workloads_own_csrc_tests_and_benchmarks() -> None:
+    for workload in ("pretrain", "rl_infctx", "statetune", "infer"):
+        csrc = ROOT / "csrc" / workload / "wkv7"
+        tests = ROOT / "tests" / workload / "wkv7"
+        benchmarks = ROOT / "benchmarks" / workload / "wkv7"
+        assert any(path.is_file() for path in csrc.iterdir()), workload
+        assert any(path.name.startswith("test_") for path in tests.glob("*.py")), workload
+        assert any(
+            path.name.startswith(("benchmark_", "autotune_"))
+            for path in benchmarks.glob("*.py")
+        ), workload
+
+
 def test_registration_preserves_exact_native_operator_surface() -> None:
     registration = (CSRC / "registration.cpp").read_text()
     blocks = re.findall(r"module\.def\((.*?)\);", registration, re.DOTALL)

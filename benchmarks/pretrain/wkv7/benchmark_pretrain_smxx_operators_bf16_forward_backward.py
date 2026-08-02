@@ -28,10 +28,15 @@ from flash_rwkv import (
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
 )
-from flash_rwkv.benchmark_contract import ALBATROSS_BT_MATRIX, summarize_samples
+from flash_rwkv.benchmark_contract import (
+    ALBATROSS_BT_MATRIX,
+    format_result,
+    summarize_samples,
+)
+from flash_rwkv.provenance import imported_source_family
 from flash_rwkv.registry import TRAINING_OPERATOR_SPECS
 
-SOURCE_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
 IDENTITIES = tuple(f"{spec.provider}/{spec.name}" for spec in TRAINING_OPERATOR_SPECS)
 
 
@@ -400,6 +405,7 @@ def run(
     return {
         "schema_version": 1,
         "benchmark": "flash_rwkv_training_operators_forward_backward",
+        "source_provenance": asdict(imported_source_family("rwkv-lm-pretrain")),
         "revision": _git_revision(),
         "source_digest": _source_digest(),
         "hardware": {
@@ -460,6 +466,11 @@ def main() -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     temporary.replace(arguments.output)
+    for row in payload["rows"]:
+        print(
+            f"{format_result(row)} provider={row['provider']} "
+            f"name={row['name']} source_revision={row['source_revision']}"
+        )
     print(
         json.dumps(
             {"output": str(arguments.output), "rows": len(payload["rows"])},

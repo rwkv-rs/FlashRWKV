@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(
 HEAD_SIZE = 64
 TOLERANCE = json.loads(
     (
-        Path(__file__).parent / "fixtures/tolerances-v1.json"
+        Path(__file__).parents[2] / "fixtures/tolerances-v1.json"
     ).read_text(encoding="utf-8")
 )["fp32io16_pretrain_recurrent"]
 

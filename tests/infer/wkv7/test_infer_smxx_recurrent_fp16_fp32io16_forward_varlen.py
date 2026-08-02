@@ -19,7 +19,7 @@ from flash_rwkv import (
 
 HEAD_SIZE = 64
 TOLERANCES = json.loads(
-    (Path(__file__).parent / "fixtures/tolerances-v1.json").read_text(
+    (Path(__file__).parents[2] / "fixtures/tolerances-v1.json").read_text(
         encoding="utf-8"
     )
 )

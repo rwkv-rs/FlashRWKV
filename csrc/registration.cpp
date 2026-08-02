@@ -4,6 +4,7 @@
 #include "bindings.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  register_statetune_recurrent_manifest(module);
   module.def("recurrent_fp32", &recurrent_fp32,
              "FlashRWKV recurrent forward with FP32 canonical state",
              py::arg("query_start_loc"), py::arg("state_indices"),

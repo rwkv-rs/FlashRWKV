@@ -56,10 +56,12 @@ jobs:
           tests/racecheck/run.sh | tee artifacts/racecheck.log
       - name: Run fused operator benchmark
         run: |
-          .venv/bin/python benchmarks/operator_benchmark.py \
+          .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_smxx_fused_fp16_forward.py \
             --output artifacts/operator-benchmark.json
-          .venv/bin/python benchmarks/training_operator_benchmark.py \
+          .venv/bin/python benchmarks/pretrain/wkv7/benchmark_pretrain_smxx_operators_bf16_forward_backward.py \
             --output artifacts/training-operator-benchmark.json
+          .venv/bin/python benchmarks/statetune/wkv7/benchmark_statetune_smxx_recurrent_fp32io16_backward.py \
+            --output artifacts/statetune-benchmark.json
       - name: Record immutable run identity
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -71,6 +73,41 @@ jobs:
           import json
           import os
           from pathlib import Path
+
+          def metric(value):
+              return str(round(float(value), 6))
+
+          report = [
+              "### Correctness-gated benchmark results",
+              "",
+          ]
+          benchmark_paths = (
+              Path("artifacts/operator-benchmark.json"),
+              Path("artifacts/training-operator-benchmark.json"),
+              Path("artifacts/statetune-benchmark.json"),
+          )
+          for path in benchmark_paths:
+              payload = json.loads(path.read_text())
+              report.extend((f"#### `{path.name}`", "", "```text"))
+              for row in payload["rows"]:
+                  result = (
+                      f"RESULT B={row['B']} T={row['T']} iters={row['iters']} "
+                      f"p10_ms={metric(row['p10_ms'])} "
+                      f"p50_ms={metric(row['p50_ms'])} "
+                      f"p90_ms={metric(row['p90_ms'])} "
+                      f"tok_s_p50={metric(row['tok_s_p50'])} "
+                      f"label={row['label']}"
+                  )
+                  identity = " ".join(
+                      f"{field}={row[field]}"
+                      for field in ("provider", "name", "source_revision")
+                      if field in row
+                  )
+                  report.append(f"{result} {identity}".rstrip())
+              report.extend(("```", ""))
+          Path("artifacts/benchmark-report.md").write_text(
+              "\n".join(report), encoding="utf-8"
+          )
 
           files = sorted(Path("artifacts").glob("*"))
           inventory = []
@@ -102,7 +139,10 @@ jobs:
           ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}
         with:
           script: |
+            const fs = require('fs');
             const marker = '<!-- flash-rwkv-pro6000-report -->';
+            const benchmarkReport = fs.readFileSync(
+              'artifacts/benchmark-report.md', 'utf8').trim();
             const body = [
               marker,
               '### FlashRWKV PRO 6000 GPU report',
@@ -111,6 +151,8 @@ jobs:
               `- Test/racecheck/benchmark run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               `- Artifact SHA-256: \`${process.env.ARTIFACT_DIGEST}\``,
               '- Runner contract: `rwkv-sha-pro6000x8`, single NVIDIA RTX PRO 6000 Blackwell Workstation Edition',
+              '',
+              benchmarkReport,
             ].join('\n');
             const {data: comments} = await github.rest.issues.listComments({
               ...context.repo,
