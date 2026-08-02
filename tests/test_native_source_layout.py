@@ -178,6 +178,16 @@ def test_cuda_extension_sources_have_unique_ninja_object_stems() -> None:
     assert collisions == {}
 
 
+def test_inference_operator_benchmark_binds_repository_source_root() -> None:
+    from benchmarks.infer.benchmark_infer_fp16_forward import (
+        SOURCE_ROOT,
+        _source_digest,
+    )
+
+    assert SOURCE_ROOT == ROOT
+    assert len(_source_digest()) == 64
+
+
 def test_gpu_workflow_owns_its_exact_fla_reference_environment() -> None:
     workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
     fla_revision = "fcd4502ab957513a3d97dbd8aa64851e5e4dba11"
