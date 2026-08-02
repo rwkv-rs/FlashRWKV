@@ -101,6 +101,12 @@ def test_binding_responsibilities_have_distinct_translation_units() -> None:
     validation = (CSRC / "validation.cpp").read_text()
     registration = (CSRC / "registration.cpp").read_text()
     assert "PYBIND11_MODULE" not in bindings
+    assert "module.def" not in bindings
+    assert "torch::Tensor" not in bindings
+    assert "register_infer_recurrent_bindings(module)" in bindings
+    assert "register_pretrain_recurrent_bindings(module)" in bindings
+    assert "register_rl_infctx_experimental_bindings(module)" in bindings
+    assert "register_infer_experimental_bindings(module)" in bindings
     assert "RecurrentDimensions check_recurrent_layout(" not in bindings
     assert "PYBIND11_MODULE" in registration
     assert "check_recurrent_layout(" in validation
@@ -151,6 +157,11 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
         "benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py",
         "_revision_metadata",
     )
+    benchmark_case = _function_source(
+        "benchmarks/infer/wkv7/"
+        "benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py",
+        "_run_case",
+    )
     workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
     gitignore = (ROOT / ".gitignore").read_text().splitlines()
 
@@ -163,6 +174,19 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert ".item(" not in native_validation
     assert "validate_recurrent_metadata_kernel" in native_validation
     assert "kDuplicateStateSlot" in native_validation
+    assert "atomicCAS(&slot_claims[state_slot], 0, 1)" in native_validation
+    assert "for (int other" not in native_validation
+    assert '"metadata_validation_complexity": "O(sequence_count + state_pool_size)"' in (
+        benchmark_case
+    )
+    assert '"metadata_validation_strategy": "device_slot_claim_bitmap"' in benchmark_case
+    assert '"metadata_host_round_trip": False' in benchmark_case
+    assert '"kernel_launches_per_operator": 2' in benchmark_case
+    assert '"decode_b2048": (1,) * 2048' in (
+        ROOT
+        / "benchmarks/infer/wkv7/"
+        "benchmark_infer_smxx_recurrent_fp16_fp32io16_forward_varlen.py"
+    ).read_text()
     assert "command -v compute-sanitizer" in workflow
     assert "packed-recurrent-benchmark.json" in workflow
     assert "Verify clean tracked source checkout" in workflow
@@ -269,8 +293,17 @@ def test_all_workloads_own_csrc_tests_and_benchmarks() -> None:
 
 
 def test_registration_preserves_exact_native_operator_surface() -> None:
-    registration = (CSRC / "registration.cpp").read_text()
-    blocks = re.findall(r"module\.def\((.*?)\);", registration, re.DOTALL)
+    binding_sources = {
+        "csrc/infer/wkv7/infer_smxx_recurrent_varlen_bindings.cpp",
+        "csrc/infer/wkv7/infer_smxx_chunk_bf16_bindings.cpp",
+        "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_bindings.cpp",
+        "csrc/rl_infctx/wkv7/rl_infctx_smxx_chunk_fp32io16_bindings.cpp",
+    }
+    assert binding_sources <= _extension_sources()
+    blocks = []
+    for relative_path in sorted(binding_sources):
+        source = (ROOT / relative_path).read_text()
+        blocks.extend(re.findall(r"module\.def\((.*?)\);", source, re.DOTALL))
     registered = {}
     for block in blocks:
         name = re.search(r'^\s*"([^"]+)"', block)

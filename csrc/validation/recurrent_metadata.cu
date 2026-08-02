@@ -23,6 +23,7 @@ __global__ void validate_recurrent_metadata_kernel(
     int num_sequences,
     int total_tokens,
     int state_pool_size,
+    int* __restrict__ slot_claims,
     int* __restrict__ status) {
   const int sequence_index =
       static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -47,13 +48,8 @@ __global__ void validate_recurrent_metadata_kernel(
   const int state_slot = state_indices[sequence_index];
   if (state_slot < 0 || state_slot >= state_pool_size) {
     error |= kInvalidStateSlot;
-  } else {
-    for (int other = sequence_index + 1; other < num_sequences; ++other) {
-      if (state_indices[other] == state_slot) {
-        error |= kDuplicateStateSlot;
-        break;
-      }
-    }
+  } else if (atomicCAS(&slot_claims[state_slot], 0, 1) != 0) {
+    error |= kDuplicateStateSlot;
   }
 
   if (error != 0) {
@@ -69,7 +65,9 @@ torch::Tensor validate_recurrent_metadata_cuda(
     int64_t total_tokens,
     int64_t state_pool_size) {
   const c10::cuda::CUDAGuard device_guard(query_start_loc.device());
-  auto status = torch::zeros({1}, query_start_loc.options());
+  auto workspace = torch::zeros(
+      {state_pool_size + 1}, query_start_loc.options());
+  auto status = workspace.narrow(0, state_pool_size, 1);
   const int num_sequences = static_cast<int>(state_indices.numel());
   constexpr int threads = 256;
   const int blocks = (num_sequences + threads - 1) / threads;
@@ -83,6 +81,7 @@ torch::Tensor validate_recurrent_metadata_cuda(
       num_sequences,
       static_cast<int>(total_tokens),
       static_cast<int>(state_pool_size),
+      workspace.data_ptr<int>(),
       status.data_ptr<int>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return status;

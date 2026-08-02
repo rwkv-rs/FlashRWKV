@@ -323,6 +323,43 @@ def test_raw_recurrent_native_op_fails_closed_for_hostile_metadata(
     assert torch.isnan(output).all()
 
 
+@pytest.mark.parametrize("mode", ["fp32io16", "fp16"])
+@pytest.mark.parametrize(
+    ("case", "offsets", "slots"),
+    HOSTILE_METADATA_CASES,
+    ids=tuple(case[0] for case in HOSTILE_METADATA_CASES),
+)
+def test_public_stateful_recurrent_fails_closed_for_hostile_metadata(
+    mode: str,
+    case: str,
+    offsets: tuple[int, ...],
+    slots: tuple[int, ...],
+) -> None:
+    del case
+    inputs = _inputs(batch_size=1, sequence_length=3, seed=37)
+    state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
+    state_pool = torch.randn(
+        5,
+        1,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=state_dtype,
+    )
+    state_before = state_pool.clone()
+    output = rwkv7_recurrent_stateful(
+        *inputs,
+        state_pool=state_pool,
+        cu_seqlens=torch.tensor(offsets, device="cuda", dtype=torch.int32),
+        state_indices=torch.tensor(slots, device="cuda", dtype=torch.int32),
+        mode=mode,
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(state_pool, state_before)
+    assert torch.isnan(output).all()
+
+
 def test_stateful_recurrent_passes_device_metadata_by_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

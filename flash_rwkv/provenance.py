@@ -25,6 +25,7 @@ IMPORTED_SOURCE_FAMILIES: tuple[ImportedSourceFamily, ...] = (
         revision="1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b",
         license="MIT",
         paths=(
+            "csrc/infer/wkv7/infer_smxx_chunk_bf16_bindings.cpp",
             "csrc/infer/wkv7/infer_smxx_chunk_bf16_forward_k1_prepare.cu",
             "csrc/infer/wkv7/infer_smxx_chunk_bf16_forward_k2_recurrence.cu",
         ),
@@ -35,7 +36,7 @@ IMPORTED_SOURCE_FAMILIES: tuple[ImportedSourceFamily, ...] = (
         revision="6d683f9e49a2997e405c47edc147872c8609513b",
         license="Apache-2.0",
         paths=(
-            "csrc/bindings.cpp",
+            "csrc/infer/wkv7/infer_smxx_recurrent_varlen_bindings.cpp",
             "csrc/infer/wkv7/infer_smxx_recurrent_fp16_forward_varlen.cu",
             "csrc/infer/wkv7/infer_smxx_recurrent_fp32io16_forward_varlen.cu",
         ),
@@ -56,6 +57,7 @@ IMPORTED_SOURCE_FAMILIES: tuple[ImportedSourceFamily, ...] = (
         revision="952102498e9ed367ea0a59ee64106916d474d30f",
         license="Apache-2.0",
         paths=(
+            "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_bindings.cpp",
             "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_forward.cu",
             "csrc/pretrain/wkv7/pretrain_smxx_recurrent_fp32io16_backward.cu",
             "csrc/pretrain/wkv7/pretrain_smxx_head_l2wrap_ce_bf16_forward_registration.cpp",

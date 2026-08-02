@@ -5,41 +5,9 @@
 
 #include <torch/extension.h>
 
-#include <optional>
-
+void register_flash_rwkv_bindings(py::module_&);
 void register_statetune_recurrent_manifest(py::module_&);
-
-void recurrent_fp32(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    torch::Tensor, torch::Tensor, double);
-void recurrent_fp16(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    torch::Tensor, torch::Tensor, double);
-void pretrain_recurrent_fp32io16_forward(
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor, double);
-void materialized_chunk_fp32(
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    int64_t, int64_t, int64_t, double, std::optional<torch::Tensor>);
-void pretrain_recurrent_fp32io16_backward(
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>,
-    torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>,
-    std::optional<torch::Tensor>, std::optional<torch::Tensor>,
-    std::optional<torch::Tensor>, std::optional<torch::Tensor>,
-    std::optional<torch::Tensor>, double);
-void infer_chunk_bf16_forward_k1_prepare(
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, double);
-void infer_chunk_bf16_forward_k2_recurrence(
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);
-void recompute_chunk_fp32(
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor, double);
+void register_infer_recurrent_bindings(py::module_&);
+void register_pretrain_recurrent_bindings(py::module_&);
+void register_rl_infctx_experimental_bindings(py::module_&);
+void register_infer_experimental_bindings(py::module_&);

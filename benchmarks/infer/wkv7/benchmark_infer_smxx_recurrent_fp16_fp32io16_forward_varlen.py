@@ -34,6 +34,7 @@ PROFILE_LENGTHS: dict[str, tuple[int, ...]] = {
     "decode_b64": (1,) * 64,
     "decode_b128": (1,) * 128,
     "decode_b320": (1,) * 320,
+    "decode_b2048": (1,) * 2048,
     "equal_chunk16_b320": (16,) * 320,
     "ragged_chunk16_b320": tuple(range(1, 17)) * 20,
     "ragged_long_b32": (1, 4, 8, 16, 32, 64, 96, 128) * 4,
@@ -47,6 +48,8 @@ NATIVE_SOURCE_PATHS = (
     Path("pyproject.toml"),
     Path("setup.py"),
     Path("csrc/bindings.cpp"),
+    Path("csrc/validation/recurrent_metadata.cu"),
+    Path("csrc/infer/wkv7/infer_smxx_recurrent_varlen_bindings.cpp"),
     Path("csrc/infer/wkv7/infer_smxx_recurrent_fp32io16_forward_varlen.cu"),
     Path("csrc/infer/wkv7/infer_smxx_recurrent_fp16_forward_varlen.cu"),
     Path("flash_rwkv/__init__.py"),
@@ -702,7 +705,14 @@ def _run_case(
         "padding_ratio": 1.0
         - sum(seq_lens) / (len(seq_lens) * max(seq_lens)),
         "state_slot_mapping": "reverse sequence order with seven untouched rows",
-        "kernel_launches_per_operator": 1,
+        "state_pool_size": int(payload.initial_state.shape[0]),
+        "metadata_validation_complexity": "O(sequence_count + state_pool_size)",
+        "metadata_validation_strategy": "device_slot_claim_bitmap",
+        "metadata_validation_workspace_bytes": int(
+            (payload.initial_state.shape[0] + 1) * torch.int32.itemsize
+        ),
+        "metadata_host_round_trip": False,
+        "kernel_launches_per_operator": 2,
         "seed": seed,
         "correctness": correctness,
         "device_metadata": {
@@ -768,8 +778,9 @@ def run(config: BenchmarkConfig) -> dict[str, object]:
         },
         "operator_boundary": (
             "public rwkv7_recurrent_stateful packed serving API; includes "
-            "structural validation, output allocation, Python dispatch, native "
-            "launch, and device metadata pass-through; excludes input "
+            "structural validation, device-side value and uniqueness validation, "
+            "output allocation, Python dispatch, native launch, and device "
+            "metadata pass-through; excludes input "
             "generation, strict debug metadata validation, compilation, "
             "autotune, state reset, logging, and serialization"
         ),

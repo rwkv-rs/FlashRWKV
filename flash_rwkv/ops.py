@@ -552,10 +552,12 @@ def rwkv7_recurrent_stateful(
     """Run packed recurrent inference and update selected state rows in place.
 
     ``cu_seqlens`` and ``state_indices`` must be contiguous CUDA int32 tensors.
-    The serving path validates their structure and passes the same tensor
-    objects to the native operator without synchronizing values to the host.
-    Use ``validate_packed_metadata_strict`` explicitly outside the hot path for
-    synchronous monotonicity, uniqueness, and bounds checks.
+    The serving path validates their Python-visible structure and passes the same
+    tensor objects to the native operator without synchronizing values to the
+    host. The native boundary checks endpoints, monotonic ranges, slot bounds,
+    and slot uniqueness on the current CUDA stream before consuming metadata.
+    Use ``validate_packed_metadata_strict`` only for synchronous debug errors
+    outside the hot path.
     """
 
     output, _ = _rwkv7_recurrent_cuda(
