@@ -36,9 +36,9 @@ IMPORTED_SOURCE_FAMILIES: tuple[ImportedSourceFamily, ...] = (
         revision="6d683f9e49a2997e405c47edc147872c8609513b",
         license="Apache-2.0",
         paths=(
-            "csrc/infer/recurrent/infer_common_recurrent_varlen_bindings.cpp",
-            "csrc/infer/recurrent/infer_sm80_recurrent_fp16_forward_varlen.cu",
-            "csrc/infer/recurrent/infer_common_recurrent_fp32io16_forward_varlen.cu",
+            "csrc/infer/wkv7/infer_common_recurrent_varlen_bindings.cpp",
+            "csrc/infer/wkv7/infer_sm80_recurrent_fp16_forward_varlen.cu",
+            "csrc/infer/wkv7/infer_common_recurrent_fp32io16_forward_varlen.cu",
         ),
     ),
     ImportedSourceFamily(
@@ -47,8 +47,12 @@ IMPORTED_SOURCE_FAMILIES: tuple[ImportedSourceFamily, ...] = (
         revision="ee3308f6922e59f2166c7fac3c5a192340a2b48e",
         license="Apache-2.0",
         paths=(
-            "csrc/infer/fused/infer_common_fused_fp16_forward_registration.cpp",
-            "csrc/infer/fused/infer_common_fused_fp16_forward.cu",
+            "csrc/infer/tmix/infer_common_tmix_fp16_forward_registration.cpp",
+            "csrc/infer/tmix/infer_common_tmix_fp16_forward.cu",
+            "csrc/infer/cmix/infer_common_cmix_fp16_forward_registration.cpp",
+            "csrc/infer/cmix/infer_common_cmix_fp16_forward.cu",
+            "csrc/infer/elementwise/infer_common_elementwise_fp16_forward_registration.cpp",
+            "csrc/infer/elementwise/infer_common_elementwise_fp16_forward.cu",
         ),
     ),
     ImportedSourceFamily(

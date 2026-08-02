@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 
-"""Correctness-gated benchmark for imported fused inference block operators."""
+"""Correctness-gated benchmark for imported TMix and ChannelMix inference blocks."""
 
 from __future__ import annotations
 
@@ -242,9 +242,10 @@ def _source_digest() -> str:
     digest = hashlib.sha256()
     for path in sorted(
         (
-            SOURCE_ROOT
-            / "csrc/infer/fused/infer_common_fused_fp16_forward_registration.cpp",
-            SOURCE_ROOT / "csrc/infer/fused/infer_common_fused_fp16_forward.cu",
+            SOURCE_ROOT / "csrc/infer/tmix/infer_common_tmix_fp16_forward_registration.cpp",
+            SOURCE_ROOT / "csrc/infer/tmix/infer_common_tmix_fp16_forward.cu",
+            SOURCE_ROOT / "csrc/infer/cmix/infer_common_cmix_fp16_forward_registration.cpp",
+            SOURCE_ROOT / "csrc/infer/cmix/infer_common_cmix_fp16_forward.cu",
             SOURCE_ROOT / "flash_rwkv/inference_blocks.py",
             Path(__file__),
         )
@@ -303,7 +304,7 @@ def run(
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     return {
         "schema_version": 1,
-        "benchmark": "flash_rwkv_fused_inference_blocks",
+        "benchmark": "flash_rwkv_inference_blocks",
         "source_provenance": asdict(
             imported_source_family("albatross-fused-infer")
         ),

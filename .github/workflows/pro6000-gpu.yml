@@ -256,7 +256,7 @@ jobs:
           tests/racecheck/run.sh | tee artifacts/racecheck.log
       - name: Run correctness-gated benchmarks
         run: |
-          .venv/bin/python benchmarks/infer/fused/benchmark_infer_fused_fp16_forward.py \
+          .venv/bin/python benchmarks/infer/benchmark_infer_fp16_forward.py \
             --output artifacts/operator-benchmark.json
           .venv/bin/python benchmarks/pretrain/wkv7/benchmark_pretrain_operators_bf16_forward_backward.py \
             --output artifacts/training-operator-benchmark.json
@@ -264,7 +264,7 @@ jobs:
             --output artifacts/statetune-benchmark.json
           .venv/bin/python benchmarks/rl_infctx/wkv7/benchmark_rl_infctx_chunk_fp32io16_forward.py \
             --output artifacts/rl-infctx-benchmark.json
-          .venv/bin/python benchmarks/infer/recurrent/benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py \
+          .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py \
             --profiles decode_b320 equal_chunk16_b320 ragged_chunk16_b320 \
             decode_b2048 \
             --modes fp32io16 fp16 \
