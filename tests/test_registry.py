@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
 
+from flash_rwkv import rl_infctx_chunk_fp32io16_factor_recompute
 from flash_rwkv.registry import (
     KERNEL_SPECS,
     REFERENCE_ORACLES,
@@ -83,6 +85,32 @@ def test_reference_and_stateful_helpers_are_not_kernel_identities() -> None:
     names = {spec.name for spec in KERNEL_SPECS}
     assert set(REFERENCE_ORACLES).isdisjoint(names)
     assert set(WRAPPER_KERNELS).isdisjoint(names)
+
+
+def test_factor_recompute_kernel_has_a_safe_public_wrapper() -> None:
+    spec = get_kernel_spec(
+        "rl_infctx_chunk_fp32io16_factor_recompute",
+        provider="flash_rwkv",
+    )
+    assert spec.maturity == "experimental"
+    assert tuple(
+        inspect.signature(
+            rl_infctx_chunk_fp32io16_factor_recompute
+        ).parameters
+    ) == (
+        "r",
+        "log_decay",
+        "k",
+        "v",
+        "a",
+        "b",
+        "scale",
+        "initial_state",
+        "output_final_state",
+        "cu_seqlens",
+        "state_indices",
+        "chunk_size",
+    )
 
 
 def test_workload_benchmark_identities_resolve_through_canonical_registry() -> None:
