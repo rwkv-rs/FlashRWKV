@@ -202,6 +202,14 @@ def test_gpu_workflow_owns_its_exact_fla_reference_environment() -> None:
 def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
     workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
     quick_workflow = (ROOT / ".github/workflows/quick-contract.yml").read_text()
+    prebuild_step = workflow[
+        workflow.index("- name: Verify clean tracked source checkout") :
+        workflow.index("- uses: astral-sh/setup-uv@v6")
+    ]
+    report_step = workflow[
+        workflow.index("- name: Record immutable run identity") :
+        workflow.index("- name: Upload revision-bound evidence")
+    ]
 
     assert "pr_number:" in workflow
     assert "source_revision:" in workflow
@@ -221,7 +229,8 @@ def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
     assert "B=2048 packed validator evidence is incomplete" in workflow
     assert "invalid StateTune RESULT identity" in workflow
     assert "unregistered workload RESULT identity" in workflow
-    assert "from flash_rwkv.registry import get_kernel_spec" in workflow
+    assert "from flash_rwkv.registry import get_kernel_spec" not in prebuild_step
+    assert "from flash_rwkv.registry import get_kernel_spec" in report_step
     assert (
         "tests/infer/wkv7/"
         "test_infer_recurrent_fp16_fp32io16_forward_varlen.py"
