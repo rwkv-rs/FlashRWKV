@@ -450,3 +450,65 @@ def pretrain_head_l2wrap_ce_bf16_forward(
         chunk_rows,
     )
     return result[0], result[1], result[2]
+
+
+def pretrain_tmix_mix6_bf16_forward(
+    x: torch.Tensor,
+    x_r: torch.Tensor,
+    x_w: torch.Tensor,
+    x_k: torch.Tensor,
+    x_v: torch.Tensor,
+    x_a: torch.Tensor,
+    x_g: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Call the RWKV-LM fused six-way TimeMix forward operator."""
+
+    _load_extension()
+    return tuple(
+        torch.ops.rwkv7_tmix_mix6_bf16_v5.forward(
+            x,
+            x_r,
+            x_w,
+            x_k,
+            x_v,
+            x_a,
+            x_g,
+        )
+    )
+
+
+def pretrain_tmix_mix6_bf16_backward(
+    grad_r: torch.Tensor,
+    grad_w: torch.Tensor,
+    grad_k: torch.Tensor,
+    grad_v: torch.Tensor,
+    grad_a: torch.Tensor,
+    grad_g: torch.Tensor,
+    x: torch.Tensor,
+    x_r: torch.Tensor,
+    x_w: torch.Tensor,
+    x_k: torch.Tensor,
+    x_v: torch.Tensor,
+    x_a: torch.Tensor,
+    x_g: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Call the paired RWKV-LM fused six-way TimeMix backward operator."""
+
+    _load_extension()
+    return tuple(
+        torch.ops.rwkv7_tmix_mix6_bf16_v5.backward(
+            grad_r,
+            grad_w,
+            grad_k,
+            grad_v,
+            grad_a,
+            grad_g,
+            x,
+            x_r,
+            x_w,
+            x_k,
+            x_v,
+            x_a,
+            x_g,
+        )
+    )

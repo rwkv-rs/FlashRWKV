@@ -36,6 +36,22 @@ def pretrain_tmix_vres_gate_bf16(
     return _PretrainTmixVresGateBf16Function.apply(value, first_value, v0, v12)
 
 
+def pretrain_tmix_mix6_bf16(
+    x: torch.Tensor,
+    x_r: torch.Tensor,
+    x_w: torch.Tensor,
+    x_k: torch.Tensor,
+    x_v: torch.Tensor,
+    x_a: torch.Tensor,
+    x_g: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Produce the six shifted RWKV-7 TimeMix inputs in one CUDA operator."""
+
+    mixes = (x_r, x_w, x_k, x_v, x_a, x_g)
+    _validate_mix6_inputs(x, mixes)
+    return _PretrainTmixMix6Bf16Function.apply(x, *mixes)
+
+
 def _validate_a_gate_inputs(a0: torch.Tensor, a12: torch.Tensor) -> None:
     for name, tensor in {"a0": a0, "a12": a12}.items():
         if not isinstance(tensor, torch.Tensor):
@@ -89,6 +105,37 @@ def _validate_vres_gate_inputs(
         raise ValueError("all TimeMix value-residual tensors must share a device")
     if not value.is_cuda:
         raise ValueError("pretrain_tmix_vres_gate_bf16 requires CUDA tensors")
+
+
+def _validate_mix6_inputs(
+    x: torch.Tensor,
+    mixes: tuple[torch.Tensor, ...],
+) -> None:
+    if not isinstance(x, torch.Tensor):
+        raise TypeError("x must be a torch.Tensor")
+    if x.dtype != torch.bfloat16:
+        raise TypeError("x must have dtype torch.bfloat16")
+    if not x.is_contiguous():
+        raise ValueError("x must be contiguous")
+    if x.ndim != 3 or any(dimension <= 0 for dimension in x.shape):
+        raise ValueError("x must have non-empty shape [B, T, C]")
+    if x.shape[2] % 2:
+        raise ValueError("pretrain_tmix_mix6_bf16 requires an even channel count")
+    for name, mix in zip(
+        ("x_r", "x_w", "x_k", "x_v", "x_a", "x_g"), mixes, strict=True
+    ):
+        if not isinstance(mix, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor")
+        if mix.dtype != torch.bfloat16:
+            raise TypeError(f"{name} must have dtype torch.bfloat16")
+        if not mix.is_contiguous():
+            raise ValueError(f"{name} must be contiguous")
+        if mix.shape != (x.shape[2],):
+            raise ValueError(f"{name} must have shape [{x.shape[2]}]")
+        if mix.device != x.device:
+            raise ValueError(f"{name} must be on the same device as x")
+    if not x.is_cuda:
+        raise ValueError("pretrain_tmix_mix6_bf16 requires CUDA tensors")
 
 
 class _PretrainTmixAGateBf16Function(torch.autograd.Function):
@@ -155,6 +202,38 @@ class _PretrainTmixVresGateBf16Function(torch.autograd.Function):
             first_value,
             v0,
             v12,
+        )
+        return tuple(
+            gradient if needed else None
+            for gradient, needed in zip(gradients, ctx.needs_input_grad, strict=True)
+        )
+
+
+class _PretrainTmixMix6Bf16Function(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+        x_r: torch.Tensor,
+        x_w: torch.Tensor,
+        x_k: torch.Tensor,
+        x_v: torch.Tensor,
+        x_a: torch.Tensor,
+        x_g: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        inputs = (x, x_r, x_w, x_k, x_v, x_a, x_g)
+        outputs = _extension.pretrain_tmix_mix6_bf16_forward(*inputs)
+        ctx.save_for_backward(*inputs)
+        return outputs
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        *grad_outputs: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, ...]:
+        gradients = _extension.pretrain_tmix_mix6_bf16_backward(
+            *(gradient.contiguous() for gradient in grad_outputs),
+            *ctx.saved_tensors,
         )
         return tuple(
             gradient if needed else None
