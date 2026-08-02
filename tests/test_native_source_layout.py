@@ -108,6 +108,27 @@ def test_cuda_extension_sources_have_unique_ninja_object_stems() -> None:
     assert collisions == {}
 
 
+def test_gpu_workflow_owns_its_exact_fla_reference_environment() -> None:
+    workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
+    fla_revision = "fcd4502ab957513a3d97dbd8aa64851e5e4dba11"
+    fla_requirement = (
+        "flash-linear-attention @ git+https://github.com/"
+        f"rwkv-rs/fla-rwkv.git@{fla_revision}"
+    )
+
+    assert "--no-deps --no-build-isolation -e ." in workflow
+    requirement_position = workflow.index(fla_requirement)
+    assert "--no-deps" in workflow[requirement_position - 100:requirement_position]
+    assert workflow.index("--no-deps --no-build-isolation -e .") < workflow.index(
+        fla_requirement
+    )
+    assert f'revision = "{fla_revision}"' in workflow
+    assert 'distribution("flash-linear-attention")' in workflow
+    assert 'direct_url["url"] != "https://github.com/rwkv-rs/fla-rwkv.git"' in workflow
+    assert 'for name in ("fla", "fla.ops.rwkv7")' in workflow
+    assert "module_path.is_relative_to(package_root)" in workflow
+
+
 def test_channel_mix_sources_are_built_from_the_pretrain_family() -> None:
     sources = _extension_sources()
     expected = {

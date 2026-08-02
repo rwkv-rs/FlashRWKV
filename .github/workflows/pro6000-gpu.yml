@@ -34,8 +34,34 @@ jobs:
         run: |
           uv venv --python 3.12
           uv sync --no-install-project
-          uv pip install --python .venv/bin/python 'pytest==9.1.1'
+          uv pip install --python .venv/bin/python \
+            'pytest==9.1.1' 'einops' 'transformers>=4.45.0'
           uv pip install --python .venv/bin/python --no-deps --no-build-isolation -e .
+          uv pip install --python .venv/bin/python --no-deps \
+            'flash-linear-attention @ git+https://github.com/rwkv-rs/fla-rwkv.git@fcd4502ab957513a3d97dbd8aa64851e5e4dba11'
+          .venv/bin/python - <<'PY'
+          import importlib
+          import importlib.metadata
+          import json
+          from pathlib import Path
+
+          revision = "fcd4502ab957513a3d97dbd8aa64851e5e4dba11"
+          distribution = importlib.metadata.distribution("flash-linear-attention")
+          direct_url = json.loads(distribution.read_text("direct_url.json"))
+          if direct_url["url"] != "https://github.com/rwkv-rs/fla-rwkv.git":
+              raise SystemExit(f"unexpected FLA repository: {direct_url['url']}")
+          vcs_info = direct_url["vcs_info"]
+          if vcs_info.get("commit_id") != revision:
+              raise SystemExit(f"unexpected FLA commit: {vcs_info.get('commit_id')}")
+          package_root = Path(distribution.locate_file("fla")).resolve()
+          for name in ("fla", "fla.ops.rwkv7"):
+              module_path = Path(importlib.import_module(name).__file__).resolve()
+              if not module_path.is_relative_to(package_root):
+                  raise SystemExit(
+                      f"{name} resolved outside pinned distribution: {module_path}"
+                  )
+              print(f"{name}={module_path}")
+          PY
       - name: Verify controlled GPU target
         run: |
           .venv/bin/python - <<'PY'
