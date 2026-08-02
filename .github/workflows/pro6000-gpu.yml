@@ -58,6 +58,8 @@ jobs:
         run: |
           .venv/bin/python benchmarks/operator_benchmark.py \
             --output artifacts/operator-benchmark.json
+          .venv/bin/python benchmarks/training_operator_benchmark.py \
+            --output artifacts/training-operator-benchmark.json
       - name: Record immutable run identity
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
