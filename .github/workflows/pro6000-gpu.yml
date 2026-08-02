@@ -486,6 +486,16 @@ jobs:
               core.setFailed('trusted-source job identity is unavailable');
               return;
             }
+            const {data: pull} = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: prNumber,
+            });
+            if (pull.head.sha !== process.env.HEAD_SHA) {
+              core.setFailed(
+                `pull request head changed to ${pull.head.sha}; ` +
+                `refusing to write evidence for ${process.env.HEAD_SHA}`);
+              return;
+            }
             const body = [
               marker,
               '### FlashRWKV PRO 6000 GPU report',
@@ -519,10 +529,6 @@ jobs:
                 body,
               });
             }
-            const {data: pull} = await github.rest.pulls.get({
-              ...context.repo,
-              pull_number: prNumber,
-            });
             const currentBody = pull.body || '';
             const markerIndex = currentBody.indexOf(marker);
             const prefix = (

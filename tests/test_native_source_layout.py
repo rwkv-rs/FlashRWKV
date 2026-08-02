@@ -154,6 +154,8 @@ def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
     assert "source_revision:" in workflow
     assert "context.sha !== sourceRevision" in workflow
     assert "pull.head.sha !== sourceRevision" in workflow
+    assert "pull.head.sha !== process.env.HEAD_SHA" in workflow
+    assert "refusing to write evidence" in workflow
     assert "ref: ${{ steps.target.outputs.head_sha }}" in workflow
     assert "name: flash-rwkv-pro6000-${{ steps.target.outputs.head_sha }}" in workflow
     assert "runtime_semantic_revision" in workflow
