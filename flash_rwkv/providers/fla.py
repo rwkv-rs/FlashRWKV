@@ -7,12 +7,12 @@ from __future__ import annotations
 import importlib
 import inspect
 from collections.abc import Callable, Sequence
-from functools import lru_cache
+from functools import cache
 
 import torch
 
 
-@lru_cache(maxsize=None)
+@cache
 def _raw_decay_operator(
     name: str,
     *,
