@@ -535,12 +535,16 @@ def test_infer_modules_own_distinct_sources_and_tests() -> None:
     kernel_public_forward = _function_source(
         "benchmarks/kernel_benchmark.py", "_call_public_forward"
     )
+    kernel_inputs = _function_source(
+        "benchmarks/kernel_benchmark.py", "_make_inputs"
+    )
     assert "recurrent_fp32_from_decay_logits" in kernel_benchmark
     assert "recurrent_fp16_from_decay_logits" in kernel_benchmark
     assert "elapsed_t=inputs.elapsed_t if fp16_state else None" in kernel_benchmark
     assert '"elapsed_t_dither": fp16_state' in kernel_benchmark
     assert kernel_public_forward.count("cu_seqlens=inputs.cu_seqlens_cuda") == 3
     assert kernel_public_forward.count("cu_seqlens=inputs.cu_seqlens_cpu") == 1
+    assert 'offsets.to(device="cuda", dtype=torch.int32)' in kernel_inputs
     fused_benchmark = (
         wkv7_benchmarks / "benchmark_fused_decay_recurrent.py"
     ).read_text()
