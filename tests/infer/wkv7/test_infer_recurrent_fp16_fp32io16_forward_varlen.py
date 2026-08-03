@@ -964,8 +964,8 @@ def _dithered_log_decay(
         )
     bits = (2654435769 * phase).bitwise_and(0xFFFFFFFF)
     signed_bits = torch.where(bits >= 0x80000000, bits - 0x100000000, bits)
-    dither = (2.0 ** -41) * signed_bits.float()
-    return torch.log(retention + dither)
+    dither = (2.0**-41) * signed_bits.float()
+    return torch.log(retention + dither).to(dtype=decay_logits.dtype).contiguous()
 
 
 def test_fp16_elapsed_t_matches_independent_dithered_recurrence() -> None:
@@ -1039,7 +1039,7 @@ def test_fp32io16_rejects_elapsed_t_before_launch() -> None:
     )
     elapsed_t = torch.zeros(2, device="cuda", dtype=torch.int32)
 
-    with pytest.raises(TypeError, match="only supported for mode='fp16'"):
+    with pytest.raises(ValueError, match="valid only for mode='fp16'"):
         rwkv7_recurrent_stateful(
             *inputs,
             state_pool=state_pool,
