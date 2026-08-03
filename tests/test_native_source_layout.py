@@ -272,6 +272,8 @@ def test_gpu_workflow_is_independent_of_unmerged_fla_revisions() -> None:
     assert '"vllm-rwkv/infer_recurrent_fp16_forward_varlen"' in workflow
     assert 'case["operator_configuration"]["elapsed_t_dither"]' in workflow
     assert "- name: Upload revision-bound evidence\n        if: always()" in workflow
+    assert 'artifact_root.rglob("*") if path.is_file()' in workflow
+    assert 'path.relative_to(artifact_root).as_posix()' in workflow
 
 
 def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
