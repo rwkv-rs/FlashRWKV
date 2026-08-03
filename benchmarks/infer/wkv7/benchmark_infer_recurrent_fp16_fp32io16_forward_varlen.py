@@ -94,6 +94,7 @@ class ProfilePayload:
     seq_lens: tuple[int, ...]
     query_start_loc: torch.Tensor
     state_indices: torch.Tensor
+    elapsed_t: torch.Tensor
     initial_state: torch.Tensor
     r: torch.Tensor
     decay_logits: torch.Tensor
@@ -262,6 +263,15 @@ def _make_payload(
         dtype=torch.int32,
         device="cuda",
     )
+    elapsed_t = (
+        5
+        + 17
+        * torch.arange(
+            num_slots,
+            dtype=torch.int32,
+            device="cuda",
+        )
+    )
     state_dtype = torch.float32 if mode == "fp32io16" else torch.float16
     initial_state = normal(
         (num_slots, num_heads, HEAD_SIZE, HEAD_SIZE),
@@ -271,6 +281,7 @@ def _make_payload(
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
         state_indices=state_indices,
+        elapsed_t=elapsed_t,
         initial_state=initial_state,
         r=r,
         decay_logits=decay_logits,
@@ -291,6 +302,7 @@ def _make_payload(
 def _reference(
     payload: ProfilePayload,
     *,
+    mode: str,
     scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     state_pool = payload.initial_state.float().clone()
@@ -319,7 +331,25 @@ def _reference(
         previous_state = state_pool.index_select(0, slots)
         r = payload.r.index_select(0, token_indices).float()
         decay_logits = payload.decay_logits.index_select(0, token_indices).float()
-        log_decay = -0.6065306597126334 * torch.sigmoid(decay_logits)
+        retention = torch.exp(-0.6065306597126334 * torch.sigmoid(decay_logits))
+        if mode == "fp16":
+            element_phase = torch.arange(
+                payload.r.shape[1] * HEAD_SIZE,
+                dtype=torch.int64,
+                device="cuda",
+            ).reshape(1, payload.r.shape[1], HEAD_SIZE)
+            phase = (
+                payload.elapsed_t.index_select(0, slots).long().reshape(-1, 1, 1)
+                + token_offset
+                + element_phase
+            )
+            bits = (2654435769 * phase).bitwise_and(0xFFFFFFFF)
+            signed_bits = torch.where(
+                bits >= 0x80000000,
+                bits - 0x100000000,
+                bits,
+            )
+            retention = retention + (2.0**-41) * signed_bits.float()
         k = payload.k.index_select(0, token_indices).float()
         v = payload.v.index_select(0, token_indices).float()
         a = payload.a.index_select(0, token_indices).float()
@@ -327,7 +357,7 @@ def _reference(
 
         a_state = torch.einsum("nhk,nhkv->nhv", a, previous_state)
         updated_state = (
-            torch.exp(log_decay).unsqueeze(-1) * previous_state
+            retention.unsqueeze(-1) * previous_state
             + b.unsqueeze(-1) * a_state.unsqueeze(-2)
             + k.unsqueeze(-1) * v.unsqueeze(-2)
         )
@@ -380,6 +410,7 @@ def _launch_with_ticket(
         state_indices=payload.state_indices,
         scale=scale,
         mode=mode,
+        elapsed_t=payload.elapsed_t if mode == "fp16" else None,
         validated_metadata=validated_metadata,
     )
 
@@ -402,7 +433,7 @@ def _correctness(
     scale: float,
     limits: tuple[float, float] | None,
 ) -> dict[str, object]:
-    expected_output, expected_state = _reference(payload, scale=scale)
+    expected_output, expected_state = _reference(payload, mode=mode, scale=scale)
     first_state = payload.initial_state.clone()
     second_state = payload.initial_state.clone()
     first_output = _launch(payload, first_state, mode=mode, scale=scale)[0]
@@ -732,6 +763,12 @@ def _run_case(
             "fp32 state and recurrence"
             if mode == "fp32io16"
             else "fp16 half2 state and recurrence"
+        ),
+        "elapsed_t_dither": mode == "fp16",
+        "elapsed_t_policy": (
+            "nonzero immutable per-state-slot phase input"
+            if mode == "fp16"
+            else "not applicable to FP32-state recurrence"
         ),
         "hidden_size": config.hidden_size,
         "head_size": HEAD_SIZE,

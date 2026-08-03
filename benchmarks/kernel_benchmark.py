@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -24,19 +23,18 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 import torch
-import torch.nn.functional as functional
+from torch.nn import functional
 
 from flash_rwkv import (
+    _extension,
     infer_chunk_bf16_forward,
     infer_chunk_bf16_forward_varlen,
     infer_recurrent_fp16_forward_varlen,
     infer_recurrent_fp32io16_forward_varlen,
     pretrain_recurrent_fp32io16_forward,
 )
-from flash_rwkv import _extension
 from flash_rwkv.benchmark_contract import (
     ALBATROSS_BT_MATRIX,
     ALBATROSS_ROW_FIELDS,
@@ -52,7 +50,6 @@ from flash_rwkv.providers.fla import (
     pretrain_chunk_fp32io16_forward as fla_pretrain_forward,
 )
 from flash_rwkv.registry import KernelSpec, kernel_specs
-
 
 HEAD_SIZE = 64
 CHUNK_SIZE = 16
@@ -106,6 +103,7 @@ class Inputs:
     cu_seqlens_cuda: torch.Tensor | None
     query_start_loc: torch.Tensor
     state_indices: torch.Tensor
+    elapsed_t: torch.Tensor
     sequence_chunk_offsets: torch.Tensor
     chunk_token_starts: torch.Tensor
     chunk_token_ends: torch.Tensor
@@ -289,6 +287,15 @@ def _make_inputs(
         dtype=torch.int32,
         device="cuda",
     )
+    elapsed_t = (
+        5
+        + 17
+        * torch.arange(
+            batch_size,
+            dtype=torch.int32,
+            device="cuda",
+        )
+    )
     chunk_metadata = _make_chunk_metadata(
         batch_size=batch_size,
         token_count=token_count,
@@ -309,6 +316,7 @@ def _make_inputs(
         cu_seqlens_cuda=cu_seqlens_cuda,
         query_start_loc=query_start_loc,
         state_indices=state_indices,
+        elapsed_t=elapsed_t,
         sequence_chunk_offsets=chunk_metadata[0],
         chunk_token_starts=chunk_metadata[1],
         chunk_token_ends=chunk_metadata[2],
@@ -323,6 +331,7 @@ def _reference_equal_sequences(
     token_count: int,
     packed: bool,
     scale: float,
+    elapsed_t: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_heads = inputs[0].shape[-2]
     shaped = tuple(
@@ -330,7 +339,30 @@ def _reference_equal_sequences(
         for tensor in inputs
     )
     r, decay_logits, k, v, a, b = shaped
-    log_decay = -0.6065306597126334 * torch.sigmoid(decay_logits)
+    retention = torch.exp(-0.6065306597126334 * torch.sigmoid(decay_logits))
+    if elapsed_t is not None:
+        element_phase = torch.arange(
+            num_heads * HEAD_SIZE,
+            dtype=torch.int64,
+            device="cuda",
+        ).reshape(1, 1, num_heads, HEAD_SIZE)
+        token_phase = torch.arange(
+            token_count,
+            dtype=torch.int64,
+            device="cuda",
+        ).reshape(1, token_count, 1, 1)
+        phase = (
+            elapsed_t.long().reshape(batch_size, 1, 1, 1)
+            + token_phase
+            + element_phase
+        )
+        bits = (2654435769 * phase).bitwise_and(0xFFFFFFFF)
+        signed_bits = torch.where(
+            bits >= 0x80000000,
+            bits - 0x100000000,
+            bits,
+        )
+        retention = retention + (2.0**-41) * signed_bits.float()
     state = initial_state.float()
     outputs: list[torch.Tensor] = []
     for token_index in range(token_count):
@@ -341,7 +373,7 @@ def _reference_equal_sequences(
             previous_state,
         )
         state = (
-            torch.exp(log_decay[:, token_index]).unsqueeze(-1) * previous_state
+            retention[:, token_index].unsqueeze(-1) * previous_state
             + b[:, token_index].unsqueeze(-1) * state_dot_a.unsqueeze(-2)
             + k[:, token_index].unsqueeze(-1) * v[:, token_index].unsqueeze(-2)
         )
@@ -400,6 +432,7 @@ def _call_public_forward(
             b,
             initial_state=initial_state,
             cu_seqlens=inputs.cu_seqlens_cpu,
+            elapsed_t=inputs.elapsed_t,
         )
     if identity == ("flashkda-derived", "infer_chunk_bf16_forward"):
         return infer_chunk_bf16_forward(
@@ -573,6 +606,12 @@ def _backward_correctness(
         token_count=inputs.token_count,
         packed=inputs.packed,
         scale=1.0,
+        elapsed_t=(
+            inputs.elapsed_t
+            if spec.identity
+            == ("vllm-rwkv", "infer_recurrent_fp16_forward_varlen")
+            else None
+        ),
     )
     expected_gradients = torch.autograd.grad(
         outputs=(expected_output, expected_state),
@@ -657,6 +696,12 @@ def _forward_correctness(
             token_count=inputs.token_count,
             packed=inputs.packed,
             scale=1.0,
+            elapsed_t=(
+                inputs.elapsed_t
+                if spec.identity
+                == ("vllm-rwkv", "infer_recurrent_fp16_forward_varlen")
+                else None
+            ),
         )
     torch.cuda.synchronize()
     if actual_state is None:
@@ -866,6 +911,7 @@ def _prepare_vllm_recurrent(
             *inputs.flat_tensors,
             output,
             1.0,
+            elapsed_t=inputs.elapsed_t if fp16_state else None,
             validated_metadata=validated_metadata,
         )
 
@@ -879,8 +925,9 @@ def _prepare_vllm_recurrent(
             "packed_equal_sequences": True,
             "state_dtype": "float16" if fp16_state else "float32",
             "accumulation": "float16" if fp16_state else "float32",
+            "elapsed_t_dither": fp16_state,
         },
-        workspace_bytes=_tensor_bytes(state, output),
+        workspace_bytes=_tensor_bytes(state, output, inputs.elapsed_t),
         reset=reset,
         launch=launch,
         artifacts={"state": state, "output": output},
@@ -949,6 +996,7 @@ def _prepare_kda_chunk(inputs: Inputs) -> PreparedOperator:
             "global_state_dtype": "bfloat16",
             "workspace_dtype": "float32",
             "accumulation": "float32",
+            "elapsed_t_dither": False,
         },
         workspace_bytes=_tensor_bytes(
             state,
@@ -1231,7 +1279,7 @@ def _run_case(
             "row": row.as_dict(),
             "raw_samples_ms": samples,
         }
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - preserve failed benchmark rows
         case["measurement"] = {
             "valid": False,
             "reason": f"{type(error).__name__}: {error}",

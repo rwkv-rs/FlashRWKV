@@ -463,6 +463,7 @@ jobs:
               len(b2048) != 2
               or {row["mode"] for row in b2048} != {"fp32io16", "fp16"}
               or any(row["sequence_count"] != 2048 for row in b2048)
+              or any(row["elapsed_t_dither"] != (row["mode"] == "fp16") for row in b2048)
               or any(
                   row["metadata_validation_complexity"]
                   != "O(sequence_count^2) once per ticket"
@@ -614,10 +615,18 @@ jobs:
                   raise SystemExit(
                       f"incomplete kernel benchmark matrix: {kernel}"
                   )
+              expected_dither = kernel["identity"] == (
+                  "vllm-rwkv/infer_recurrent_fp16_forward_varlen"
+              )
               for case in kernel["cases"]:
                   measurement = case["measurement"]
                   row = measurement["row"]
-                  if not measurement["valid"] or row is None:
+                  if (
+                      not measurement["valid"]
+                      or row is None
+                      or case["operator_configuration"]["elapsed_t_dither"]
+                      != expected_dither
+                  ):
                       raise SystemExit(
                           f"invalid kernel benchmark row: {kernel['identity']} {case}"
                       )

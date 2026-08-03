@@ -92,6 +92,11 @@ def test_fused_decay_recurrent_benchmark_keeps_e2e_and_wkv_only_separate() -> No
     assert "fp16" in contents
     assert "validate_recurrent_metadata_kernel" in contents
     assert "cuda_kernel_count" in contents
+    assert "A/B isolates raw-decay fusion with elapsed_t=None" in contents
+    assert "elapsed_t=None; nonzero " in contents
+    assert '"per-state-slot dither is correctness-gated and timed separately "' in (
+        contents
+    )
 
 
 def test_statetune_benchmark_compares_unfused_and_fused_training_paths() -> None:
