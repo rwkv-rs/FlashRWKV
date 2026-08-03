@@ -410,7 +410,7 @@ def _call_public_forward(
             output_final_state=True,
         )
     if identity == ("vllm-rwkv", "infer_recurrent_fp32io16_forward_varlen"):
-        assert inputs.cu_seqlens_cpu is not None
+        assert inputs.cu_seqlens_cuda is not None
         return infer_recurrent_fp32io16_forward_varlen(
             r,
             decay_logits,
@@ -419,10 +419,10 @@ def _call_public_forward(
             a,
             b,
             initial_state=initial_state,
-            cu_seqlens=inputs.cu_seqlens_cpu,
+            cu_seqlens=inputs.cu_seqlens_cuda,
         )
     if identity == ("vllm-rwkv", "infer_recurrent_fp16_forward_varlen"):
-        assert inputs.cu_seqlens_cpu is not None
+        assert inputs.cu_seqlens_cuda is not None
         return infer_recurrent_fp16_forward_varlen(
             r,
             decay_logits,
@@ -431,7 +431,7 @@ def _call_public_forward(
             a,
             b,
             initial_state=initial_state,
-            cu_seqlens=inputs.cu_seqlens_cpu,
+            cu_seqlens=inputs.cu_seqlens_cuda,
             elapsed_t=inputs.elapsed_t,
         )
     if identity == ("flashkda-derived", "infer_chunk_bf16_forward"):
