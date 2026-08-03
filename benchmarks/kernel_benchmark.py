@@ -256,7 +256,7 @@ def _make_inputs(
             dtype=torch.int64,
         )
         cu_seqlens_cpu = offsets
-        cu_seqlens_cuda = offsets.to(device="cuda")
+        cu_seqlens_cuda = offsets.to(device="cuda", dtype=torch.int32)
     else:
         surface_shape = (batch_size, token_count, num_heads, HEAD_SIZE)
         cu_seqlens_cpu = None
