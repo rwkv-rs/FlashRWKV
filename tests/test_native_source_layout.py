@@ -271,6 +271,7 @@ def test_gpu_workflow_is_independent_of_unmerged_fla_revisions() -> None:
     assert 'row["elapsed_t_dither"] != (row["mode"] == "fp16")' in workflow
     assert '"vllm-rwkv/infer_recurrent_fp16_forward_varlen"' in workflow
     assert 'case["operator_configuration"]["elapsed_t_dither"]' in workflow
+    assert "- name: Upload revision-bound evidence\n        if: always()" in workflow
 
 
 def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
@@ -531,10 +532,15 @@ def test_infer_modules_own_distinct_sources_and_tests() -> None:
         path.name.startswith("benchmark_") for path in wkv7_benchmarks.glob("*.py")
     )
     kernel_benchmark = (ROOT / "benchmarks/kernel_benchmark.py").read_text()
+    kernel_public_forward = _function_source(
+        "benchmarks/kernel_benchmark.py", "_call_public_forward"
+    )
     assert "recurrent_fp32_from_decay_logits" in kernel_benchmark
     assert "recurrent_fp16_from_decay_logits" in kernel_benchmark
     assert "elapsed_t=inputs.elapsed_t if fp16_state else None" in kernel_benchmark
     assert '"elapsed_t_dither": fp16_state' in kernel_benchmark
+    assert kernel_public_forward.count("cu_seqlens=inputs.cu_seqlens_cuda") == 3
+    assert kernel_public_forward.count("cu_seqlens=inputs.cu_seqlens_cpu") == 1
     fused_benchmark = (
         wkv7_benchmarks / "benchmark_fused_decay_recurrent.py"
     ).read_text()
