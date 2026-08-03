@@ -11,7 +11,6 @@ import pytest
 import torch
 
 import flash_rwkv
-
 from flash_rwkv.reference import (
     decay_logits_to_log_decay_reference,
     rwkv7_decay_logits_reference,

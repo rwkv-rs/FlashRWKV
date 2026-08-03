@@ -7,14 +7,13 @@ from pathlib import Path
 
 import pytest
 import torch
-import torch.nn.functional as functional
+from torch.nn import functional
 
 from flash_rwkv import (
     infer_chunk_bf16_forward,
     infer_chunk_bf16_forward_varlen,
 )
 from flash_rwkv.reference import rwkv7_decay_logits_reference
-
 
 HEAD_SIZE = 64
 TOLERANCE = json.loads(

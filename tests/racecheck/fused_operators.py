@@ -16,6 +16,7 @@ from flash_rwkv import (
     infer_tmix_lnx_rkvres_xg_fp16,
     infer_tmix_mix6_fp16,
     infer_tmix_vres_gate_fp16,
+    prepare_recurrent_metadata,
     pretrain_cmix_bf16,
     pretrain_head_l2wrap_ce_bf16,
     pretrain_l2wrap_ce_bf16,
@@ -24,7 +25,6 @@ from flash_rwkv import (
     pretrain_tmix_lnx_rkvres_xg_bf16,
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
-    prepare_recurrent_metadata,
     rwkv7_recurrent_stateful,
     statetune_recurrent_fp32io16_forward,
 )

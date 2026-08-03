@@ -714,13 +714,14 @@ def test_prepared_metadata_rejects_cross_stream_consumer() -> None:
     )
     other_stream = torch.cuda.Stream()
 
-    with torch.cuda.stream(other_stream):
-        with pytest.raises(RuntimeError, match="stream mismatch"):
-            _raw_native_ticket_call(
-                cu_seqlens,
-                state_indices,
-                validated_metadata,
-            )
+    with torch.cuda.stream(other_stream), pytest.raises(
+        RuntimeError, match="stream mismatch"
+    ):
+        _raw_native_ticket_call(
+            cu_seqlens,
+            state_indices,
+            validated_metadata,
+        )
     other_stream.synchronize()
 
 

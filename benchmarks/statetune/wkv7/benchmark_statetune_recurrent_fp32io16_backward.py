@@ -10,9 +10,9 @@ import json
 import os
 import platform
 import subprocess
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Callable
 
 import torch
 from torch.nn import functional

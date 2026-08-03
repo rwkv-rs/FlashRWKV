@@ -21,9 +21,9 @@ import json
 import os
 import statistics
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import torch
 from torch.profiler import ProfilerActivity, profile
@@ -304,9 +304,7 @@ def _launch_trace(
 ) -> dict[str, object]:
     inputs.state.copy_(inputs.initial_state)
     torch.cuda.synchronize()
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
-    ) as trace:
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as trace:
         call()
         torch.cuda.synchronize()
     if trace_path is not None:
@@ -361,9 +359,7 @@ def _check_launch_contract(
     diagnostic: dict[str, object],
 ) -> None:
     if unfused["recurrent_kernel_count"] != 1:
-        raise RuntimeError(
-            f"unfused trace must contain one WKV kernel: {unfused}"
-        )
+        raise RuntimeError(f"unfused trace must contain one WKV kernel: {unfused}")
     if int(unfused["non_recurrent_kernel_count"]) < 3:
         raise RuntimeError(
             "unfused trace must include bias-add, sigmoid, and multiply "
@@ -380,9 +376,7 @@ def _check_launch_contract(
                 f"{label} ticket path must contain exactly one WKV kernel: {trace}"
             )
     if unfused["metadata_validator_kernel_count"] != 0:
-        raise RuntimeError(
-            f"unfused ticket path relaunched validation: {unfused}"
-        )
+        raise RuntimeError(f"unfused ticket path relaunched validation: {unfused}")
 
 
 def _run_case(
@@ -548,9 +542,7 @@ def run(config: BenchmarkConfig) -> dict[str, object]:
             "precomputed_log_decay_is_diagnostic_only": True,
         },
         "operator_telemetry": {
-            "A_recurrent": (
-                "flash_rwkv._extension.recurrent_fp32|recurrent_fp16"
-            ),
+            "A_recurrent": ("flash_rwkv._extension.recurrent_fp32|recurrent_fp16"),
             "B_recurrent": (
                 "flash_rwkv._extension.recurrent_fp32_from_decay_logits|"
                 "recurrent_fp16_from_decay_logits"
