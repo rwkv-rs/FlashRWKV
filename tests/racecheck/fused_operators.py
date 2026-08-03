@@ -24,6 +24,7 @@ from flash_rwkv import (
     pretrain_tmix_lnx_rkvres_xg_bf16,
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
+    prepare_recurrent_metadata,
     rwkv7_recurrent_stateful,
     statetune_recurrent_fp32io16_forward,
 )
@@ -244,6 +245,12 @@ def run_inference() -> list[str]:
     packed_inputs = tuple(_fp16(packed_shape, scale=0.02) for _ in range(6))
     cu_seqlens = torch.tensor([0, 2, 3], device="cuda", dtype=torch.int32)
     state_indices = torch.tensor([4, 1], device="cuda", dtype=torch.int32)
+    validated_metadata = prepare_recurrent_metadata(
+        cu_seqlens,
+        state_indices,
+        total_tokens=3,
+        state_pool_size=5,
+    )
     for mode, state_dtype in (
         ("fp32io16", torch.float32),
         ("fp16", torch.float16),
@@ -262,6 +269,7 @@ def run_inference() -> list[str]:
             cu_seqlens=cu_seqlens,
             state_indices=state_indices,
             mode=mode,
+            validated_metadata=validated_metadata,
         )
         torch.cuda.synchronize()
         names.append(f"rwkv7_recurrent_stateful_{mode}")
@@ -276,8 +284,12 @@ def run_hostile_packed_metadata() -> list[str]:
         for tensor in (_fp16(packed_shape, scale=0.02) for _ in range(6))
     )
     for mode, state_dtype, operator in (
-        ("fp32io16", torch.float32, _C.recurrent_fp32),
-        ("fp16", torch.float16, _C.recurrent_fp16),
+        (
+            "fp32io16",
+            torch.float32,
+            _C.recurrent_fp32_from_decay_logits,
+        ),
+        ("fp16", torch.float16, _C.recurrent_fp16_from_decay_logits),
     ):
         for case, offsets, slots in HOSTILE_METADATA_CASES:
             state = torch.randn(
@@ -307,6 +319,9 @@ def run_hostile_packed_metadata() -> list[str]:
                 *flattened_inputs,
                 output,
                 1.0,
+                None,
+                None,
+                None,
             )
             torch.cuda.synchronize()
             if not torch.equal(state, state_before):

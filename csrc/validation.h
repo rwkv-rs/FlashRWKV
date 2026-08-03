@@ -17,6 +17,12 @@ struct RecurrentDimensions {
   int64_t head_size;
 };
 
+struct PreparedRecurrentMetadata {
+  torch::Tensor query_start_loc;
+  torch::Tensor state_indices;
+  torch::Tensor status;
+};
+
 void check_cuda_contiguous(const torch::Tensor& tensor, const char* name);
 void check_same_device(
     const torch::Tensor& reference,
@@ -45,6 +51,11 @@ int64_t check_chunk_metadata(
     const torch::Tensor& state,
     const RecurrentDimensions& dimensions);
 torch::Tensor validate_recurrent_metadata_cuda(
+    torch::Tensor query_start_loc,
+    torch::Tensor state_indices,
+    int64_t total_tokens,
+    int64_t state_pool_size);
+PreparedRecurrentMetadata prepare_recurrent_metadata_cuda(
     torch::Tensor query_start_loc,
     torch::Tensor state_indices,
     int64_t total_tokens,

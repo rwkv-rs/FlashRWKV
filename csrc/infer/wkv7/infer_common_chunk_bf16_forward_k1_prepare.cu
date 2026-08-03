@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // K1/K2 launch separation follows MoonshotAI/FlashKDA at commit
-// 1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b. This file implements canonical
-// RWKV-7 chunk algebra, not the KDA attention operator.
+// 1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b. This file implements RWKV-7
+// chunk algebra with a public raw-decay path and a private canonical path,
+// not the KDA attention operator.
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -9,9 +10,14 @@
 #include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
 
+#include "../../common/wkv7/recurrent_decay.cuh"
+
 namespace {
 
 constexpr int kHeadSize = 64;
+
+using flash_rwkv::wkv7::RecurrentDecayInput;
+using flash_rwkv::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -29,14 +35,15 @@ struct K1Shared {
   float b[kHeadSize];
 };
 
-template <typename io_t>
+template <typename io_t, RecurrentDecayInput DecayInput>
 __global__ __launch_bounds__(kHeadSize, 1)
 void infer_chunk_bf16_forward_k1_prepare_kernel(
     int num_heads,
     const int* __restrict__ chunk_token_starts,
     const int* __restrict__ chunk_token_ends,
     const io_t* __restrict__ r_ptr,
-    const io_t* __restrict__ log_decay_ptr,
+    const io_t* __restrict__ decay_ptr,
+    const io_t* __restrict__ decay_bias_ptr,
     const io_t* __restrict__ k_ptr,
     const io_t* __restrict__ v_ptr,
     const io_t* __restrict__ a_ptr,
@@ -69,8 +76,14 @@ void infer_chunk_bf16_forward_k1_prepare_kernel(
             kHeadSize +
         column;
     shared.r[column] = to_float(r_ptr[input_index]);
-    shared.decay[column] =
-        expf(to_float(log_decay_ptr[input_index]));
+    float decay_input = to_float(decay_ptr[input_index]);
+    if constexpr (DecayInput == RecurrentDecayInput::kDecayLogits) {
+      if (decay_bias_ptr != nullptr) {
+        decay_input += to_float(
+            decay_bias_ptr[head_index * kHeadSize + column]);
+      }
+    }
+    shared.decay[column] = recurrent_retention<DecayInput>(decay_input);
     shared.k[column] = to_float(k_ptr[input_index]);
     shared.v[column] = to_float(v_ptr[input_index]);
     shared.a[column] = to_float(a_ptr[input_index]);
@@ -140,11 +153,13 @@ void infer_chunk_bf16_forward_k1_prepare_kernel(
 
 }  // namespace
 
-void infer_chunk_bf16_forward_k1_prepare_cuda(
+template <flash_rwkv::wkv7::RecurrentDecayInput DecayInput>
+void infer_chunk_bf16_forward_k1_prepare_cuda_impl(
     torch::Tensor chunk_token_starts,
     torch::Tensor chunk_token_ends,
     torch::Tensor r,
-    torch::Tensor log_decay,
+    torch::Tensor decay,
+    torch::Tensor decay_bias,
     torch::Tensor k,
     torch::Tensor v,
     torch::Tensor a,
@@ -160,13 +175,14 @@ void infer_chunk_bf16_forward_k1_prepare_cuda(
   const int num_heads = static_cast<int>(r.size(1));
   using io_t = at::BFloat16;
 
-  infer_chunk_bf16_forward_k1_prepare_kernel<io_t>
+  infer_chunk_bf16_forward_k1_prepare_kernel<io_t, DecayInput>
       <<<num_chunks * num_heads, kHeadSize, 0, stream>>>(
           num_heads,
           chunk_token_starts.data_ptr<int>(),
           chunk_token_ends.data_ptr<int>(),
           r.data_ptr<io_t>(),
-          log_decay.data_ptr<io_t>(),
+          decay.data_ptr<io_t>(),
+          decay_bias.defined() ? decay_bias.data_ptr<io_t>() : nullptr,
           k.data_ptr<io_t>(),
           v.data_ptr<io_t>(),
           a.data_ptr<io_t>(),
@@ -177,4 +193,46 @@ void infer_chunk_bf16_forward_k1_prepare_cuda(
           token_bias.data_ptr<float>(),
           static_cast<float>(scale));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void infer_chunk_bf16_forward_k1_prepare_cuda(
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor chunk_transform,
+    torch::Tensor chunk_bias,
+    torch::Tensor token_transform,
+    torch::Tensor token_bias,
+    double scale) {
+  infer_chunk_bf16_forward_k1_prepare_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kLogDecay>(
+      chunk_token_starts, chunk_token_ends, r, log_decay, torch::Tensor(), k,
+      v, a, b, chunk_transform, chunk_bias, token_transform, token_bias,
+      scale);
+}
+
+void infer_chunk_bf16_forward_k1_prepare_from_decay_logits_cuda(
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor decay_bias,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor chunk_transform,
+    torch::Tensor chunk_bias,
+    torch::Tensor token_transform,
+    torch::Tensor token_bias,
+    double scale) {
+  infer_chunk_bf16_forward_k1_prepare_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kDecayLogits>(
+      chunk_token_starts, chunk_token_ends, r, decay_logits, decay_bias, k, v,
+      a, b, chunk_transform, chunk_bias, token_transform, token_bias, scale);
 }

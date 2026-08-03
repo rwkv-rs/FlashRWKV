@@ -26,6 +26,21 @@ void recurrent_common_fp32io16_forward_cuda(
     torch::Tensor boundary,
     torch::Tensor state_dot_a,
     double scale);
+void recurrent_common_fp32io16_from_decay_logits_forward_cuda(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor boundary,
+    torch::Tensor state_dot_a,
+    double scale);
 void recurrent_common_fp32io16_backward_cuda(
     torch::Tensor sequence_chunk_offsets,
     torch::Tensor chunk_token_starts,
@@ -43,6 +58,29 @@ void recurrent_common_fp32io16_backward_cuda(
     torch::Tensor boundary,
     torch::Tensor grad_r,
     torch::Tensor grad_log_decay,
+    torch::Tensor grad_k,
+    torch::Tensor grad_v,
+    torch::Tensor grad_a,
+    torch::Tensor grad_b,
+    torch::Tensor grad_initial_state,
+    double scale);
+void recurrent_common_fp32io16_from_decay_logits_backward_cuda(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor final_state,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor state_dot_a,
+    torch::Tensor grad_output,
+    torch::Tensor grad_final_state,
+    torch::Tensor boundary,
+    torch::Tensor grad_r,
+    torch::Tensor grad_decay_logits,
     torch::Tensor grad_k,
     torch::Tensor grad_v,
     torch::Tensor grad_a,
@@ -73,13 +111,13 @@ int64_t check_recurrent_head_size(const torch::Tensor& state) {
 
 }  // namespace
 
-void recurrent_common_fp32io16_forward(
+void recurrent_common_fp32io16_forward_impl(
     torch::Tensor sequence_chunk_offsets,
     torch::Tensor chunk_token_starts,
     torch::Tensor chunk_token_ends,
     torch::Tensor state,
     torch::Tensor r,
-    torch::Tensor log_decay,
+    torch::Tensor decay,
     torch::Tensor k,
     torch::Tensor v,
     torch::Tensor a,
@@ -87,7 +125,8 @@ void recurrent_common_fp32io16_forward(
     torch::Tensor output,
     torch::Tensor boundary,
     torch::Tensor state_dot_a,
-    double scale) {
+    double scale,
+    bool from_decay_logits) {
   for (const auto& item : {
            std::pair<const torch::Tensor*, const char*>{
                &sequence_chunk_offsets, "sequence_chunk_offsets"},
@@ -95,7 +134,7 @@ void recurrent_common_fp32io16_forward(
            {&chunk_token_ends, "chunk_token_ends"},
            {&state, "state"},
            {&r, "r"},
-           {&log_decay, "log_decay"},
+           {&decay, "decay"},
            {&k, "k"},
            {&v, "v"},
            {&a, "a"},
@@ -134,21 +173,21 @@ void recurrent_common_fp32io16_forward(
           r.size(2) == head_size,
       "r must have shape [B*T,H,D] matching state head size");
   TORCH_CHECK(
-      r.sizes() == log_decay.sizes() &&
+      r.sizes() == decay.sizes() &&
           r.sizes() == k.sizes() &&
           r.sizes() == v.sizes() &&
           r.sizes() == a.sizes() &&
           r.sizes() == b.sizes() &&
           r.sizes() == output.sizes(),
-      "r,log_decay,k,v,a,b,output shape mismatch");
+      "r,decay,k,v,a,b,output shape mismatch");
   TORCH_CHECK(
-      r.scalar_type() == log_decay.scalar_type() &&
+      r.scalar_type() == decay.scalar_type() &&
           r.scalar_type() == k.scalar_type() &&
           r.scalar_type() == v.scalar_type() &&
           r.scalar_type() == a.scalar_type() &&
           r.scalar_type() == b.scalar_type() &&
           r.scalar_type() == output.scalar_type(),
-      "r,log_decay,k,v,a,b,output dtype mismatch");
+      "r,decay,k,v,a,b,output dtype mismatch");
   TORCH_CHECK(
       r.scalar_type() == torch::kFloat16 ||
           r.scalar_type() == torch::kBFloat16,
@@ -174,7 +213,7 @@ void recurrent_common_fp32io16_forward(
            {&chunk_token_starts, "chunk_token_starts"},
            {&chunk_token_ends, "chunk_token_ends"},
            {&r, "r"},
-           {&log_decay, "log_decay"},
+           {&decay, "decay"},
            {&k, "k"},
            {&v, "v"},
            {&a, "a"},
@@ -186,30 +225,64 @@ void recurrent_common_fp32io16_forward(
     check_same_device(state, *item.first, item.second);
   }
 
-  recurrent_common_fp32io16_forward_cuda(
-      sequence_chunk_offsets,
-      chunk_token_starts,
-      chunk_token_ends,
-      state,
-      r,
-      log_decay,
-      k,
-      v,
-      a,
-      b,
-      output,
-      boundary,
-      state_dot_a,
-      scale);
+  if (from_decay_logits) {
+    recurrent_common_fp32io16_from_decay_logits_forward_cuda(
+        sequence_chunk_offsets, chunk_token_starts, chunk_token_ends, state,
+        r, decay, k, v, a, b, output, boundary, state_dot_a, scale);
+  } else {
+    recurrent_common_fp32io16_forward_cuda(
+        sequence_chunk_offsets, chunk_token_starts, chunk_token_ends, state,
+        r, decay, k, v, a, b, output, boundary, state_dot_a, scale);
+  }
 }
 
-void recurrent_common_fp32io16_backward(
+void recurrent_common_fp32io16_forward(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor boundary,
+    torch::Tensor state_dot_a,
+    double scale) {
+  recurrent_common_fp32io16_forward_impl(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends, state, r,
+      log_decay, k, v, a, b, output, boundary, state_dot_a, scale, false);
+}
+
+void recurrent_common_fp32io16_from_decay_logits_forward(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor boundary,
+    torch::Tensor state_dot_a,
+    double scale) {
+  recurrent_common_fp32io16_forward_impl(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends, state, r,
+      decay_logits, k, v, a, b, output, boundary, state_dot_a, scale, true);
+}
+
+void recurrent_common_fp32io16_backward_impl(
     torch::Tensor sequence_chunk_offsets,
     torch::Tensor chunk_token_starts,
     torch::Tensor chunk_token_ends,
     torch::Tensor final_state,
     torch::Tensor r,
-    torch::Tensor log_decay,
+    torch::Tensor decay,
     torch::Tensor k,
     torch::Tensor v,
     torch::Tensor a,
@@ -219,17 +292,18 @@ void recurrent_common_fp32io16_backward(
     std::optional<torch::Tensor> grad_final_state,
     torch::Tensor boundary,
     std::optional<torch::Tensor> grad_r,
-    std::optional<torch::Tensor> grad_log_decay,
+    std::optional<torch::Tensor> grad_decay,
     std::optional<torch::Tensor> grad_k,
     std::optional<torch::Tensor> grad_v,
     std::optional<torch::Tensor> grad_a,
     std::optional<torch::Tensor> grad_b,
     std::optional<torch::Tensor> grad_initial_state,
-    double scale) {
+    double scale,
+    bool from_decay_logits) {
   check_cuda_contiguous(sequence_chunk_offsets, "sequence_chunk_offsets");
   check_cuda_contiguous(final_state, "final_state");
   check_cuda_contiguous(r, "r");
-  check_cuda_contiguous(log_decay, "log_decay");
+  check_cuda_contiguous(decay, "decay");
   check_cuda_contiguous(k, "k");
   check_cuda_contiguous(v, "v");
   check_cuda_contiguous(a, "a");
@@ -268,19 +342,19 @@ void recurrent_common_fp32io16_backward(
           r.size(2) == head_size,
       "r must have shape [total_tokens,H,D] matching state head size");
   TORCH_CHECK(
-      r.sizes() == log_decay.sizes() &&
+      r.sizes() == decay.sizes() &&
           r.sizes() == k.sizes() &&
           r.sizes() == v.sizes() &&
           r.sizes() == a.sizes() &&
           r.sizes() == b.sizes(),
-      "r,log_decay,k,v,a,b shape mismatch");
+      "r,decay,k,v,a,b shape mismatch");
   TORCH_CHECK(
-      r.scalar_type() == log_decay.scalar_type() &&
+      r.scalar_type() == decay.scalar_type() &&
           r.scalar_type() == k.scalar_type() &&
           r.scalar_type() == v.scalar_type() &&
           r.scalar_type() == a.scalar_type() &&
           r.scalar_type() == b.scalar_type(),
-      "r,log_decay,k,v,a,b dtype mismatch");
+      "r,decay,k,v,a,b dtype mismatch");
   TORCH_CHECK(
       r.scalar_type() == torch::kFloat16 ||
           r.scalar_type() == torch::kBFloat16,
@@ -307,7 +381,7 @@ void recurrent_common_fp32io16_backward(
            std::pair<const torch::Tensor*, const char*>{
                &sequence_chunk_offsets, "sequence_chunk_offsets"},
            {&r, "r"},
-           {&log_decay, "log_decay"},
+           {&decay, "decay"},
            {&k, "k"},
            {&v, "v"},
            {&a, "a"},
@@ -324,9 +398,9 @@ void recurrent_common_fp32io16_backward(
       "grad_final_state");
   check_optional_like(grad_r, r, "grad_r");
   check_optional_like(
-      grad_log_decay,
+      grad_decay,
       r,
-      "grad_log_decay");
+      "grad_decay");
   check_optional_like(grad_k, r, "grad_k");
   check_optional_like(grad_v, r, "grad_v");
   check_optional_like(grad_a, r, "grad_a");
@@ -336,27 +410,85 @@ void recurrent_common_fp32io16_backward(
       final_state,
       "grad_initial_state");
 
-  recurrent_common_fp32io16_backward_cuda(
-      sequence_chunk_offsets,
-      chunk_token_starts,
-      chunk_token_ends,
-      final_state,
-      r,
-      log_decay,
-      k,
-      v,
-      a,
-      b,
-      state_dot_a,
-      grad_output.value_or(torch::Tensor()),
-      grad_final_state.value_or(torch::Tensor()),
-      boundary,
-      grad_r.value_or(torch::Tensor()),
-      grad_log_decay.value_or(torch::Tensor()),
-      grad_k.value_or(torch::Tensor()),
-      grad_v.value_or(torch::Tensor()),
-      grad_a.value_or(torch::Tensor()),
-      grad_b.value_or(torch::Tensor()),
-      grad_initial_state.value_or(torch::Tensor()),
-      scale);
+  if (from_decay_logits) {
+    recurrent_common_fp32io16_from_decay_logits_backward_cuda(
+        sequence_chunk_offsets, chunk_token_starts, chunk_token_ends,
+        final_state, r, decay, k, v, a, b, state_dot_a,
+        grad_output.value_or(torch::Tensor()),
+        grad_final_state.value_or(torch::Tensor()), boundary,
+        grad_r.value_or(torch::Tensor()), grad_decay.value_or(torch::Tensor()),
+        grad_k.value_or(torch::Tensor()), grad_v.value_or(torch::Tensor()),
+        grad_a.value_or(torch::Tensor()), grad_b.value_or(torch::Tensor()),
+        grad_initial_state.value_or(torch::Tensor()), scale);
+  } else {
+    recurrent_common_fp32io16_backward_cuda(
+        sequence_chunk_offsets, chunk_token_starts, chunk_token_ends,
+        final_state, r, decay, k, v, a, b, state_dot_a,
+        grad_output.value_or(torch::Tensor()),
+        grad_final_state.value_or(torch::Tensor()), boundary,
+        grad_r.value_or(torch::Tensor()), grad_decay.value_or(torch::Tensor()),
+        grad_k.value_or(torch::Tensor()), grad_v.value_or(torch::Tensor()),
+        grad_a.value_or(torch::Tensor()), grad_b.value_or(torch::Tensor()),
+        grad_initial_state.value_or(torch::Tensor()), scale);
+  }
+}
+
+void recurrent_common_fp32io16_backward(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor final_state,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor state_dot_a,
+    std::optional<torch::Tensor> grad_output,
+    std::optional<torch::Tensor> grad_final_state,
+    torch::Tensor boundary,
+    std::optional<torch::Tensor> grad_r,
+    std::optional<torch::Tensor> grad_log_decay,
+    std::optional<torch::Tensor> grad_k,
+    std::optional<torch::Tensor> grad_v,
+    std::optional<torch::Tensor> grad_a,
+    std::optional<torch::Tensor> grad_b,
+    std::optional<torch::Tensor> grad_initial_state,
+    double scale) {
+  recurrent_common_fp32io16_backward_impl(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends,
+      final_state, r, log_decay, k, v, a, b, state_dot_a, grad_output,
+      grad_final_state, boundary, grad_r, grad_log_decay, grad_k, grad_v,
+      grad_a, grad_b, grad_initial_state, scale, false);
+}
+
+void recurrent_common_fp32io16_from_decay_logits_backward(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor final_state,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor state_dot_a,
+    std::optional<torch::Tensor> grad_output,
+    std::optional<torch::Tensor> grad_final_state,
+    torch::Tensor boundary,
+    std::optional<torch::Tensor> grad_r,
+    std::optional<torch::Tensor> grad_decay_logits,
+    std::optional<torch::Tensor> grad_k,
+    std::optional<torch::Tensor> grad_v,
+    std::optional<torch::Tensor> grad_a,
+    std::optional<torch::Tensor> grad_b,
+    std::optional<torch::Tensor> grad_initial_state,
+    double scale) {
+  recurrent_common_fp32io16_backward_impl(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends,
+      final_state, r, decay_logits, k, v, a, b, state_dot_a, grad_output,
+      grad_final_state, boundary, grad_r, grad_decay_logits, grad_k, grad_v,
+      grad_a, grad_b, grad_initial_state, scale, true);
 }

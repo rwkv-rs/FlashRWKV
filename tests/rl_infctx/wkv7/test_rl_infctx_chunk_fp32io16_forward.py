@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -15,8 +16,8 @@ from flash_rwkv import (
     enumerate_chunk_configs,
     rl_infctx_chunk_fp32io16_factor_recompute,
     rwkv7,
-    rwkv7_reference,
 )
+from flash_rwkv.reference import rwkv7_decay_logits_reference
 
 HEAD_SIZE = 64
 TOLERANCE = json.loads(
@@ -62,7 +63,7 @@ def _inputs(
         device="cuda",
         dtype=torch.float32,
     )
-    log_decay = -0.05 - 0.15 * torch.rand(
+    decay_logits = torch.randn(
         shape,
         generator=generator,
         device="cuda",
@@ -70,7 +71,7 @@ def _inputs(
     )
     tensors = (
         normal(0.05),
-        log_decay,
+        decay_logits,
         normal(0.05),
         normal(0.05),
         -direction,
@@ -90,6 +91,18 @@ def _assert_relative_rmse(
     assert float(error / baseline) < threshold
 
 
+def _fla_raw_chunk_operator() -> object:
+    module = pytest.importorskip("fla.ops.rwkv7")
+    operator = module.chunk_rwkv7
+    parameters = tuple(inspect.signature(operator).parameters)
+    if len(parameters) < 2 or parameters[1] != "decay_logits":
+        pytest.fail(
+            "installed FLA chunk_rwkv7 does not expose the required raw "
+            "decay_logits ABI"
+        )
+    return operator
+
+
 def _assert_chunk_matches_reference(
     inputs: tuple[torch.Tensor, ...],
     initial_state: torch.Tensor,
@@ -99,7 +112,7 @@ def _assert_chunk_matches_reference(
     cu_seqlens: torch.Tensor | None = None,
     state_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    expected_output, expected_state = rwkv7_reference(
+    expected_output, expected_state = rwkv7_decay_logits_reference(
         *inputs,
         scale=scale,
         initial_state=initial_state,
@@ -174,6 +187,7 @@ def _run_recompute_chunk(
     chunk_size: int,
     state_indices: torch.Tensor | None = None,
     scale: float = 1.0,
+    decay_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     (
         sequence_chunk_offsets,
@@ -202,7 +216,7 @@ def _run_recompute_chunk(
         device="cuda",
         dtype=torch.float32,
     )
-    _extension.recompute_chunk_fp32(
+    _extension.recompute_chunk_fp32_from_decay_logits(
         sequence_chunk_offsets,
         chunk_token_starts,
         chunk_token_ends,
@@ -212,6 +226,7 @@ def _run_recompute_chunk(
         output,
         boundary,
         scale,
+        decay_bias=decay_bias,
     )
     return output.reshape(inputs[3].shape), state, boundary
 
@@ -265,7 +280,7 @@ def test_recompute_chunk_matches_reference(
         device="cuda",
         dtype=torch.float32,
     )
-    expected_output, expected_state = rwkv7_reference(
+    expected_output, expected_state = rwkv7_decay_logits_reference(
         *inputs,
         initial_state=initial_state,
         output_final_state=True,
@@ -290,6 +305,56 @@ def test_recompute_chunk_matches_reference(
     )
     expected_chunks = 2 * ((sequence_length + chunk_size - 1) // chunk_size)
     assert boundary.shape == (expected_chunks, 2, HEAD_SIZE, HEAD_SIZE)
+
+
+def test_public_recompute_fixed_with_decay_bias_matches_reference() -> None:
+    inputs = _inputs(
+        batch_size=2,
+        sequence_length=17,
+        dtype=torch.float16,
+        seed=799,
+    )
+    decay_bias = torch.linspace(
+        -0.25,
+        0.25,
+        2 * HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float16,
+    ).reshape(2, HEAD_SIZE)
+    initial_state = 0.02 * torch.randn(
+        2,
+        2,
+        HEAD_SIZE,
+        HEAD_SIZE,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    expected_output, expected_state = rwkv7_decay_logits_reference(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        decay_bias=decay_bias,
+    )
+    actual_output, actual_state = rl_infctx_chunk_fp32io16_factor_recompute(
+        *inputs,
+        initial_state=initial_state,
+        output_final_state=True,
+        chunk_size=16,
+        decay_bias=decay_bias,
+    )
+    torch.cuda.synchronize()
+
+    assert actual_state is not None
+    _assert_relative_rmse(
+        actual_output,
+        expected_output,
+        threshold=TOLERANCE["output_relative_rmse"],
+    )
+    _assert_relative_rmse(
+        actual_state,
+        expected_state,
+        threshold=TOLERANCE["state_relative_rmse"],
+    )
 
 
 def test_recompute_packed_slot_mapping_matches_reference() -> None:
@@ -318,12 +383,20 @@ def test_recompute_packed_slot_mapping_matches_reference() -> None:
         device="cuda",
         dtype=torch.float32,
     )
-    expected_output, expected_state = rwkv7_reference(
+    decay_bias = torch.linspace(
+        0.15,
+        -0.15,
+        2 * HEAD_SIZE,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    expected_output, expected_state = rwkv7_decay_logits_reference(
         *inputs,
         initial_state=initial_state,
         output_final_state=True,
         cu_seqlens=cu_seqlens,
         state_indices=state_indices,
+        decay_bias=decay_bias,
     )
     actual_output, actual_state = rl_infctx_chunk_fp32io16_factor_recompute(
         *inputs,
@@ -332,9 +405,11 @@ def test_recompute_packed_slot_mapping_matches_reference() -> None:
         cu_seqlens=cu_seqlens,
         state_indices=state_indices,
         chunk_size=16,
+        decay_bias=decay_bias,
     )
     torch.cuda.synchronize()
 
+    assert actual_state is not None
     _assert_relative_rmse(
         actual_output,
         expected_output,
@@ -439,7 +514,7 @@ def test_all_materialized_config_variants_match_reference(
         device="cuda",
         dtype=torch.float32,
     )
-    expected_output, expected_state = rwkv7_reference(
+    expected_output, expected_state = rwkv7_decay_logits_reference(
         *inputs,
         initial_state=initial_state,
         output_final_state=True,
@@ -504,9 +579,8 @@ def test_auto_family_dispatch_matches_explicit_algorithm(
 
 
 @pytest.mark.parametrize("chunk_size", [16, 32, 64])
-def test_fixed_chunk_matches_fla(chunk_size: int) -> None:
-    from fla.ops.rwkv7 import chunk_rwkv7
-
+def test_fixed_raw_chunk_matches_fla(chunk_size: int) -> None:
+    chunk_rwkv7 = _fla_raw_chunk_operator()
     inputs = _inputs(
         batch_size=1,
         sequence_length=65,
@@ -548,9 +622,8 @@ def test_fixed_chunk_matches_fla(chunk_size: int) -> None:
     )
 
 
-def test_packed_chunk_matches_fla() -> None:
-    from fla.ops.rwkv7 import chunk_rwkv7
-
+def test_packed_raw_chunk_matches_fla() -> None:
+    chunk_rwkv7 = _fla_raw_chunk_operator()
     sequence_lengths = (3, 16, 17, 35)
     inputs = _inputs(
         batch_size=1,
@@ -615,13 +688,22 @@ def test_chunk_rejects_unsupported_mode_and_size() -> None:
         )
 
 
-def test_chunk_autograd_rejects_packed_inputs() -> None:
+def test_chunk_autograd_fails_closed_without_dispatching_recurrent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatched_recurrent = False
+
+    def recurrent_autograd_sentinel(*_args: object, **_kwargs: object) -> None:
+        nonlocal dispatched_recurrent
+        dispatched_recurrent = True
+        raise AssertionError("chunk must not dispatch the recurrent autograd op")
+
+    monkeypatch.setattr(
+        "flash_rwkv.ops.pretrain_recurrent_fp32io16_from_decay_logits_autograd",
+        recurrent_autograd_sentinel,
+    )
     inputs = list(_inputs(batch_size=1, sequence_length=17))
     inputs[0].requires_grad_(True)
-    cu_seqlens = torch.tensor(
-        [0, 8, 17],
-        dtype=torch.int64,
-        device="cuda",
-    )
-    with pytest.raises(RuntimeError, match="fixed-length"):
-        rwkv7(*inputs, algorithm="chunk", cu_seqlens=cu_seqlens)
+    with pytest.raises(RuntimeError, match="chunk.*autograd is unsupported"):
+        rwkv7(*inputs, algorithm="chunk")
+    assert not dispatched_recurrent

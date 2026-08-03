@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 from pathlib import Path
@@ -9,12 +10,45 @@ from pathlib import Path
 import pytest
 import torch
 
-from flash_rwkv import (
-    decay_logits_to_log_decay,
-    rwkv7,
-    rwkv7_from_decay_logits,
+import flash_rwkv
+
+from flash_rwkv.reference import (
+    decay_logits_to_log_decay_reference,
+    rwkv7_decay_logits_reference,
     rwkv7_reference,
 )
+
+
+def test_top_level_product_surface_accepts_raw_decay_logits_only() -> None:
+    canonical_only_names = {
+        "decay_logits_to_log_decay",
+        "rwkv7_reference",
+        "rwkv7_recurrent_from_decay_logits",
+    }
+    assert canonical_only_names.isdisjoint(flash_rwkv.__all__)
+    assert all(not hasattr(flash_rwkv, name) for name in canonical_only_names)
+    assert "rwkv7_from_decay_logits" in flash_rwkv.__all__
+    assert all(not name.startswith("_canonical_") for name in flash_rwkv.__all__)
+
+    product_operators = (
+        flash_rwkv.rwkv7,
+        flash_rwkv.rwkv7_from_decay_logits,
+        flash_rwkv.rwkv7_recurrent,
+        flash_rwkv.rwkv7_recurrent_stateful,
+        flash_rwkv.rwkv7_chunk,
+        flash_rwkv.pretrain_recurrent_fp32io16,
+        flash_rwkv.pretrain_recurrent_fp32io16_forward,
+        flash_rwkv.statetune_recurrent_fp32io16_forward,
+        flash_rwkv.infer_recurrent_fp32io16_forward_varlen,
+        flash_rwkv.infer_recurrent_fp16_forward_varlen,
+        flash_rwkv.infer_chunk_bf16_forward,
+        flash_rwkv.infer_chunk_bf16_forward_varlen,
+        flash_rwkv.rl_infctx_chunk_fp32io16_factor_recompute,
+    )
+    for operator in product_operators:
+        parameters = tuple(inspect.signature(operator).parameters)
+        assert parameters[:2] == ("r", "decay_logits")
+        assert "log_decay" not in parameters
 
 
 def _inputs(
@@ -194,7 +228,7 @@ def test_packed_layout_rejects_batch_greater_than_one() -> None:
         )
 
 
-def test_decay_logits_adapter_preserves_output_state_and_gradient() -> None:
+def test_decay_logits_reference_preserves_output_state_and_gradient() -> None:
     r, _, k, v, a, b = _inputs(
         batch_size=1,
         sequence_length=3,
@@ -207,7 +241,7 @@ def test_decay_logits_adapter_preserves_output_state_and_gradient() -> None:
     initial_adapter = torch.randn(1, 1, 3, 2, requires_grad=True)
     initial_explicit = initial_adapter.detach().clone().requires_grad_(True)
 
-    output_adapter, state_adapter = rwkv7_from_decay_logits(
+    output_adapter, state_adapter = rwkv7_decay_logits_reference(
         r,
         logits_adapter,
         k,
@@ -218,7 +252,7 @@ def test_decay_logits_adapter_preserves_output_state_and_gradient() -> None:
         output_final_state=True,
     )
     explicit_log_decay = -math.exp(-0.5) * torch.sigmoid(logits_explicit)
-    output_explicit, state_explicit = rwkv7(
+    output_explicit, state_explicit = rwkv7_reference(
         r,
         explicit_log_decay,
         k,
@@ -291,9 +325,9 @@ def test_tolerance_fixture_is_versioned() -> None:
     )
 
 
-def test_decay_logit_transform_matches_the_training_formula() -> None:
+def test_reference_decay_logit_transform_matches_the_training_formula() -> None:
     logits = torch.tensor([-2.0, 0.0, 3.0], requires_grad=True)
-    actual = decay_logits_to_log_decay(logits)
+    actual = decay_logits_to_log_decay_reference(logits)
     expected = -math.exp(-0.5) * torch.sigmoid(logits)
 
     torch.testing.assert_close(actual, expected)

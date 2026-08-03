@@ -28,4 +28,25 @@ void register_statetune_recurrent_bindings(py::module_& module) {
       py::arg("grad_log_decay"), py::arg("grad_k"), py::arg("grad_v"),
       py::arg("grad_a"), py::arg("grad_b"),
       py::arg("grad_initial_state"), py::arg("scale"));
+  module.def(
+      "statetune_recurrent_fp32io16_from_decay_logits_forward",
+      &recurrent_common_fp32io16_from_decay_logits_forward,
+      "StateTune recurrent forward with fused raw decay logits",
+      py::arg("sequence_chunk_offsets"), py::arg("chunk_token_starts"),
+      py::arg("chunk_token_ends"), py::arg("state"), py::arg("r"),
+      py::arg("decay_logits"), py::arg("k"), py::arg("v"), py::arg("a"),
+      py::arg("b"), py::arg("output"), py::arg("boundary"),
+      py::arg("state_dot_a"), py::arg("scale"));
+  module.def(
+      "statetune_recurrent_fp32io16_from_decay_logits_backward",
+      &recurrent_common_fp32io16_from_decay_logits_backward,
+      "StateTune recurrent backward returning raw decay-logit gradients",
+      py::arg("sequence_chunk_offsets"), py::arg("chunk_token_starts"),
+      py::arg("chunk_token_ends"), py::arg("final_state"), py::arg("r"),
+      py::arg("decay_logits"), py::arg("k"), py::arg("v"), py::arg("a"),
+      py::arg("b"), py::arg("state_dot_a"), py::arg("grad_output"),
+      py::arg("grad_final_state"), py::arg("boundary"), py::arg("grad_r"),
+      py::arg("grad_decay_logits"), py::arg("grad_k"), py::arg("grad_v"),
+      py::arg("grad_a"), py::arg("grad_b"),
+      py::arg("grad_initial_state"), py::arg("scale"));
 }

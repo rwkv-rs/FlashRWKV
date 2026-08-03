@@ -329,7 +329,8 @@ def _reference_equal_sequences(
         tensor.reshape(batch_size, token_count, num_heads, HEAD_SIZE).float()
         for tensor in inputs
     )
-    r, log_decay, k, v, a, b = shaped
+    r, decay_logits, k, v, a, b = shaped
+    log_decay = -0.6065306597126334 * torch.sigmoid(decay_logits)
     state = initial_state.float()
     outputs: list[torch.Tensor] = []
     for token_index in range(token_count):
@@ -360,7 +361,7 @@ def _call_public_forward(
     initial_state: torch.Tensor,
     inputs: Inputs,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    r, log_decay, k, v, a, b = tensors
+    r, decay_logits, k, v, a, b = tensors
     identity = spec.identity
     if identity in {
         ("rwkv-lm", "pretrain_recurrent_fp32io16_forward"),
@@ -368,7 +369,7 @@ def _call_public_forward(
     }:
         return pretrain_recurrent_fp32io16_forward(
             r,
-            log_decay,
+            decay_logits,
             k,
             v,
             a,
@@ -380,7 +381,7 @@ def _call_public_forward(
         assert inputs.cu_seqlens_cpu is not None
         return infer_recurrent_fp32io16_forward_varlen(
             r,
-            log_decay,
+            decay_logits,
             k,
             v,
             a,
@@ -392,7 +393,7 @@ def _call_public_forward(
         assert inputs.cu_seqlens_cpu is not None
         return infer_recurrent_fp16_forward_varlen(
             r,
-            log_decay,
+            decay_logits,
             k,
             v,
             a,
@@ -403,7 +404,7 @@ def _call_public_forward(
     if identity == ("flashkda-derived", "infer_chunk_bf16_forward"):
         return infer_chunk_bf16_forward(
             r,
-            log_decay,
+            decay_logits,
             k,
             v,
             a,
@@ -417,7 +418,7 @@ def _call_public_forward(
         assert inputs.cu_seqlens_cpu is not None
         return infer_chunk_bf16_forward_varlen(
             r,
-            log_decay,
+            decay_logits,
             k,
             v,
             a,
@@ -431,7 +432,7 @@ def _call_public_forward(
     }:
         return fla_pretrain_forward(
             r,
-            log_decay,
+            decay_logits,
             k,
             v,
             a,
@@ -444,7 +445,7 @@ def _call_public_forward(
         assert inputs.cu_seqlens_cuda is not None
         return fla_infer_recurrent(
             r,
-            log_decay,
+            decay_logits,
             k,
             v,
             a,
@@ -588,7 +589,7 @@ def _backward_correctness(
     )
     gradient_names = (
         "r",
-        "log_decay",
+        "decay_logits",
         "k",
         "v",
         "a",
@@ -730,7 +731,7 @@ def _prepare_rwkv_pretrain_forward(inputs: Inputs) -> PreparedOperator:
         state.copy_(inputs.initial_state)
 
     def launch() -> None:
-        _extension.pretrain_recurrent_fp32io16_forward(
+        _extension.pretrain_recurrent_fp32io16_from_decay_logits_forward(
             inputs.sequence_chunk_offsets,
             inputs.chunk_token_starts,
             inputs.chunk_token_ends,
@@ -789,7 +790,7 @@ def _prepare_rwkv_pretrain_backward(inputs: Inputs) -> PreparedOperator:
     grad_initial_state = torch.empty_like(inputs.initial_state, dtype=torch.float32)
 
     def launch() -> None:
-        _extension.pretrain_recurrent_fp32io16_backward(
+        _extension.pretrain_recurrent_fp32io16_from_decay_logits_backward(
             inputs.sequence_chunk_offsets,
             inputs.chunk_token_starts,
             inputs.chunk_token_ends,
@@ -843,7 +844,15 @@ def _prepare_vllm_recurrent(
     state = torch.empty_like(inputs.initial_state, dtype=state_dtype)
     output = torch.empty_like(inputs.flat_tensors[3])
     extension_op = (
-        _extension.recurrent_fp16 if fp16_state else _extension.recurrent_fp32
+        _extension.recurrent_fp16_from_decay_logits
+        if fp16_state
+        else _extension.recurrent_fp32_from_decay_logits
+    )
+    validated_metadata = _extension.prepare_recurrent_metadata(
+        inputs.query_start_loc,
+        inputs.state_indices,
+        total_tokens=inputs.total_tokens,
+        state_pool_size=inputs.initial_state.shape[0],
     )
 
     def reset() -> None:
@@ -857,11 +866,12 @@ def _prepare_vllm_recurrent(
             *inputs.flat_tensors,
             output,
             1.0,
+            validated_metadata=validated_metadata,
         )
 
     return PreparedOperator(
         boundary=(
-            f"one native {'recurrent_fp16' if fp16_state else 'recurrent_fp32'} "
+            "one native fused raw decay-logit recurrent "
             "launch; packed metadata is prebuilt and state reset is synchronized "
             "before the start event"
         ),
@@ -905,7 +915,7 @@ def _prepare_kda_chunk(inputs: Inputs) -> PreparedOperator:
         state.copy_(inputs.initial_state)
 
     def launch() -> None:
-        _extension.infer_chunk_bf16_forward_k1_prepare(
+        _extension.infer_chunk_bf16_forward_k1_prepare_from_decay_logits(
             inputs.chunk_token_starts,
             inputs.chunk_token_ends,
             *inputs.flat_tensors,
@@ -929,13 +939,13 @@ def _prepare_kda_chunk(inputs: Inputs) -> PreparedOperator:
 
     return PreparedOperator(
         boundary=(
-            "one logical infer_chunk_bf16_forward operator: consecutive "
-            "K1 prepare and K2 recurrence native launches; BF16 state reset is "
-            "synchronized before the start event"
+            "one logical raw-decay infer_chunk_bf16_forward operator: "
+            "consecutive K1 prepare and K2 recurrence native launches; BF16 "
+            "state reset is synchronized before the start event"
         ),
         configuration={
             "chunk_size": CHUNK_SIZE,
-            "stages": ["K1 prepare", "K2 recurrence"],
+            "stages": ["K1 fused raw-decay prepare", "K2 recurrence"],
             "global_state_dtype": "bfloat16",
             "workspace_dtype": "float32",
             "accumulation": "float32",
@@ -974,11 +984,12 @@ def _prepare_fla_forward(inputs: Inputs) -> PreparedOperator:
 
     return PreparedOperator(
         boundary=(
-            "one FLA chunk_rwkv7 forward logical operator call; input graph "
-            "leaves and state are prepared outside events"
+            "one FLA raw-decay chunk_rwkv7 forward logical operator call; "
+            "input graph leaves and state are prepared outside events"
         ),
         configuration={
             "implementation": "fla.ops.rwkv7.chunk_rwkv7",
+            "decay_input": "raw logits",
             "chunk_size": CHUNK_SIZE,
             "safe_gate": True,
             "autograd_enabled": True,
@@ -1036,11 +1047,13 @@ def _prepare_fla_backward(inputs: Inputs) -> PreparedOperator:
 
     return PreparedOperator(
         boundary=(
-            "one FLA chunk_rwkv7 autograd backward logical operator call; "
-            "forward graph and upstream gradients are prepared outside events"
+            "one FLA raw-decay chunk_rwkv7 autograd backward logical operator "
+            "call; forward graph and upstream gradients are prepared outside "
+            "events"
         ),
         configuration={
             "implementation": "torch.autograd.grad over FLA chunk_rwkv7",
+            "decay_input": "raw logits",
             "chunk_size": CHUNK_SIZE,
             "safe_gate": True,
             "forward_context": "precomputed once outside timed samples",
@@ -1077,11 +1090,12 @@ def _prepare_fla_recurrent(inputs: Inputs) -> PreparedOperator:
 
     return PreparedOperator(
         boundary=(
-            "one FLA fused_recurrent_rwkv7 logical operator call; packed "
+            "one FLA recurrent_rwkv7 raw-decay logical operator call; packed "
             "metadata and functional initial state are prepared outside events"
         ),
         configuration={
-            "implementation": "fla.ops.rwkv7.fused_recurrent_rwkv7",
+            "implementation": "fla.ops.rwkv7.recurrent_rwkv7",
+            "decay_input": "raw logits",
             "packed_equal_sequences": True,
             "state_dtype": "float32",
             "accumulation": "float32",

@@ -27,8 +27,42 @@ def pretrain_recurrent_fp32io16_autograd(
 
     return _recurrent_fp32io16_autograd(
         "pretrain",
+        "log_decay",
         r,
         log_decay,
+        k,
+        v,
+        a,
+        b,
+        initial_state=initial_state,
+        sequence_chunk_offsets=sequence_chunk_offsets,
+        chunk_token_starts=chunk_token_starts,
+        chunk_token_ends=chunk_token_ends,
+        scale=scale,
+    )
+
+
+def pretrain_recurrent_fp32io16_from_decay_logits_autograd(
+    r: torch.Tensor,
+    decay_logits: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    initial_state: torch.Tensor | None,
+    sequence_chunk_offsets: torch.Tensor,
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run recurrent autograd with the raw decay transform fused natively."""
+
+    return _recurrent_fp32io16_autograd(
+        "pretrain",
+        "decay_logits",
+        r,
+        decay_logits,
         k,
         v,
         a,
@@ -59,6 +93,7 @@ def statetune_recurrent_fp32io16_autograd(
 
     return _recurrent_fp32io16_autograd(
         "statetune",
+        "log_decay",
         r,
         log_decay,
         k,
@@ -73,10 +108,44 @@ def statetune_recurrent_fp32io16_autograd(
     )
 
 
+def statetune_recurrent_fp32io16_from_decay_logits_autograd(
+    r: torch.Tensor,
+    decay_logits: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    initial_state: torch.Tensor,
+    sequence_chunk_offsets: torch.Tensor,
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run StateTune autograd with the raw decay transform fused natively."""
+
+    return _recurrent_fp32io16_autograd(
+        "statetune",
+        "decay_logits",
+        r,
+        decay_logits,
+        k,
+        v,
+        a,
+        b,
+        initial_state=initial_state,
+        sequence_chunk_offsets=sequence_chunk_offsets,
+        chunk_token_starts=chunk_token_starts,
+        chunk_token_ends=chunk_token_ends,
+        scale=scale,
+    )
+
+
 def _recurrent_fp32io16_autograd(
     workload: Literal["pretrain", "statetune"],
+    decay_input: Literal["log_decay", "decay_logits"],
     r: torch.Tensor,
-    log_decay: torch.Tensor,
+    decay: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     a: torch.Tensor,
@@ -90,7 +159,7 @@ def _recurrent_fp32io16_autograd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return _RecurrentFp32io16Function.apply(
         r,
-        log_decay,
+        decay,
         k,
         v,
         a,
@@ -101,6 +170,7 @@ def _recurrent_fp32io16_autograd(
         chunk_token_ends,
         scale,
         workload,
+        decay_input,
     )
 
 
@@ -109,7 +179,7 @@ class _RecurrentFp32io16Function(torch.autograd.Function):
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
         r: torch.Tensor,
-        log_decay: torch.Tensor,
+        decay: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         a: torch.Tensor,
@@ -120,11 +190,12 @@ class _RecurrentFp32io16Function(torch.autograd.Function):
         chunk_token_ends: torch.Tensor,
         scale: float,
         workload: Literal["pretrain", "statetune"],
+        decay_input: Literal["log_decay", "decay_logits"],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, _, num_heads, head_size = r.shape
         flattened = tuple(
             tensor.reshape(-1, num_heads, head_size)
-            for tensor in (r, log_decay, k, v, a, b)
+            for tensor in (r, decay, k, v, a, b)
         )
         working_state = (
             torch.zeros(
@@ -156,11 +227,18 @@ class _RecurrentFp32io16Function(torch.autograd.Function):
         )
         output = torch.empty_like(flattened[3])
 
-        forward = (
-            _extension.statetune_recurrent_fp32io16_forward
-            if workload == "statetune"
-            else _extension.pretrain_recurrent_fp32io16_forward
-        )
+        if decay_input == "decay_logits":
+            forward = (
+                _extension.statetune_recurrent_fp32io16_from_decay_logits_forward
+                if workload == "statetune"
+                else _extension.pretrain_recurrent_fp32io16_from_decay_logits_forward
+            )
+        else:
+            forward = (
+                _extension.statetune_recurrent_fp32io16_forward
+                if workload == "statetune"
+                else _extension.pretrain_recurrent_fp32io16_forward
+            )
         forward(
             sequence_chunk_offsets,
             chunk_token_starts,
@@ -186,6 +264,7 @@ class _RecurrentFp32io16Function(torch.autograd.Function):
         ctx.input_shape = tuple(r.shape)
         ctx.scale = float(scale)
         ctx.workload = workload
+        ctx.decay_input = decay_input
         return output.reshape(v.shape), working_state
 
     @staticmethod
@@ -199,7 +278,7 @@ class _RecurrentFp32io16Function(torch.autograd.Function):
             chunk_token_starts,
             chunk_token_ends,
             r,
-            log_decay,
+            decay,
             k,
             v,
             a,
@@ -209,7 +288,7 @@ class _RecurrentFp32io16Function(torch.autograd.Function):
             final_state,
         ) = ctx.saved_tensors
         needs = ctx.needs_input_grad
-        inputs = (r, log_decay, k, v, a, b)
+        inputs = (r, decay, k, v, a, b)
         gradients = tuple(
             torch.empty_like(tensor) if needs[index] else None
             for index, tensor in enumerate(inputs)
@@ -228,18 +307,25 @@ class _RecurrentFp32io16Function(torch.autograd.Function):
             else grad_final_state.contiguous()
         )
 
-        backward = (
-            _extension.statetune_recurrent_fp32io16_backward
-            if ctx.workload == "statetune"
-            else _extension.pretrain_recurrent_fp32io16_backward
-        )
+        if ctx.decay_input == "decay_logits":
+            backward = (
+                _extension.statetune_recurrent_fp32io16_from_decay_logits_backward
+                if ctx.workload == "statetune"
+                else _extension.pretrain_recurrent_fp32io16_from_decay_logits_backward
+            )
+        else:
+            backward = (
+                _extension.statetune_recurrent_fp32io16_backward
+                if ctx.workload == "statetune"
+                else _extension.pretrain_recurrent_fp32io16_backward
+            )
         backward(
             sequence_chunk_offsets,
             chunk_token_starts,
             chunk_token_ends,
             final_state,
             r,
-            log_decay,
+            decay,
             k,
             v,
             a,
@@ -261,6 +347,7 @@ class _RecurrentFp32io16Function(torch.autograd.Function):
         return (
             *shaped_gradients,
             grad_initial_state,
+            None,
             None,
             None,
             None,

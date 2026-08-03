@@ -21,3 +21,21 @@ void launch_chunk_replay_fp32(
     torch::Tensor* state_dot_a,
     float scale,
     cudaStream_t stream);
+
+void launch_chunk_replay_fp32_from_decay_logits(
+    int num_chunks,
+    int num_heads,
+    const torch::Tensor& chunk_token_starts,
+    const torch::Tensor& chunk_token_ends,
+    const torch::Tensor& boundary,
+    const torch::Tensor& r,
+    const torch::Tensor& decay_logits,
+    const torch::Tensor& decay_bias,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    torch::Tensor& output,
+    torch::Tensor* state_dot_a,
+    float scale,
+    cudaStream_t stream);

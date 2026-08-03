@@ -10,7 +10,10 @@ import pytest
 import torch
 from torch.nn import functional
 
-from flash_rwkv import rwkv7_reference, statetune_recurrent_fp32io16_forward
+from flash_rwkv import statetune_recurrent_fp32io16_forward
+from flash_rwkv.reference import (
+    rwkv7_decay_logits_reference,
+)
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -51,7 +54,7 @@ def _inputs(
         device="cuda",
         generator=generator,
     )
-    log_decay = -0.05 - 0.15 * torch.rand(
+    decay_logits = torch.randn(
         shape,
         dtype=torch.float32,
         device="cuda",
@@ -59,7 +62,7 @@ def _inputs(
     )
     inputs = (
         normal(0.05).to(dtype),
-        log_decay.to(dtype),
+        decay_logits.to(dtype),
         normal(0.05).to(dtype),
         normal(0.05).to(dtype),
         (-direction).to(dtype),
@@ -109,7 +112,7 @@ def _run_backward(
         .requires_grad_(requires_grad[6])
     )
     if implementation == "torch":
-        output, final_state = rwkv7_reference(
+        output, final_state = rwkv7_decay_logits_reference(
             *inputs,
             scale=scale,
             initial_state=initial_state,
@@ -121,16 +124,6 @@ def _run_backward(
             scale=scale,
             initial_state=initial_state,
             output_final_state=True,
-        )
-    elif implementation == "fla":
-        from fla.ops.rwkv7 import chunk_rwkv7
-
-        output, final_state = chunk_rwkv7(
-            *inputs,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=True,
-            chunk_size=16,
         )
     else:
         raise AssertionError(f"unknown implementation: {implementation}")
@@ -159,7 +152,7 @@ def _run_backward(
         (torch.float16, 257, True, 1203),
     ],
 )
-def test_statetune_recurrent_autograd_matches_torch_and_fla(
+def test_statetune_recurrent_autograd_matches_independent_torch_oracle(
     dtype: torch.dtype,
     sequence_length: int,
     include_final_state_loss: bool,
@@ -198,12 +191,12 @@ def test_statetune_recurrent_autograd_matches_torch_and_fla(
             include_final_state_loss=include_final_state_loss,
             scale=0.125,
         )
-        for implementation in ("torch", "flash", "fla")
+        for implementation in ("torch", "flash")
     }
     torch.cuda.synchronize()
 
     expected_output, expected_state, expected_gradients = results["torch"]
-    for implementation in ("flash", "fla"):
+    for implementation in ("flash",):
         output, final_state, gradients = results[implementation]
         assert (
             _relative_rmse(output, expected_output)
@@ -256,12 +249,12 @@ def test_statetune_recurrent_only_materializes_requested_gradients() -> None:
             include_final_state_loss=False,
             scale=1.0,
         )
-        for implementation in ("torch", "flash", "fla")
+        for implementation in ("torch", "flash")
     }
     torch.cuda.synchronize()
 
     expected_gradients = results["torch"][2]
-    for implementation in ("flash", "fla"):
+    for implementation in ("flash",):
         gradients = results[implementation][2]
         for required, gradient, expected_gradient in zip(
             requires_grad,
@@ -287,7 +280,7 @@ def test_large_head_statetune_forward_backward_matches_torch(
 ) -> None:
     inputs, initial_state = _inputs(
         batch_size=1,
-        sequence_length=2,
+        sequence_length=3,
         dtype=torch.float16,
         seed=2000 + head_size,
         head_size=head_size,

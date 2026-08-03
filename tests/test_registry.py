@@ -87,7 +87,7 @@ def test_reference_and_stateful_helpers_are_not_kernel_identities() -> None:
     assert set(WRAPPER_KERNELS).isdisjoint(names)
 
 
-def test_factor_recompute_kernel_has_a_safe_public_wrapper() -> None:
+def test_factor_recompute_kernel_has_a_raw_public_wrapper() -> None:
     spec = get_kernel_spec(
         "rl_infctx_chunk_fp32io16_factor_recompute",
         provider="flash_rwkv",
@@ -99,7 +99,7 @@ def test_factor_recompute_kernel_has_a_safe_public_wrapper() -> None:
         ).parameters
     ) == (
         "r",
-        "log_decay",
+        "decay_logits",
         "k",
         "v",
         "a",
@@ -110,6 +110,7 @@ def test_factor_recompute_kernel_has_a_safe_public_wrapper() -> None:
         "cu_seqlens",
         "state_indices",
         "chunk_size",
+        "decay_bias",
     )
 
 

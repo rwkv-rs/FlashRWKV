@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Correctness-gated materialized versus factor-recompute chunk benchmark."""
+"""Correctness-gated comparison of three raw-fused chunk strategies."""
 
 from __future__ import annotations
 
@@ -82,11 +82,12 @@ class Inputs:
     state_indices: torch.Tensor
     initial_state: torch.Tensor
     r: torch.Tensor
-    log_decay: torch.Tensor
+    decay_logits: torch.Tensor
     k: torch.Tensor
     v: torch.Tensor
     a: torch.Tensor
     b: torch.Tensor
+    validated_metadata: object
 
     @property
     def num_heads(self) -> int:
@@ -197,23 +198,26 @@ def _make_inputs(
         device="cuda",
         generator=generator,
     )
-    log_decay = -0.05 - 0.15 * torch.rand(
-        token_shape,
-        dtype=torch.float32,
-        device="cuda",
-        generator=generator,
-    )
+    decay_logits = normal(1.0)
     offsets = [0]
     for length in seq_lens:
         offsets.append(offsets[-1] + length)
+    offsets_cuda = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    state_indices = torch.arange(
+        len(seq_lens),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    validated_metadata = _C.prepare_recurrent_metadata(
+        offsets_cuda,
+        state_indices,
+        total_tokens,
+        len(seq_lens),
+    )
     return Inputs(
         seq_lens=seq_lens,
-        offsets=torch.tensor(offsets, device="cuda", dtype=torch.int32),
-        state_indices=torch.arange(
-            len(seq_lens),
-            device="cuda",
-            dtype=torch.int32,
-        ),
+        offsets=offsets_cuda,
+        state_indices=state_indices,
         initial_state=0.02
         * torch.randn(
             (
@@ -227,11 +231,12 @@ def _make_inputs(
             generator=generator,
         ),
         r=normal(0.05).to(dtype),
-        log_decay=log_decay.to(dtype),
+        decay_logits=decay_logits.to(dtype),
         k=normal(0.05).to(dtype),
         v=normal(0.05).to(dtype),
         a=(-direction).to(dtype),
         b=(direction * strength).to(dtype),
+        validated_metadata=validated_metadata,
     )
 
 
@@ -279,18 +284,21 @@ def _relative_rmse(actual: torch.Tensor, expected: torch.Tensor) -> float:
 def _recurrent_expected(inputs: Inputs) -> tuple[torch.Tensor, torch.Tensor]:
     state = inputs.initial_state.clone()
     output = torch.empty_like(inputs.v)
-    _C.recurrent_fp32(
+    _C.recurrent_fp32_from_decay_logits(
         inputs.offsets,
         inputs.state_indices,
         state,
         inputs.r,
-        inputs.log_decay,
+        inputs.decay_logits,
         inputs.k,
         inputs.v,
         inputs.a,
         inputs.b,
         output,
         1.0,
+        None,
+        None,
+        inputs.validated_metadata,
     )
     torch.cuda.synchronize()
     return output, state
@@ -317,14 +325,14 @@ def _materialized_strategy(
     output = torch.empty_like(inputs.v)
 
     def call() -> None:
-        _C.materialized_chunk_fp32(
+        _C.materialized_chunk_fp32_from_decay_logits(
             sequence_chunk_offsets,
             chunk_starts,
             chunk_ends,
             inputs.state_indices,
             state,
             inputs.r,
-            inputs.log_decay,
+            inputs.decay_logits,
             inputs.k,
             inputs.v,
             inputs.a,
@@ -337,6 +345,8 @@ def _materialized_strategy(
             config.stages,
             config.state_tile,
             1.0,
+            None,
+            None,
         )
 
     return Strategy(
@@ -369,16 +379,15 @@ def _recompute_strategy(inputs: Inputs, chunk_size: int) -> Strategy:
     )
     state = inputs.initial_state.clone()
     output = torch.empty_like(inputs.v)
-
     def call() -> None:
-        _C.recompute_chunk_fp32(
+        _C.recompute_chunk_fp32_from_decay_logits(
             sequence_chunk_offsets,
             chunk_starts,
             chunk_ends,
             inputs.state_indices,
             state,
             inputs.r,
-            inputs.log_decay,
+            inputs.decay_logits,
             inputs.k,
             inputs.v,
             inputs.a,
@@ -386,6 +395,7 @@ def _recompute_strategy(inputs: Inputs, chunk_size: int) -> Strategy:
             output,
             boundary,
             1.0,
+            None,
         )
 
     return Strategy(
@@ -403,18 +413,21 @@ def _recurrent_strategy(inputs: Inputs) -> Strategy:
     output = torch.empty_like(inputs.v)
 
     def call() -> None:
-        _C.recurrent_fp32(
+        _C.recurrent_fp32_from_decay_logits(
             inputs.offsets,
             inputs.state_indices,
             state,
             inputs.r,
-            inputs.log_decay,
+            inputs.decay_logits,
             inputs.k,
             inputs.v,
             inputs.a,
             inputs.b,
             output,
             1.0,
+            None,
+            None,
+            inputs.validated_metadata,
         )
 
     return Strategy(
@@ -758,7 +771,9 @@ def run(config: BenchmarkConfig) -> dict[str, object]:
             "preallocated low-level operator; state reset is ordered before "
             "the CUDA start event; strategy order is shuffled per sample"
         ),
-        "correctness_baseline": "validated recurrent_fp32 low-level operator",
+        "correctness_baseline": (
+            "validated fused raw decay_logits recurrent_fp32 low-level operator"
+        ),
         "warmup_iters": config.warmup_iters,
         "samples": config.samples,
         "recompute_tuning_samples": config.tuning_samples,
