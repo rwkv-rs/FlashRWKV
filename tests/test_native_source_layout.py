@@ -268,6 +268,9 @@ def test_gpu_workflow_is_independent_of_unmerged_fla_revisions() -> None:
     assert "flashkda-derived/infer_chunk_bf16_forward_varlen" in workflow
     assert 'kernel_payload["case_count"] != 84' in workflow
     assert 'kernel["valid_measurement_count"] != 21' in workflow
+    assert 'row["elapsed_t_dither"] != (row["mode"] == "fp16")' in workflow
+    assert '"vllm-rwkv/infer_recurrent_fp16_forward_varlen"' in workflow
+    assert 'case["operator_configuration"]["elapsed_t_dither"]' in workflow
 
 
 def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
@@ -325,6 +328,11 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
         "benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py",
         "_run_case",
     )
+    benchmark_source = (
+        ROOT
+        / "benchmarks/infer/wkv7/"
+        "benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py"
+    ).read_text()
     workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
     gitignore = (ROOT / ".gitignore").read_text().splitlines()
 
@@ -349,6 +357,12 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert '"metadata_host_round_trip": False' in benchmark_case
     assert '"metadata_prepare_kernel_launches": 1' in benchmark_case
     assert '"kernel_launches_per_operator": 1' in benchmark_case
+    assert 'elapsed_t=payload.elapsed_t if mode == "fp16" else None' in (
+        benchmark_source
+    )
+    assert "2654435769 * phase" in benchmark_source
+    assert "(2.0**-41) * signed_bits.float()" in benchmark_source
+    assert '"elapsed_t_dither": mode == "fp16"' in benchmark_case
     assert '"decode_b2048": (1,) * 2048' in (
         ROOT
         / "benchmarks/infer/wkv7/"
@@ -519,6 +533,8 @@ def test_infer_modules_own_distinct_sources_and_tests() -> None:
     kernel_benchmark = (ROOT / "benchmarks/kernel_benchmark.py").read_text()
     assert "recurrent_fp32_from_decay_logits" in kernel_benchmark
     assert "recurrent_fp16_from_decay_logits" in kernel_benchmark
+    assert "elapsed_t=inputs.elapsed_t if fp16_state else None" in kernel_benchmark
+    assert '"elapsed_t_dither": fp16_state' in kernel_benchmark
     fused_benchmark = (
         wkv7_benchmarks / "benchmark_fused_decay_recurrent.py"
     ).read_text()

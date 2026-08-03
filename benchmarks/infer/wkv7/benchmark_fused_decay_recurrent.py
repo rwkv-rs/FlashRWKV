@@ -550,8 +550,9 @@ def run(config: BenchmarkConfig) -> dict[str, object]:
             "metadata": "flash_rwkv.prepare_recurrent_metadata",
         },
         "fp16_elapsed_t": (
-            "None for both A and B; actual-dither FP16 performance remains "
-            "covered by packed-recurrent-benchmark.json"
+            "A/B isolates raw-decay fusion with elapsed_t=None; nonzero "
+            "per-state-slot dither is correctness-gated and timed separately "
+            "by packed-recurrent-benchmark.json"
         ),
         "results": results,
     }
