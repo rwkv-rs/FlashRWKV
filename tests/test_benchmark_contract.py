@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from benchmarks.infer.wkv7 import benchmark_fused_decay_recurrent
+from benchmarks.infer.wkv7.benchmark_fused_decay_recurrent import CASES
 from flash_rwkv.benchmark_contract import (
     ALBATROSS_BT_MATRIX,
     ALBATROSS_ROW_FIELDS,
@@ -64,6 +68,45 @@ def test_summary_has_exact_fields_and_throughput_definition() -> None:
 def test_result_formatter_rejects_incomplete_rows() -> None:
     with pytest.raises(ValueError, match="missing RESULT fields"):
         format_result({"B": 1, "T": 1})
+
+
+def test_fused_decay_recurrent_benchmark_covers_required_product_cases() -> None:
+    assert CASES["b1_t1"] == (1,)
+    assert CASES["b320_t1"] == (1,) * 320
+    assert CASES["b1_t128"] == (128,)
+    assert CASES["packed_b320_t16"] == (16,) * 320
+    assert len(CASES["ragged_b320_t1_to_t16"]) == 320
+    assert len(set(CASES["ragged_b320_t1_to_t16"])) > 1
+
+
+def test_fused_decay_recurrent_benchmark_keeps_e2e_and_wkv_only_separate() -> None:
+    source = benchmark_fused_decay_recurrent.__file__
+    assert source is not None
+    contents = Path(source).read_text(encoding="utf-8")
+    assert '"A": "unfused_correct_product"' in contents
+    assert '"B": "fused_raw_product"' in contents
+    assert "inputs.decay_logits + inputs.decay_bias" in contents
+    assert "recurrent_fp32_from_decay_logits" in contents
+    assert "precomputed_log_decay_is_diagnostic_only" in contents
+    assert "fp32io16" in contents
+    assert "fp16" in contents
+    assert "validate_recurrent_metadata_kernel" in contents
+    assert "cuda_kernel_count" in contents
+
+
+def test_statetune_benchmark_compares_unfused_and_fused_training_paths() -> None:
+    path = (
+        Path(__file__).parents[1]
+        / "benchmarks/statetune/wkv7/benchmark_statetune_recurrent_fp32io16_backward.py"
+    )
+    contents = path.read_text(encoding="utf-8")
+    assert '"A": "unfused_correct_product"' in contents
+    assert '"B": "public_raw_fused_recurrent"' in contents
+    assert "_unfused_correct_statetune" in contents
+    assert "statetune_recurrent_fp32io16_forward" in contents
+    assert "fused_speedup_over_unfused" in contents
+    assert "timed_transform_materialization_bytes" in contents
+    assert "cuda_kernel_count" in contents
 
 
 @pytest.mark.parametrize(

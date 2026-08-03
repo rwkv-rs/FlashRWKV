@@ -162,31 +162,6 @@ jobs:
           uv pip install --python .venv/bin/python \
             'torch>=2.4' 'pytest==9.1.1' 'einops' 'transformers>=4.45.0'
           uv pip install --python .venv/bin/python --no-deps --no-build-isolation -e .
-          uv pip install --python .venv/bin/python --no-deps \
-            'flash-linear-attention @ git+https://github.com/rwkv-rs/fla-rwkv.git@fcd4502ab957513a3d97dbd8aa64851e5e4dba11'
-          .venv/bin/python - <<'PY'
-          import importlib
-          import importlib.metadata
-          import json
-          from pathlib import Path
-
-          revision = "fcd4502ab957513a3d97dbd8aa64851e5e4dba11"
-          distribution = importlib.metadata.distribution("flash-linear-attention")
-          direct_url = json.loads(distribution.read_text("direct_url.json"))
-          if direct_url["url"] != "https://github.com/rwkv-rs/fla-rwkv.git":
-              raise SystemExit(f"unexpected FLA repository: {direct_url['url']}")
-          vcs_info = direct_url["vcs_info"]
-          if vcs_info.get("commit_id") != revision:
-              raise SystemExit(f"unexpected FLA commit: {vcs_info.get('commit_id')}")
-          package_root = Path(distribution.locate_file("fla")).resolve()
-          for name in ("fla", "fla.ops.rwkv7"):
-              module_path = Path(importlib.import_module(name).__file__).resolve()
-              if not module_path.is_relative_to(package_root):
-                  raise SystemExit(
-                      f"{name} resolved outside pinned distribution: {module_path}"
-                  )
-              print(f"{name}={module_path}")
-          PY
       - name: Cross-compile architecture matrix
         run: |
           set -o pipefail
@@ -272,6 +247,12 @@ jobs:
             --samples 10 \
             --stateful-sample-iters 10 \
             --output artifacts/packed-recurrent-benchmark.json
+          .venv/bin/python benchmarks/infer/wkv7/benchmark_fused_decay_recurrent.py \
+            --num-heads 32 \
+            --modes fp32io16 fp16 \
+            --warmup-iters 3 \
+            --samples 10 \
+            --output artifacts/fused-decay-recurrent-benchmark.json
       - name: Record immutable run identity
         env:
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
@@ -390,6 +371,42 @@ jobs:
                       )
                   ):
                       raise SystemExit(f"invalid StateTune RESULT identity: {row}")
+                  if path.name == "statetune-benchmark.json":
+                      training_ab = row.get("training_ab", {})
+                      unfused_trace = training_ab.get("launch_trace", {}).get(
+                          "unfused", {}
+                      )
+                      fused_trace = training_ab.get("launch_trace", {}).get(
+                          "fused", {}
+                      )
+                      if (
+                          training_ab.get("A") != "unfused_correct_product"
+                          or training_ab.get("B")
+                          != "public_raw_fused_recurrent"
+                          or not training_ab.get(
+                              "same_inputs_initial_state_loss_upstream_gradients"
+                          )
+                          or training_ab.get(
+                              "timed_transform_materialization_bytes", {}
+                          ).get("fused") != 0
+                          or unfused_trace.get(
+                              "forward_recurrent_kernel_count"
+                          ) != 1
+                          or unfused_trace.get(
+                              "backward_recurrent_kernel_count"
+                          ) != 1
+                          or fused_trace.get(
+                              "forward_recurrent_kernel_count"
+                          ) != 1
+                          or fused_trace.get(
+                              "backward_recurrent_kernel_count"
+                          ) != 1
+                          or unfused_trace.get("cuda_kernel_count", 0)
+                          <= fused_trace.get("cuda_kernel_count", 0)
+                      ):
+                          raise SystemExit(
+                              f"invalid StateTune A/B evidence: {row}"
+                          )
                   if (
                       path.name == "rl-infctx-benchmark.json"
                       and (
@@ -439,7 +456,7 @@ jobs:
               or any(row["sequence_count"] != 2048 for row in b2048)
               or any(
                   row["metadata_validation_complexity"]
-                  != "O(sequence_count + state_pool_size)"
+                  != "O(sequence_count^2) once per ticket"
                   for row in b2048
               )
           ):
@@ -472,6 +489,83 @@ jobs:
                   f"label=packed-{row['profile']}-{row['mode']} "
                   f"provider={row['provider']} mode={row['mode']} "
                   f"source_revision={packed['source']['leaf_revision']}"
+              )
+          report.extend(("```", ""))
+
+          fused_path = Path("artifacts/fused-decay-recurrent-benchmark.json")
+          fused = json.loads(fused_path.read_text())
+          required_fused_cases = {
+              "b1_t1",
+              "b320_t1",
+              "b1_t128",
+              "packed_b320_t16",
+              "ragged_b320_t1_to_t16",
+          }
+          if (
+              fused["git_revision"] != os.environ["HEAD_SHA"]
+              or {row["case"] for row in fused["results"]}
+              != required_fused_cases
+              or fused["main_comparison"]["A"] != "unfused_correct_product"
+              or fused["main_comparison"]["B"] != "fused_raw_product"
+              or not fused["main_comparison"][
+                  "same_inputs_state_mode_ticket_stream_events_and_sync"
+              ]
+              or not fused["main_comparison"][
+                  "precomputed_log_decay_is_diagnostic_only"
+              ]
+          ):
+              raise SystemExit("fused decay A/B identity is incomplete")
+          fused_identities = {
+              (row["case"], row["mode"]) for row in fused["results"]
+          }
+          expected_fused_identities = {
+              (case, mode)
+              for case in required_fused_cases
+              for mode in ("fp32io16", "fp16")
+          }
+          if fused_identities != expected_fused_identities:
+              raise SystemExit(
+                  f"fused decay mode coverage is incomplete: {fused_identities}"
+              )
+          report.extend((f"#### `{fused_path.name}`", "", "```text"))
+          for row in fused["results"]:
+              correctness = row["correctness"]
+              if (
+                  correctness["fused_output_relative_rmse"]
+                  > correctness["relative_rmse_limit"]
+                  or correctness["fused_state_relative_rmse"]
+                  > correctness["relative_rmse_limit"]
+              ):
+                  raise SystemExit(f"fused decay correctness failed: {row}")
+              unfused = row["variants"]["unfused_correct_product"]
+              fused_product = row["variants"]["fused_raw_product"]
+              diagnostic = row["variants"][
+                  "precomputed_log_decay_wkv_only_diagnostic"
+              ]
+              unfused_trace = unfused["launch_trace"]
+              fused_trace = fused_product["launch_trace"]
+              diagnostic_trace = diagnostic["launch_trace"]
+              if (
+                  unfused_trace["recurrent_kernel_count"] != 1
+                  or unfused_trace["metadata_validator_kernel_count"] != 0
+                  or unfused_trace["non_recurrent_kernel_count"] < 3
+                  or fused_trace["cuda_kernel_count"] != 1
+                  or fused_trace["recurrent_kernel_count"] != 1
+                  or fused_trace["metadata_validator_kernel_count"] != 0
+                  or fused_trace["non_recurrent_kernel_count"] != 0
+                  or diagnostic_trace["cuda_kernel_count"] != 1
+                  or diagnostic_trace["recurrent_kernel_count"] != 1
+                  or diagnostic_trace["metadata_validator_kernel_count"] != 0
+              ):
+                  raise SystemExit(f"fused decay launch gate failed: {row}")
+              report.append(
+                  f"A_B case={row['case']} B={row['batch_size']} "
+                  f"T={row['total_tokens']} mode={row['mode']} "
+                  f"unfused_p50_ms={metric(unfused['p50_ms'])} "
+                  f"fused_p50_ms={metric(fused_product['p50_ms'])} "
+                  f"speedup={metric(row['fused_speedup_over_unfused'])} "
+                  f"unfused_launches={unfused_trace['cuda_kernel_count']} "
+                  f"fused_launches={fused_trace['cuda_kernel_count']}"
               )
           report.extend(("```", ""))
           Path("artifacts/benchmark-report.md").write_text(

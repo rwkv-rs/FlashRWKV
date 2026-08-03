@@ -4,8 +4,8 @@
 
 The profile set is adapted from vllm-rwkv's canonical packed-varlen RWKV-7
 benchmark at commit 6d683f9e49a2997e405c47edc147872c8609513b. FlashRWKV
-uses explicit log-decay, canonical [K,V] state, and separate functional and
-stateful measurement boundaries.
+uses raw decay logits with the producer transform fused into the recurrent
+kernel, canonical [K,V] state, and separate functional and stateful boundaries.
 """
 
 from __future__ import annotations
@@ -24,7 +24,11 @@ from typing import Any
 
 import torch
 
-from flash_rwkv import _C, rwkv7_recurrent_stateful
+from flash_rwkv import (
+    _C,
+    prepare_recurrent_metadata,
+    rwkv7_recurrent_stateful,
+)
 
 HEAD_SIZE = 64
 PROFILE_LENGTHS: dict[str, tuple[int, ...]] = {
@@ -92,12 +96,13 @@ class ProfilePayload:
     state_indices: torch.Tensor
     initial_state: torch.Tensor
     r: torch.Tensor
-    log_decay: torch.Tensor
+    decay_logits: torch.Tensor
     k: torch.Tensor
     v: torch.Tensor
     a: torch.Tensor
     b: torch.Tensor
     output: torch.Tensor
+    validated_metadata: object
 
     @property
     def total_tokens(self) -> int:
@@ -236,16 +241,7 @@ def _make_payload(
 
     token_shape = (total_tokens, num_heads, HEAD_SIZE)
     r = normal(token_shape, 0.02).to(torch.float16)
-    log_decay = (
-        -0.05
-        - 0.15
-        * torch.rand(
-            token_shape,
-            dtype=torch.float32,
-            device="cuda",
-            generator=generator,
-        )
-    ).to(torch.float16)
+    decay_logits = normal(token_shape, 1.0).to(torch.float16)
     k = normal(token_shape, 0.02).to(torch.float16)
     v = normal(token_shape, 0.02).to(torch.float16)
     a = normal(token_shape, 0.02).to(torch.float16)
@@ -277,12 +273,18 @@ def _make_payload(
         state_indices=state_indices,
         initial_state=initial_state,
         r=r,
-        log_decay=log_decay,
+        decay_logits=decay_logits,
         k=k,
         v=v,
         a=a,
         b=b,
         output=torch.empty_like(v),
+        validated_metadata=prepare_recurrent_metadata(
+            query_start_loc,
+            state_indices,
+            total_tokens=total_tokens,
+            state_pool_size=num_slots,
+        ),
     )
 
 
@@ -316,7 +318,8 @@ def _reference(
         slots = state_indices.index_select(0, sequence_indices)
         previous_state = state_pool.index_select(0, slots)
         r = payload.r.index_select(0, token_indices).float()
-        log_decay = payload.log_decay.index_select(0, token_indices).float()
+        decay_logits = payload.decay_logits.index_select(0, token_indices).float()
+        log_decay = -0.6065306597126334 * torch.sigmoid(decay_logits)
         k = payload.k.index_select(0, token_indices).float()
         v = payload.v.index_select(0, token_indices).float()
         a = payload.a.index_select(0, token_indices).float()
@@ -346,10 +349,27 @@ def _launch(
     mode: str,
     scale: float,
 ) -> torch.Tensor:
+    return _launch_with_ticket(
+        payload,
+        state,
+        mode=mode,
+        scale=scale,
+        validated_metadata=payload.validated_metadata,
+    )
+
+
+def _launch_with_ticket(
+    payload: ProfilePayload,
+    state: torch.Tensor,
+    *,
+    mode: str,
+    scale: float,
+    validated_metadata: object,
+) -> torch.Tensor:
     return rwkv7_recurrent_stateful(
         *(tensor.unsqueeze(0) for tensor in (
             payload.r,
-            payload.log_decay,
+            payload.decay_logits,
             payload.k,
             payload.v,
             payload.a,
@@ -360,6 +380,7 @@ def _launch(
         state_indices=payload.state_indices,
         scale=scale,
         mode=mode,
+        validated_metadata=validated_metadata,
     )
 
 
@@ -555,16 +576,33 @@ def _cuda_graph_metadata_evidence(
     state = payload.initial_state.clone()
     cu_seqlens_data_ptr = payload.query_start_loc.data_ptr()
     state_indices_data_ptr = payload.state_indices.data_ptr()
-    warmup_stream = torch.cuda.Stream()
-    warmup_stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(warmup_stream):
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(capture_stream):
+        ticket = prepare_recurrent_metadata(
+            payload.query_start_loc,
+            payload.state_indices,
+            total_tokens=payload.total_tokens,
+            state_pool_size=payload.initial_state.shape[0],
+        )
         for _ in range(3):
-            _launch(payload, state, mode=mode, scale=scale)
-    torch.cuda.current_stream().wait_stream(warmup_stream)
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        captured_output = _launch(payload, state, mode=mode, scale=scale)
+            _launch_with_ticket(
+                payload,
+                state,
+                mode=mode,
+                scale=scale,
+                validated_metadata=ticket,
+            )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=capture_stream):
+            captured_output = _launch_with_ticket(
+                payload,
+                state,
+                mode=mode,
+                scale=scale,
+                validated_metadata=ticket,
+            )
+    torch.cuda.current_stream().wait_stream(capture_stream)
     graph.replay()
     torch.cuda.synchronize()
     return {
@@ -707,13 +745,14 @@ def _run_case(
         - sum(seq_lens) / (len(seq_lens) * max(seq_lens)),
         "state_slot_mapping": "reverse sequence order with seven untouched rows",
         "state_pool_size": int(payload.initial_state.shape[0]),
-        "metadata_validation_complexity": "O(sequence_count + state_pool_size)",
-        "metadata_validation_strategy": "device_slot_claim_bitmap",
+        "metadata_validation_complexity": "O(sequence_count^2) once per ticket",
+        "metadata_validation_strategy": "immutable_device_snapshot_prior_slot_scan",
         "metadata_validation_workspace_bytes": int(
-            (payload.initial_state.shape[0] + 1) * torch.int32.itemsize
+            (2 * len(seq_lens) + 2) * torch.int32.itemsize
         ),
         "metadata_host_round_trip": False,
-        "kernel_launches_per_operator": 2,
+        "metadata_prepare_kernel_launches": 1,
+        "kernel_launches_per_operator": 1,
         "seed": seed,
         "correctness": correctness,
         "device_metadata": {

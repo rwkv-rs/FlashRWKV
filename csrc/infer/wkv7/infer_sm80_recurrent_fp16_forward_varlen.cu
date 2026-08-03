@@ -4,7 +4,9 @@
 // vllm-rwkv rwkv7_wkv_fp16_v2 at commit
 // 6d683f9e49a2997e405c47edc147872c8609513b and BlinkDL/Albatross
 // faster3a_2607 at commit 63c53f4abf2cd891dd3a18c8f44f5b2cccc8c64b.
-// FlashRWKV consumes explicit log-decay and stores canonical [K,V] state.
+// FlashRWKV stores canonical [K,V] state. The product path consumes raw decay
+// logits and fuses their retention transform; an explicit log-decay path remains
+// available for compatibility and independent-oracle checks.
 
 #undef __CUDA_NO_HALF2_OPERATORS__
 #undef __CUDA_NO_HALF_CONVERSIONS__
@@ -17,11 +19,24 @@
 #include <cuda_fp16.h>
 #include <torch/extension.h>
 
+#include "../../common/wkv7/recurrent_decay.cuh"
+
 namespace {
 
 constexpr int kHeadSize = 64;
 constexpr int kHalf2HeadSize = kHeadSize / 2;
 constexpr int kHalfPerVector = sizeof(int4) / sizeof(half);
+constexpr float kTwoNegative41 = 4.547473508864641e-13f;
+constexpr uint32_t kDitherRotation = 2654435769u;
+
+using flash_rwkv::wkv7::RecurrentDecayInput;
+using flash_rwkv::wkv7::recurrent_retention;
+
+__device__ __forceinline__ float decay_dither(int phase) {
+  const uint32_t bits =
+      kDitherRotation * static_cast<uint32_t>(phase);
+  return kTwoNegative41 * static_cast<float>(static_cast<int32_t>(bits));
+}
 
 template <int Bytes>
 __device__ __forceinline__ void cp_async(
@@ -68,20 +83,20 @@ __device__ __forceinline__ void prefetch_token(
     int lane,
     int64_t token_base,
     half2* r,
-    half2* log_decay,
+    half2* decay,
     half2* k,
     half2* a,
     half2* b,
     half2* b_dummy,
     const half* r_ptr,
-    const half* log_decay_ptr,
+    const half* decay_ptr,
     const half* k_ptr,
     const half* a_ptr,
     const half* b_ptr) {
   cp_async<4>(
-      (thread < 32 ? log_decay : a) + lane,
+      (thread < 32 ? decay : a) + lane,
       reinterpret_cast<const half2*>(
-          thread < 32 ? log_decay_ptr + token_base : a_ptr + token_base) +
+          thread < 32 ? decay_ptr + token_base : a_ptr + token_base) +
           lane,
       true);
   cp_commit();
@@ -98,6 +113,7 @@ __device__ __forceinline__ void prefetch_token(
   cp_commit();
 }
 
+template <RecurrentDecayInput DecayInput, bool UseDither>
 __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
     int num_heads,
     int64_t output_elements,
@@ -106,11 +122,13 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
     const int* __restrict__ metadata_status,
     half* __restrict__ state_ptr,
     const half* __restrict__ r_ptr,
-    const half* __restrict__ log_decay_ptr,
+    const half* __restrict__ decay_ptr,
+    const half* __restrict__ decay_bias_ptr,
     const half* __restrict__ k_ptr,
     const half* __restrict__ v_ptr,
     const half* __restrict__ a_ptr,
     const half* __restrict__ b_ptr,
+    const int* __restrict__ elapsed_t_ptr,
     half* __restrict__ output_ptr,
     float scale) {
   const int head_index = static_cast<int>(blockIdx.x);
@@ -196,7 +214,7 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
       b[0],
       b_dummy,
       r_ptr,
-      log_decay_ptr,
+      decay_ptr,
       k_ptr,
       a_ptr,
       b_ptr);
@@ -218,9 +236,22 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
     const half state_dot_a = __hadd(state_dot_a2.x, state_dot_a2.y);
     const half2 state_dot_a_pair =
         __halves2half2(state_dot_a, state_dot_a);
+    float decay_input = __half2float(
+        reinterpret_cast<half*>(decay[current])[thread]);
+    if constexpr (DecayInput == RecurrentDecayInput::kDecayLogits) {
+      if (decay_bias_ptr != nullptr) {
+        decay_input += __half2float(
+            decay_bias_ptr[head_index * kHeadSize + thread]);
+      }
+    }
+    float decay_factor = recurrent_retention<DecayInput>(decay_input);
+    if constexpr (UseDither) {
+      const int phase = elapsed_t_ptr[state_slot] +
+          head_index * kHeadSize + thread + token_offset;
+      decay_factor = decay_factor - 1.0f + decay_dither(phase);
+    }
     reinterpret_cast<half*>(decay[current])[thread] =
-        __float2half_rn(expf(__half2float(
-            reinterpret_cast<half*>(decay[current])[thread])));
+        __float2half_rn(decay_factor);
 
     cp_wait<0>();
     __syncthreads();
@@ -239,7 +270,7 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
           b[current ^ 1],
           b_dummy,
           r_ptr,
-          log_decay_ptr,
+          decay_ptr,
           k_ptr,
           a_ptr,
           b_ptr);
@@ -248,10 +279,22 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
     half2 output2 = __float2half2_rn(0.0f);
 #pragma unroll
     for (int pair_index = 0; pair_index < kHalf2HeadSize; ++pair_index) {
-      half2 updated = __hmul2(state[pair_index], decay[current][pair_index]);
-      updated = __hfma2(
-          state_dot_a_pair, b[current][pair_index], updated);
-      updated = __hfma2(k[current][pair_index], value2, updated);
+      half2 updated;
+      if constexpr (UseDither) {
+        updated = __hfma2(
+            state_dot_a_pair,
+            b[current][pair_index],
+            state[pair_index]);
+        updated = __hfma2(k[current][pair_index], value2, updated);
+        updated = __hfma2(
+            state[pair_index], decay[current][pair_index], updated);
+      } else {
+        updated = __hmul2(
+            state[pair_index], decay[current][pair_index]);
+        updated = __hfma2(
+            state_dot_a_pair, b[current][pair_index], updated);
+        updated = __hfma2(k[current][pair_index], value2, updated);
+      }
       state[pair_index] = updated;
       output2 = __hfma2(updated, r[current][pair_index], output2);
     }
@@ -280,7 +323,10 @@ __global__ __launch_bounds__(kHeadSize, 2) void recurrent_fp16_kernel(
   }
 }
 
-template <int HeadSize>
+template <
+    int HeadSize,
+    RecurrentDecayInput DecayInput,
+    bool UseDither>
 __global__ __launch_bounds__(HeadSize, 1)
 void recurrent_fp16_generic_kernel(
     int num_heads,
@@ -290,11 +336,13 @@ void recurrent_fp16_generic_kernel(
     const int* __restrict__ metadata_status,
     half* __restrict__ state_ptr,
     const half* __restrict__ r_ptr,
-    const half* __restrict__ log_decay_ptr,
+    const half* __restrict__ decay_ptr,
+    const half* __restrict__ decay_bias_ptr,
     const half* __restrict__ k_ptr,
     const half* __restrict__ v_ptr,
     const half* __restrict__ a_ptr,
     const half* __restrict__ b_ptr,
+    const int* __restrict__ elapsed_t_ptr,
     half* __restrict__ output_ptr,
     float scale) {
   const int head_index = static_cast<int>(blockIdx.x);
@@ -347,8 +395,20 @@ void recurrent_fp16_generic_kernel(
             HeadSize +
         value_index;
     r[value_index] = r_ptr[input_index];
-    decay[value_index] = __float2half_rn(
-        expf(__half2float(log_decay_ptr[input_index])));
+    float decay_input = __half2float(decay_ptr[input_index]);
+    if constexpr (DecayInput == RecurrentDecayInput::kDecayLogits) {
+      if (decay_bias_ptr != nullptr) {
+        decay_input += __half2float(
+            decay_bias_ptr[head_index * HeadSize + value_index]);
+      }
+    }
+    float decay_factor = recurrent_retention<DecayInput>(decay_input);
+    if constexpr (UseDither) {
+      const int phase = elapsed_t_ptr[state_slot] +
+          head_index * HeadSize + value_index + (token_index - token_start);
+      decay_factor = decay_factor - 1.0f + decay_dither(phase);
+    }
+    decay[value_index] = __float2half_rn(decay_factor);
     k[value_index] = k_ptr[input_index];
     a[value_index] = a_ptr[input_index];
     b[value_index] = b_ptr[input_index];
@@ -367,10 +427,15 @@ void recurrent_fp16_generic_kernel(
     float output = 0.0f;
 #pragma unroll
     for (int key_index = 0; key_index < HeadSize; ++key_index) {
-      const float updated =
-          __half2float(decay[key_index]) * __half2float(state[key_index]) +
-          __half2float(b[key_index]) * state_dot_a +
+      float updated = __half2float(b[key_index]) * state_dot_a +
           __half2float(k[key_index]) * value;
+      if constexpr (UseDither) {
+        updated += __half2float(state[key_index]) *
+            (1.0f + __half2float(decay[key_index]));
+      } else {
+        updated += __half2float(decay[key_index]) *
+            __half2float(state[key_index]);
+      }
       state[key_index] = __float2half_rn(updated);
       output = fmaf(
           __half2float(r[key_index]),
@@ -389,6 +454,100 @@ void recurrent_fp16_generic_kernel(
 
 }  // namespace
 
+template <
+    flash_rwkv::wkv7::RecurrentDecayInput DecayInput,
+    bool UseDither>
+void recurrent_fp16_cuda_impl(
+    torch::Tensor query_start_loc,
+    torch::Tensor state_indices,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor decay,
+    torch::Tensor decay_bias,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor elapsed_t,
+    torch::Tensor output,
+    torch::Tensor metadata_status,
+    double scale) {
+  const c10::cuda::CUDAGuard device_guard(state.device());
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  const dim3 grid(
+      static_cast<int>(state.size(1)),
+      static_cast<int>(state_indices.numel()));
+  switch (state.size(2)) {
+    case 64:
+      recurrent_fp16_kernel<DecayInput, UseDither>
+          <<<grid, kHeadSize, 0, stream>>>(
+          static_cast<int>(state.size(1)),
+          output.numel(),
+          query_start_loc.data_ptr<int>(),
+          state_indices.data_ptr<int>(),
+          metadata_status.data_ptr<int>(),
+          reinterpret_cast<half*>(state.data_ptr()),
+          reinterpret_cast<const half*>(r.data_ptr()),
+          reinterpret_cast<const half*>(decay.data_ptr()),
+          decay_bias.defined()
+              ? reinterpret_cast<const half*>(decay_bias.data_ptr())
+              : nullptr,
+          reinterpret_cast<const half*>(k.data_ptr()),
+          reinterpret_cast<const half*>(v.data_ptr()),
+          reinterpret_cast<const half*>(a.data_ptr()),
+          reinterpret_cast<const half*>(b.data_ptr()),
+          elapsed_t.defined() ? elapsed_t.data_ptr<int>() : nullptr,
+          reinterpret_cast<half*>(output.data_ptr()),
+          static_cast<float>(scale));
+      break;
+    case 128:
+      recurrent_fp16_generic_kernel<128, DecayInput, UseDither>
+          <<<grid, 128, 0, stream>>>(
+          static_cast<int>(state.size(1)),
+          output.numel(),
+          query_start_loc.data_ptr<int>(),
+          state_indices.data_ptr<int>(),
+          metadata_status.data_ptr<int>(),
+          reinterpret_cast<half*>(state.data_ptr()),
+          reinterpret_cast<const half*>(r.data_ptr()),
+          reinterpret_cast<const half*>(decay.data_ptr()),
+          decay_bias.defined()
+              ? reinterpret_cast<const half*>(decay_bias.data_ptr())
+              : nullptr,
+          reinterpret_cast<const half*>(k.data_ptr()),
+          reinterpret_cast<const half*>(v.data_ptr()),
+          reinterpret_cast<const half*>(a.data_ptr()),
+          reinterpret_cast<const half*>(b.data_ptr()),
+          elapsed_t.defined() ? elapsed_t.data_ptr<int>() : nullptr,
+          reinterpret_cast<half*>(output.data_ptr()),
+          static_cast<float>(scale));
+      break;
+    case 256:
+      recurrent_fp16_generic_kernel<256, DecayInput, UseDither>
+          <<<grid, 256, 0, stream>>>(
+          static_cast<int>(state.size(1)),
+          output.numel(),
+          query_start_loc.data_ptr<int>(),
+          state_indices.data_ptr<int>(),
+          metadata_status.data_ptr<int>(),
+          reinterpret_cast<half*>(state.data_ptr()),
+          reinterpret_cast<const half*>(r.data_ptr()),
+          reinterpret_cast<const half*>(decay.data_ptr()),
+          decay_bias.defined()
+              ? reinterpret_cast<const half*>(decay_bias.data_ptr())
+              : nullptr,
+          reinterpret_cast<const half*>(k.data_ptr()),
+          reinterpret_cast<const half*>(v.data_ptr()),
+          reinterpret_cast<const half*>(a.data_ptr()),
+          reinterpret_cast<const half*>(b.data_ptr()),
+          elapsed_t.defined() ? elapsed_t.data_ptr<int>() : nullptr,
+          reinterpret_cast<half*>(output.data_ptr()),
+          static_cast<float>(scale));
+      break;
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void recurrent_fp16_cuda(
     torch::Tensor query_start_loc,
     torch::Tensor state_indices,
@@ -402,63 +561,36 @@ void recurrent_fp16_cuda(
     torch::Tensor output,
     torch::Tensor metadata_status,
     double scale) {
-  const c10::cuda::CUDAGuard device_guard(state.device());
-  const auto stream = at::cuda::getCurrentCUDAStream();
-  const dim3 grid(
-      static_cast<int>(state.size(1)),
-      static_cast<int>(state_indices.numel()));
-  switch (state.size(2)) {
-    case 64:
-      recurrent_fp16_kernel<<<grid, kHeadSize, 0, stream>>>(
-          static_cast<int>(state.size(1)),
-          output.numel(),
-          query_start_loc.data_ptr<int>(),
-          state_indices.data_ptr<int>(),
-          metadata_status.data_ptr<int>(),
-          reinterpret_cast<half*>(state.data_ptr()),
-          reinterpret_cast<const half*>(r.data_ptr()),
-          reinterpret_cast<const half*>(log_decay.data_ptr()),
-          reinterpret_cast<const half*>(k.data_ptr()),
-          reinterpret_cast<const half*>(v.data_ptr()),
-          reinterpret_cast<const half*>(a.data_ptr()),
-          reinterpret_cast<const half*>(b.data_ptr()),
-          reinterpret_cast<half*>(output.data_ptr()),
-          static_cast<float>(scale));
-      break;
-    case 128:
-      recurrent_fp16_generic_kernel<128><<<grid, 128, 0, stream>>>(
-          static_cast<int>(state.size(1)),
-          output.numel(),
-          query_start_loc.data_ptr<int>(),
-          state_indices.data_ptr<int>(),
-          metadata_status.data_ptr<int>(),
-          reinterpret_cast<half*>(state.data_ptr()),
-          reinterpret_cast<const half*>(r.data_ptr()),
-          reinterpret_cast<const half*>(log_decay.data_ptr()),
-          reinterpret_cast<const half*>(k.data_ptr()),
-          reinterpret_cast<const half*>(v.data_ptr()),
-          reinterpret_cast<const half*>(a.data_ptr()),
-          reinterpret_cast<const half*>(b.data_ptr()),
-          reinterpret_cast<half*>(output.data_ptr()),
-          static_cast<float>(scale));
-      break;
-    case 256:
-      recurrent_fp16_generic_kernel<256><<<grid, 256, 0, stream>>>(
-          static_cast<int>(state.size(1)),
-          output.numel(),
-          query_start_loc.data_ptr<int>(),
-          state_indices.data_ptr<int>(),
-          metadata_status.data_ptr<int>(),
-          reinterpret_cast<half*>(state.data_ptr()),
-          reinterpret_cast<const half*>(r.data_ptr()),
-          reinterpret_cast<const half*>(log_decay.data_ptr()),
-          reinterpret_cast<const half*>(k.data_ptr()),
-          reinterpret_cast<const half*>(v.data_ptr()),
-          reinterpret_cast<const half*>(a.data_ptr()),
-          reinterpret_cast<const half*>(b.data_ptr()),
-          reinterpret_cast<half*>(output.data_ptr()),
-          static_cast<float>(scale));
-      break;
+  recurrent_fp16_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kLogDecay, false>(
+      query_start_loc, state_indices, state, r, log_decay, torch::Tensor(),
+      k, v, a, b, torch::Tensor(), output, metadata_status, scale);
+}
+
+void recurrent_fp16_from_decay_logits_cuda(
+    torch::Tensor query_start_loc,
+    torch::Tensor state_indices,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor decay_bias,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor elapsed_t,
+    torch::Tensor output,
+    torch::Tensor metadata_status,
+    double scale) {
+  if (elapsed_t.defined()) {
+    recurrent_fp16_cuda_impl<
+        flash_rwkv::wkv7::RecurrentDecayInput::kDecayLogits, true>(
+        query_start_loc, state_indices, state, r, decay_logits, decay_bias,
+        k, v, a, b, elapsed_t, output, metadata_status, scale);
+  } else {
+    recurrent_fp16_cuda_impl<
+        flash_rwkv::wkv7::RecurrentDecayInput::kDecayLogits, false>(
+        query_start_loc, state_indices, state, r, decay_logits, decay_bias,
+        k, v, a, b, elapsed_t, output, metadata_status, scale);
   }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

@@ -2,8 +2,9 @@
 // Recurrent checkpoint forward adapted from BlinkDL/RWKV-LM
 // RWKV-v7/train_temp/cuda/wkv7_cuda.cu at commit
 // 952102498e9ed367ea0a59ee64106916d474d30f.
-// Modified for canonical log-decay, FP16/BF16 token I/O, a non-zero FP32
-// initial state, final state output, explicit scale, and tail chunks.
+// Modified for canonical log-decay or fused raw decay logits, FP16/BF16 token
+// I/O, a non-zero FP32 initial state, final state output, explicit scale, and
+// tail chunks.
 
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
@@ -12,7 +13,12 @@
 #include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
 
+#include "recurrent_decay.cuh"
+
 namespace {
+
+using flash_rwkv::wkv7::RecurrentDecayInput;
+using flash_rwkv::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -24,7 +30,7 @@ __device__ __forceinline__ io_t from_float(float value) {
   return static_cast<io_t>(value);
 }
 
-template <int HeadSize, typename io_t>
+template <int HeadSize, typename io_t, RecurrentDecayInput DecayInput>
 __global__ __launch_bounds__(HeadSize, 1)
 void recurrent_common_fp32io16_forward_kernel(
     int num_heads,
@@ -33,7 +39,7 @@ void recurrent_common_fp32io16_forward_kernel(
     const int* __restrict__ chunk_token_ends,
     float* __restrict__ state_ptr,
     const io_t* __restrict__ r_ptr,
-    const io_t* __restrict__ log_decay_ptr,
+    const io_t* __restrict__ decay_ptr,
     const io_t* __restrict__ k_ptr,
     const io_t* __restrict__ v_ptr,
     const io_t* __restrict__ a_ptr,
@@ -87,8 +93,8 @@ void recurrent_common_fp32io16_forward_kernel(
               HeadSize +
           value_index;
       r[value_index] = to_float(r_ptr[input_index]);
-      decay[value_index] =
-          expf(to_float(log_decay_ptr[input_index]));
+      decay[value_index] = recurrent_retention<DecayInput>(
+          to_float(decay_ptr[input_index]));
       k[value_index] = to_float(k_ptr[input_index]);
       a[value_index] = to_float(a_ptr[input_index]);
       b[value_index] = to_float(b_ptr[input_index]);
@@ -124,7 +130,7 @@ void recurrent_common_fp32io16_forward_kernel(
   }
 }
 
-template <int HeadSize, typename io_t>
+template <int HeadSize, typename io_t, RecurrentDecayInput DecayInput>
 void launch_recurrent_common_fp32io16_forward(
     int num_sequences,
     int num_heads,
@@ -133,7 +139,7 @@ void launch_recurrent_common_fp32io16_forward(
     const torch::Tensor& chunk_token_ends,
     torch::Tensor& state,
     const torch::Tensor& r,
-    const torch::Tensor& log_decay,
+    const torch::Tensor& decay,
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& a,
@@ -143,7 +149,7 @@ void launch_recurrent_common_fp32io16_forward(
     torch::Tensor& state_dot_a,
     float scale,
     cudaStream_t stream) {
-  recurrent_common_fp32io16_forward_kernel<HeadSize, io_t>
+  recurrent_common_fp32io16_forward_kernel<HeadSize, io_t, DecayInput>
       <<<dim3(num_heads, num_sequences), HeadSize, 0, stream>>>(
           num_heads,
           sequence_chunk_offsets.data_ptr<int>(),
@@ -151,7 +157,7 @@ void launch_recurrent_common_fp32io16_forward(
           chunk_token_ends.data_ptr<int>(),
           state.data_ptr<float>(),
           r.data_ptr<io_t>(),
-          log_decay.data_ptr<io_t>(),
+          decay.data_ptr<io_t>(),
           k.data_ptr<io_t>(),
           v.data_ptr<io_t>(),
           a.data_ptr<io_t>(),
@@ -164,13 +170,14 @@ void launch_recurrent_common_fp32io16_forward(
 
 }  // namespace
 
-void recurrent_common_fp32io16_forward_cuda(
+template <flash_rwkv::wkv7::RecurrentDecayInput DecayInput>
+void recurrent_common_fp32io16_forward_cuda_impl(
     torch::Tensor sequence_chunk_offsets,
     torch::Tensor chunk_token_starts,
     torch::Tensor chunk_token_ends,
     torch::Tensor state,
     torch::Tensor r,
-    torch::Tensor log_decay,
+    torch::Tensor decay,
     torch::Tensor k,
     torch::Tensor v,
     torch::Tensor a,
@@ -193,27 +200,72 @@ void recurrent_common_fp32io16_forward_cuda(
       [&] {
         switch (state.size(2)) {
           case 64:
-            launch_recurrent_common_fp32io16_forward<64, scalar_t>(
+            launch_recurrent_common_fp32io16_forward<
+                64, scalar_t, DecayInput>(
                 num_sequences, num_heads, sequence_chunk_offsets,
-                chunk_token_starts, chunk_token_ends, state, r, log_decay,
+                chunk_token_starts, chunk_token_ends, state, r, decay,
                 k, v, a, b, output, boundary, state_dot_a,
                 static_cast<float>(scale), stream);
             break;
           case 128:
-            launch_recurrent_common_fp32io16_forward<128, scalar_t>(
+            launch_recurrent_common_fp32io16_forward<
+                128, scalar_t, DecayInput>(
                 num_sequences, num_heads, sequence_chunk_offsets,
-                chunk_token_starts, chunk_token_ends, state, r, log_decay,
+                chunk_token_starts, chunk_token_ends, state, r, decay,
                 k, v, a, b, output, boundary, state_dot_a,
                 static_cast<float>(scale), stream);
             break;
           case 256:
-            launch_recurrent_common_fp32io16_forward<256, scalar_t>(
+            launch_recurrent_common_fp32io16_forward<
+                256, scalar_t, DecayInput>(
                 num_sequences, num_heads, sequence_chunk_offsets,
-                chunk_token_starts, chunk_token_ends, state, r, log_decay,
+                chunk_token_starts, chunk_token_ends, state, r, decay,
                 k, v, a, b, output, boundary, state_dot_a,
                 static_cast<float>(scale), stream);
             break;
         }
       });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void recurrent_common_fp32io16_forward_cuda(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor boundary,
+    torch::Tensor state_dot_a,
+    double scale) {
+  recurrent_common_fp32io16_forward_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kLogDecay>(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends, state, r,
+      log_decay, k, v, a, b, output, boundary, state_dot_a, scale);
+}
+
+void recurrent_common_fp32io16_from_decay_logits_forward_cuda(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor boundary,
+    torch::Tensor state_dot_a,
+    double scale) {
+  recurrent_common_fp32io16_forward_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kDecayLogits>(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends, state, r,
+      decay_logits, k, v, a, b, output, boundary, state_dot_a, scale);
 }

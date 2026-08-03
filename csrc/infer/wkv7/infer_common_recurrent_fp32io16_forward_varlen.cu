@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 // Adapted from vllm-rwkv rwkv7_wkv_fp32_v2 at commit
 // 6d683f9e49a2997e405c47edc147872c8609513b. The state load/store and update
-// are transposed to FlashRWKV's canonical [K,V] layout, and the kernel consumes
-// explicit log-decay rather than model-fused decay logits.
+// are transposed to FlashRWKV's canonical [K,V] layout. Product entry points
+// consume raw decay logits and fuse the retention transform; a private
+// canonical-log-decay specialization remains for independent A/B checks.
 
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
@@ -11,6 +12,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
+
+#include "../../common/wkv7/recurrent_decay.cuh"
 
 namespace {
 
@@ -24,7 +27,10 @@ __device__ __forceinline__ io_t from_float(float value) {
   return static_cast<io_t>(value);
 }
 
-template <int HeadSize, typename io_t>
+using flash_rwkv::wkv7::RecurrentDecayInput;
+using flash_rwkv::wkv7::recurrent_retention;
+
+template <int HeadSize, typename io_t, RecurrentDecayInput DecayInput>
 __global__ __launch_bounds__(HeadSize, HeadSize == 64 ? 2 : 1)
 void recurrent_fp32_kernel(
     int num_heads,
@@ -34,7 +40,8 @@ void recurrent_fp32_kernel(
     const int* __restrict__ metadata_status,
     float* __restrict__ state_ptr,
     const io_t* __restrict__ r_ptr,
-    const io_t* __restrict__ log_decay_ptr,
+    const io_t* __restrict__ decay_ptr,
+    const io_t* __restrict__ decay_bias_ptr,
     const io_t* __restrict__ k_ptr,
     const io_t* __restrict__ v_ptr,
     const io_t* __restrict__ a_ptr,
@@ -91,7 +98,14 @@ void recurrent_fp32_kernel(
             HeadSize +
         value_index;
     r[value_index] = to_float(r_ptr[input_index]);
-    decay[value_index] = expf(to_float(log_decay_ptr[input_index]));
+    float decay_input = to_float(decay_ptr[input_index]);
+    if constexpr (DecayInput == RecurrentDecayInput::kDecayLogits) {
+      if (decay_bias_ptr != nullptr) {
+        decay_input += to_float(
+            decay_bias_ptr[head_index * HeadSize + value_index]);
+      }
+    }
+    decay[value_index] = recurrent_retention<DecayInput>(decay_input);
     k[value_index] = to_float(k_ptr[input_index]);
     a[value_index] = to_float(a_ptr[input_index]);
     b[value_index] = to_float(b_ptr[input_index]);
@@ -124,7 +138,7 @@ void recurrent_fp32_kernel(
   }
 }
 
-template <int HeadSize, typename io_t>
+template <int HeadSize, typename io_t, RecurrentDecayInput DecayInput>
 void launch_recurrent_fp32(
     int num_sequences,
     int num_heads,
@@ -132,7 +146,8 @@ void launch_recurrent_fp32(
     const torch::Tensor& state_indices,
     torch::Tensor& state,
     const torch::Tensor& r,
-    const torch::Tensor& log_decay,
+    const torch::Tensor& decay,
+    const torch::Tensor& decay_bias,
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& a,
@@ -141,7 +156,7 @@ void launch_recurrent_fp32(
     const torch::Tensor& metadata_status,
     float scale,
     cudaStream_t stream) {
-  recurrent_fp32_kernel<HeadSize, io_t>
+  recurrent_fp32_kernel<HeadSize, io_t, DecayInput>
       <<<dim3(num_heads, num_sequences), dim3(HeadSize), 0, stream>>>(
           num_heads,
           output.numel(),
@@ -150,7 +165,8 @@ void launch_recurrent_fp32(
           metadata_status.data_ptr<int>(),
           state.data_ptr<float>(),
           r.data_ptr<io_t>(),
-          log_decay.data_ptr<io_t>(),
+          decay.data_ptr<io_t>(),
+          decay_bias.defined() ? decay_bias.data_ptr<io_t>() : nullptr,
           k.data_ptr<io_t>(),
           v.data_ptr<io_t>(),
           a.data_ptr<io_t>(),
@@ -161,12 +177,14 @@ void launch_recurrent_fp32(
 
 }  // namespace
 
-void recurrent_fp32_cuda(
+template <flash_rwkv::wkv7::RecurrentDecayInput DecayInput>
+void recurrent_fp32_cuda_impl(
     torch::Tensor query_start_loc,
     torch::Tensor state_indices,
     torch::Tensor state,
     torch::Tensor r,
-    torch::Tensor log_decay,
+    torch::Tensor decay,
+    torch::Tensor decay_bias,
     torch::Tensor k,
     torch::Tensor v,
     torch::Tensor a,
@@ -187,24 +205,66 @@ void recurrent_fp32_cuda(
       [&] {
         switch (state.size(2)) {
           case 64:
-            launch_recurrent_fp32<64, scalar_t>(
+            launch_recurrent_fp32<64, scalar_t, DecayInput>(
                 num_sequences, num_heads, query_start_loc, state_indices,
-                state, r, log_decay, k, v, a, b, output, metadata_status,
+                state, r, decay, decay_bias, k, v, a, b, output,
+                metadata_status,
                 static_cast<float>(scale), stream);
             break;
           case 128:
-            launch_recurrent_fp32<128, scalar_t>(
+            launch_recurrent_fp32<128, scalar_t, DecayInput>(
                 num_sequences, num_heads, query_start_loc, state_indices,
-                state, r, log_decay, k, v, a, b, output, metadata_status,
+                state, r, decay, decay_bias, k, v, a, b, output,
+                metadata_status,
                 static_cast<float>(scale), stream);
             break;
           case 256:
-            launch_recurrent_fp32<256, scalar_t>(
+            launch_recurrent_fp32<256, scalar_t, DecayInput>(
                 num_sequences, num_heads, query_start_loc, state_indices,
-                state, r, log_decay, k, v, a, b, output, metadata_status,
+                state, r, decay, decay_bias, k, v, a, b, output,
+                metadata_status,
                 static_cast<float>(scale), stream);
             break;
         }
       });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void recurrent_fp32_cuda(
+    torch::Tensor query_start_loc,
+    torch::Tensor state_indices,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor metadata_status,
+    double scale) {
+  recurrent_fp32_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kLogDecay>(
+      query_start_loc, state_indices, state, r, log_decay, torch::Tensor(),
+      k, v, a, b, output, metadata_status, scale);
+}
+
+void recurrent_fp32_from_decay_logits_cuda(
+    torch::Tensor query_start_loc,
+    torch::Tensor state_indices,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor decay_bias,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor metadata_status,
+    double scale) {
+  recurrent_fp32_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kDecayLogits>(
+      query_start_loc, state_indices, state, r, decay_logits, decay_bias, k,
+      v, a, b, output, metadata_status, scale);
 }

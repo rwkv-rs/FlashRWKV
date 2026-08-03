@@ -2,8 +2,9 @@
 // Chunk checkpoint/backstepping adapted from BlinkDL/RWKV-LM
 // RWKV-v7/train_temp/cuda/wkv7_cuda.cu at commit
 // 952102498e9ed367ea0a59ee64106916d474d30f.
-// Modified for canonical log_decay inputs, FP16/BF16/FP32 token I/O,
-// final-state upstream gradients, partial gradient outputs, and tail chunks.
+// Modified for canonical log_decay or fused raw decay_logits inputs,
+// FP16/BF16/FP32 token I/O, final-state upstream gradients, partial gradient
+// outputs, and tail chunks.
 
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
@@ -12,9 +13,15 @@
 #include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
 
+#include "recurrent_decay.cuh"
+
 namespace {
 
 constexpr int kHeadSize = 64;
+
+using flash_rwkv::wkv7::log_decay_derivative_from_logits;
+using flash_rwkv::wkv7::RecurrentDecayInput;
+using flash_rwkv::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -40,7 +47,7 @@ struct BackwardShared {
   float adjoint[kHeadSize][kHeadSize];
 };
 
-template <typename io_t>
+template <typename io_t, RecurrentDecayInput DecayInput>
 __global__ __launch_bounds__(kHeadSize, 1)
 void recurrent_common_fp32io16_backward_kernel(
     int num_heads,
@@ -49,7 +56,7 @@ void recurrent_common_fp32io16_backward_kernel(
     const int* __restrict__ chunk_token_ends,
     const float* __restrict__ final_state_ptr,
     const io_t* __restrict__ r_ptr,
-    const io_t* __restrict__ log_decay_ptr,
+    const io_t* __restrict__ decay_ptr,
     const io_t* __restrict__ k_ptr,
     const io_t* __restrict__ v_ptr,
     const io_t* __restrict__ a_ptr,
@@ -59,7 +66,7 @@ void recurrent_common_fp32io16_backward_kernel(
     const float* __restrict__ grad_final_state_ptr,
     const float* __restrict__ boundary_ptr,
     io_t* __restrict__ grad_r_ptr,
-    io_t* __restrict__ grad_log_decay_ptr,
+    io_t* __restrict__ grad_decay_ptr,
     io_t* __restrict__ grad_k_ptr,
     io_t* __restrict__ grad_v_ptr,
     io_t* __restrict__ grad_a_ptr,
@@ -117,8 +124,8 @@ void recurrent_common_fp32io16_backward_kernel(
               kHeadSize +
           value_index;
       shared.r[value_index] = to_float(r_ptr[input_index]);
-      shared.decay[value_index] =
-          expf(to_float(log_decay_ptr[input_index]));
+      shared.decay[value_index] = recurrent_retention<DecayInput>(
+          to_float(decay_ptr[input_index]));
       shared.k[value_index] = to_float(k_ptr[input_index]);
       shared.v[value_index] = to_float(v_ptr[input_index]);
       shared.a[value_index] = to_float(a_ptr[input_index]);
@@ -209,9 +216,12 @@ void recurrent_common_fp32io16_backward_kernel(
       if (grad_r_ptr != nullptr) {
         grad_r_ptr[input_index] = from_float<io_t>(scale * grad_r);
       }
-      if (grad_log_decay_ptr != nullptr) {
-        grad_log_decay_ptr[input_index] =
-            from_float<io_t>(grad_log_decay);
+      if (grad_decay_ptr != nullptr) {
+        if constexpr (DecayInput == RecurrentDecayInput::kDecayLogits) {
+          grad_log_decay *= log_decay_derivative_from_logits(
+              to_float(decay_ptr[input_index]));
+        }
+        grad_decay_ptr[input_index] = from_float<io_t>(grad_log_decay);
       }
       if (grad_k_ptr != nullptr) {
         grad_k_ptr[input_index] = from_float<io_t>(grad_k);
@@ -307,7 +317,10 @@ __device__ __forceinline__ Reduction3 block_sum3(
   return Reduction3{scratch[0][0], scratch[1][0], scratch[2][0]};
 }
 
-template <int HeadSize, typename io_t>
+template <
+    int HeadSize,
+    typename io_t,
+    RecurrentDecayInput DecayInput>
 __global__ __launch_bounds__(HeadSize, 1)
 void recurrent_common_fp32io16_backward_large_kernel(
     int num_heads,
@@ -316,7 +329,7 @@ void recurrent_common_fp32io16_backward_large_kernel(
     const int* __restrict__ chunk_token_ends,
     const float* __restrict__ final_state_ptr,
     const io_t* __restrict__ r_ptr,
-    const io_t* __restrict__ log_decay_ptr,
+    const io_t* __restrict__ decay_ptr,
     const io_t* __restrict__ k_ptr,
     const io_t* __restrict__ v_ptr,
     const io_t* __restrict__ a_ptr,
@@ -326,7 +339,7 @@ void recurrent_common_fp32io16_backward_large_kernel(
     const float* __restrict__ grad_final_state_ptr,
     const float* __restrict__ boundary_ptr,
     io_t* __restrict__ grad_r_ptr,
-    io_t* __restrict__ grad_log_decay_ptr,
+    io_t* __restrict__ grad_decay_ptr,
     io_t* __restrict__ grad_k_ptr,
     io_t* __restrict__ grad_v_ptr,
     io_t* __restrict__ grad_a_ptr,
@@ -382,8 +395,8 @@ void recurrent_common_fp32io16_backward_large_kernel(
           HeadSize;
       const int64_t input_index = input_base + value_index;
       shared.r[value_index] = to_float(r_ptr[input_index]);
-      shared.decay[value_index] =
-          expf(to_float(log_decay_ptr[input_index]));
+      shared.decay[value_index] = recurrent_retention<DecayInput>(
+          to_float(decay_ptr[input_index]));
       shared.k[value_index] = to_float(k_ptr[input_index]);
       shared.v[value_index] = to_float(v_ptr[input_index]);
       shared.a[value_index] = to_float(a_ptr[input_index]);
@@ -459,10 +472,14 @@ void recurrent_common_fp32io16_backward_large_kernel(
             },
             shared.reduction);
         if (value_index == 0) {
-          if (grad_log_decay_ptr != nullptr) {
-            grad_log_decay_ptr[input_base + key_index] =
-                from_float<io_t>(
-                    gradients.x * shared.decay[key_index]);
+          if (grad_decay_ptr != nullptr) {
+            float grad_decay = gradients.x * shared.decay[key_index];
+            if constexpr (DecayInput == RecurrentDecayInput::kDecayLogits) {
+              grad_decay *= log_decay_derivative_from_logits(to_float(
+                  decay_ptr[input_base + key_index]));
+            }
+            grad_decay_ptr[input_base + key_index] =
+                from_float<io_t>(grad_decay);
           }
           if (grad_a_ptr != nullptr) {
             grad_a_ptr[input_base + key_index] =
@@ -492,7 +509,7 @@ void recurrent_common_fp32io16_backward_large_kernel(
   }
 }
 
-template <int HeadSize, typename io_t>
+template <int HeadSize, typename io_t, RecurrentDecayInput DecayInput>
 void launch_recurrent_common_fp32io16_backward(
     int num_sequences,
     int num_heads,
@@ -501,7 +518,7 @@ void launch_recurrent_common_fp32io16_backward(
     const torch::Tensor& chunk_token_ends,
     const torch::Tensor& final_state,
     const torch::Tensor& r,
-    const torch::Tensor& log_decay,
+    const torch::Tensor& decay,
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& a,
@@ -511,7 +528,7 @@ void launch_recurrent_common_fp32io16_backward(
     const torch::Tensor& grad_final_state,
     const torch::Tensor& boundary,
     torch::Tensor& grad_r,
-    torch::Tensor& grad_log_decay,
+    torch::Tensor& grad_decay,
     torch::Tensor& grad_k,
     torch::Tensor& grad_v,
     torch::Tensor& grad_a,
@@ -520,7 +537,7 @@ void launch_recurrent_common_fp32io16_backward(
     float scale,
     cudaStream_t stream) {
   if constexpr (HeadSize == kHeadSize) {
-    recurrent_common_fp32io16_backward_kernel<io_t>
+    recurrent_common_fp32io16_backward_kernel<io_t, DecayInput>
         <<<dim3(num_heads, num_sequences), HeadSize, 0, stream>>>(
             num_heads,
             sequence_chunk_offsets.data_ptr<int>(),
@@ -528,7 +545,7 @@ void launch_recurrent_common_fp32io16_backward(
             chunk_token_ends.data_ptr<int>(),
             final_state.data_ptr<float>(),
             r.data_ptr<io_t>(),
-            log_decay.data_ptr<io_t>(),
+            decay.data_ptr<io_t>(),
             k.data_ptr<io_t>(),
             v.data_ptr<io_t>(),
             a.data_ptr<io_t>(),
@@ -540,8 +557,8 @@ void launch_recurrent_common_fp32io16_backward(
                 : nullptr,
             boundary.data_ptr<float>(),
             grad_r.defined() ? grad_r.data_ptr<io_t>() : nullptr,
-            grad_log_decay.defined()
-                ? grad_log_decay.data_ptr<io_t>()
+            grad_decay.defined()
+                ? grad_decay.data_ptr<io_t>()
                 : nullptr,
             grad_k.defined() ? grad_k.data_ptr<io_t>() : nullptr,
             grad_v.defined() ? grad_v.data_ptr<io_t>() : nullptr,
@@ -552,7 +569,8 @@ void launch_recurrent_common_fp32io16_backward(
                 : nullptr,
             scale);
   } else {
-    recurrent_common_fp32io16_backward_large_kernel<HeadSize, io_t>
+    recurrent_common_fp32io16_backward_large_kernel<
+        HeadSize, io_t, DecayInput>
         <<<dim3(num_heads, num_sequences), HeadSize, 0, stream>>>(
             num_heads,
             sequence_chunk_offsets.data_ptr<int>(),
@@ -560,7 +578,7 @@ void launch_recurrent_common_fp32io16_backward(
             chunk_token_ends.data_ptr<int>(),
             final_state.data_ptr<float>(),
             r.data_ptr<io_t>(),
-            log_decay.data_ptr<io_t>(),
+            decay.data_ptr<io_t>(),
             k.data_ptr<io_t>(),
             v.data_ptr<io_t>(),
             a.data_ptr<io_t>(),
@@ -572,8 +590,8 @@ void launch_recurrent_common_fp32io16_backward(
                 : nullptr,
             boundary.data_ptr<float>(),
             grad_r.defined() ? grad_r.data_ptr<io_t>() : nullptr,
-            grad_log_decay.defined()
-                ? grad_log_decay.data_ptr<io_t>()
+            grad_decay.defined()
+                ? grad_decay.data_ptr<io_t>()
                 : nullptr,
             grad_k.defined() ? grad_k.data_ptr<io_t>() : nullptr,
             grad_v.defined() ? grad_v.data_ptr<io_t>() : nullptr,
@@ -587,6 +605,86 @@ void launch_recurrent_common_fp32io16_backward(
 }
 
 }  // namespace
+
+template <flash_rwkv::wkv7::RecurrentDecayInput DecayInput>
+void recurrent_common_fp32io16_backward_cuda_impl(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor final_state,
+    torch::Tensor r,
+    torch::Tensor decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor state_dot_a,
+    torch::Tensor grad_output,
+    torch::Tensor grad_final_state,
+    torch::Tensor boundary,
+    torch::Tensor grad_r,
+    torch::Tensor grad_decay,
+    torch::Tensor grad_k,
+    torch::Tensor grad_v,
+    torch::Tensor grad_a,
+    torch::Tensor grad_b,
+    torch::Tensor grad_initial_state,
+    double scale) {
+  const c10::cuda::CUDAGuard device_guard(final_state.device());
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  const int num_sequences =
+      static_cast<int>(sequence_chunk_offsets.numel() - 1);
+  const int num_heads = static_cast<int>(final_state.size(1));
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      r.scalar_type(),
+      "flash_rwkv_recurrent_common_fp32io16_backward",
+      [&] {
+        const auto launch = [&]<int HeadSize>() {
+          launch_recurrent_common_fp32io16_backward<
+              HeadSize, scalar_t, DecayInput>(
+              num_sequences,
+              num_heads,
+              sequence_chunk_offsets,
+              chunk_token_starts,
+              chunk_token_ends,
+              final_state,
+              r,
+              decay,
+              k,
+              v,
+              a,
+              b,
+              state_dot_a,
+              grad_output,
+              grad_final_state,
+              boundary,
+              grad_r,
+              grad_decay,
+              grad_k,
+              grad_v,
+              grad_a,
+              grad_b,
+              grad_initial_state,
+              static_cast<float>(scale),
+              stream);
+        };
+        switch (final_state.size(2)) {
+          case 64:
+            launch.template operator()<64>();
+            break;
+          case 128:
+            launch.template operator()<128>();
+            break;
+          case 256:
+            launch.template operator()<256>();
+            break;
+        }
+      });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 void recurrent_common_fp32io16_backward_cuda(
     torch::Tensor sequence_chunk_offsets,
@@ -611,57 +709,41 @@ void recurrent_common_fp32io16_backward_cuda(
     torch::Tensor grad_b,
     torch::Tensor grad_initial_state,
     double scale) {
-  const c10::cuda::CUDAGuard device_guard(final_state.device());
-  const auto stream = at::cuda::getCurrentCUDAStream();
-  const int num_sequences =
-      static_cast<int>(sequence_chunk_offsets.numel() - 1);
-  const int num_heads = static_cast<int>(final_state.size(1));
+  recurrent_common_fp32io16_backward_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kLogDecay>(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends,
+      final_state, r, log_decay, k, v, a, b, state_dot_a, grad_output,
+      grad_final_state, boundary, grad_r, grad_log_decay, grad_k, grad_v,
+      grad_a, grad_b, grad_initial_state, scale);
+}
 
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      at::ScalarType::Half,
-      at::ScalarType::BFloat16,
-      r.scalar_type(),
-      "flash_rwkv_recurrent_common_fp32io16_backward",
-      [&] {
-        const auto launch = [&]<int HeadSize>() {
-          launch_recurrent_common_fp32io16_backward<HeadSize, scalar_t>(
-              num_sequences,
-              num_heads,
-              sequence_chunk_offsets,
-              chunk_token_starts,
-              chunk_token_ends,
-              final_state,
-              r,
-              log_decay,
-              k,
-              v,
-              a,
-              b,
-              state_dot_a,
-              grad_output,
-              grad_final_state,
-              boundary,
-              grad_r,
-              grad_log_decay,
-              grad_k,
-              grad_v,
-              grad_a,
-              grad_b,
-              grad_initial_state,
-              static_cast<float>(scale),
-              stream);
-        };
-        switch (final_state.size(2)) {
-          case 64:
-            launch.template operator()<64>();
-            break;
-          case 128:
-            launch.template operator()<128>();
-            break;
-          case 256:
-            launch.template operator()<256>();
-            break;
-        }
-      });
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+void recurrent_common_fp32io16_from_decay_logits_backward_cuda(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor final_state,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor state_dot_a,
+    torch::Tensor grad_output,
+    torch::Tensor grad_final_state,
+    torch::Tensor boundary,
+    torch::Tensor grad_r,
+    torch::Tensor grad_decay_logits,
+    torch::Tensor grad_k,
+    torch::Tensor grad_v,
+    torch::Tensor grad_a,
+    torch::Tensor grad_b,
+    torch::Tensor grad_initial_state,
+    double scale) {
+  recurrent_common_fp32io16_backward_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kDecayLogits>(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends,
+      final_state, r, decay_logits, k, v, a, b, state_dot_a, grad_output,
+      grad_final_state, boundary, grad_r, grad_decay_logits, grad_k, grad_v,
+      grad_a, grad_b, grad_initial_state, scale);
 }

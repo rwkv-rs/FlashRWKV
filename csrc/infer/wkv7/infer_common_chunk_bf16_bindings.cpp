@@ -6,6 +6,7 @@
 #include "../../validation.h"
 
 #include <cmath>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -14,6 +15,21 @@ void infer_chunk_bf16_forward_k1_prepare_cuda(
     torch::Tensor chunk_token_ends,
     torch::Tensor r,
     torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor chunk_transform,
+    torch::Tensor chunk_bias,
+    torch::Tensor token_transform,
+    torch::Tensor token_bias,
+    double scale);
+void infer_chunk_bf16_forward_k1_prepare_from_decay_logits_cuda(
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor decay_bias,
     torch::Tensor k,
     torch::Tensor v,
     torch::Tensor a,
@@ -38,11 +54,11 @@ using flash_rwkv::validation::check_cuda_contiguous;
 using flash_rwkv::validation::check_same_device;
 using flash_rwkv::validation::kHeadSize;
 
-void infer_chunk_bf16_forward_k1_prepare(
+void infer_chunk_bf16_forward_k1_prepare_impl(
     torch::Tensor chunk_token_starts,
     torch::Tensor chunk_token_ends,
     torch::Tensor r,
-    torch::Tensor log_decay,
+    torch::Tensor decay,
     torch::Tensor k,
     torch::Tensor v,
     torch::Tensor a,
@@ -51,13 +67,15 @@ void infer_chunk_bf16_forward_k1_prepare(
     torch::Tensor chunk_bias,
     torch::Tensor token_transform,
     torch::Tensor token_bias,
-    double scale) {
+    double scale,
+    bool from_decay_logits,
+    std::optional<torch::Tensor> decay_bias_input) {
   for (const auto& item : {
            std::pair<const torch::Tensor*, const char*>{
                &chunk_token_starts, "chunk_token_starts"},
            {&chunk_token_ends, "chunk_token_ends"},
            {&r, "r"},
-           {&log_decay, "log_decay"},
+           {&decay, "decay"},
            {&k, "k"},
            {&v, "v"},
            {&a, "a"},
@@ -84,7 +102,7 @@ void infer_chunk_bf16_forward_k1_prepare(
           r.size(2) == kHeadSize,
       "K1 token tensors must have shape [total_tokens,H,64]");
   TORCH_CHECK(
-      r.sizes() == log_decay.sizes() &&
+      r.sizes() == decay.sizes() &&
           r.sizes() == k.sizes() &&
           r.sizes() == v.sizes() &&
           r.sizes() == a.sizes() &&
@@ -92,7 +110,7 @@ void infer_chunk_bf16_forward_k1_prepare(
       "K1 token tensor shape mismatch");
   TORCH_CHECK(
       r.scalar_type() == torch::kBFloat16 &&
-          log_decay.scalar_type() == torch::kBFloat16 &&
+          decay.scalar_type() == torch::kBFloat16 &&
           k.scalar_type() == torch::kBFloat16 &&
           v.scalar_type() == torch::kBFloat16 &&
           a.scalar_type() == torch::kBFloat16 &&
@@ -123,7 +141,7 @@ void infer_chunk_bf16_forward_k1_prepare(
            std::pair<const torch::Tensor*, const char*>{
                &chunk_token_starts, "chunk_token_starts"},
            {&chunk_token_ends, "chunk_token_ends"},
-           {&log_decay, "log_decay"},
+           {&decay, "decay"},
            {&k, "k"},
            {&v, "v"},
            {&a, "a"},
@@ -136,20 +154,75 @@ void infer_chunk_bf16_forward_k1_prepare(
     check_same_device(r, *item.first, item.second);
   }
 
-  infer_chunk_bf16_forward_k1_prepare_cuda(
-      chunk_token_starts,
-      chunk_token_ends,
-      r,
-      log_decay,
-      k,
-      v,
-      a,
-      b,
-      chunk_transform,
-      chunk_bias,
-      token_transform,
-      token_bias,
-      scale);
+  if (decay_bias_input.has_value()) {
+    check_cuda_contiguous(*decay_bias_input, "decay_bias");
+    check_same_device(r, *decay_bias_input, "decay_bias");
+    TORCH_CHECK(
+        from_decay_logits,
+        "decay_bias is valid only for the raw decay_logits path");
+    TORCH_CHECK(
+        decay_bias_input->scalar_type() == torch::kBFloat16,
+        "decay_bias must be bf16");
+    TORCH_CHECK(
+        (decay_bias_input->dim() == 1 &&
+         decay_bias_input->numel() == num_heads * kHeadSize) ||
+            (decay_bias_input->dim() == 2 &&
+             decay_bias_input->size(0) == num_heads &&
+             decay_bias_input->size(1) == kHeadSize),
+        "decay_bias must have shape [H*64] or [H,64]");
+  }
+
+  if (from_decay_logits) {
+    infer_chunk_bf16_forward_k1_prepare_from_decay_logits_cuda(
+        chunk_token_starts, chunk_token_ends, r, decay,
+        decay_bias_input.value_or(torch::Tensor()), k, v, a, b,
+        chunk_transform, chunk_bias, token_transform, token_bias, scale);
+  } else {
+    infer_chunk_bf16_forward_k1_prepare_cuda(
+        chunk_token_starts, chunk_token_ends, r, decay, k, v, a, b,
+        chunk_transform, chunk_bias, token_transform, token_bias, scale);
+  }
+}
+
+void infer_chunk_bf16_forward_k1_prepare(
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor chunk_transform,
+    torch::Tensor chunk_bias,
+    torch::Tensor token_transform,
+    torch::Tensor token_bias,
+    double scale) {
+  infer_chunk_bf16_forward_k1_prepare_impl(
+      chunk_token_starts, chunk_token_ends, r, log_decay, k, v, a, b,
+      chunk_transform, chunk_bias, token_transform, token_bias, scale, false,
+      std::nullopt);
+}
+
+void infer_chunk_bf16_forward_k1_prepare_from_decay_logits(
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor chunk_transform,
+    torch::Tensor chunk_bias,
+    torch::Tensor token_transform,
+    torch::Tensor token_bias,
+    double scale,
+    std::optional<torch::Tensor> decay_bias_input) {
+  infer_chunk_bf16_forward_k1_prepare_impl(
+      chunk_token_starts, chunk_token_ends, r, decay_logits, k, v, a, b,
+      chunk_transform, chunk_bias, token_transform, token_bias, scale, true,
+      decay_bias_input);
 }
 
 void infer_chunk_bf16_forward_k2_recurrence(
@@ -260,6 +333,15 @@ void register_infer_experimental_bindings(py::module_& module) {
       py::arg("log_decay"), py::arg("k"), py::arg("v"), py::arg("a"),
       py::arg("b"), py::arg("chunk_transform"), py::arg("chunk_bias"),
       py::arg("token_transform"), py::arg("token_bias"), py::arg("scale"));
+  module.def(
+      "infer_chunk_bf16_forward_k1_prepare_from_decay_logits",
+      &infer_chunk_bf16_forward_k1_prepare_from_decay_logits,
+      "KDA-derived K1 preparation with fused raw RWKV-7 decay logits",
+      py::arg("chunk_token_starts"), py::arg("chunk_token_ends"), py::arg("r"),
+      py::arg("decay_logits"), py::arg("k"), py::arg("v"), py::arg("a"),
+      py::arg("b"), py::arg("chunk_transform"), py::arg("chunk_bias"),
+      py::arg("token_transform"), py::arg("token_bias"), py::arg("scale"),
+      py::arg("decay_bias") = py::none());
   module.def(
       "infer_chunk_bf16_forward_k2_recurrence",
       &infer_chunk_bf16_forward_k2_recurrence,

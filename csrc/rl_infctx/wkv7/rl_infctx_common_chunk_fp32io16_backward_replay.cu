@@ -6,9 +6,14 @@
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
 
+#include "../../common/wkv7/recurrent_decay.cuh"
+
 namespace {
 
 constexpr int kHeadSize = 64;
+
+using flash_rwkv::wkv7::RecurrentDecayInput;
+using flash_rwkv::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -28,7 +33,7 @@ struct OutputShared {
   float b[kHeadSize];
 };
 
-template <typename io_t>
+template <typename io_t, RecurrentDecayInput DecayInput>
 __global__ __launch_bounds__(kHeadSize, 2)
 void emit_outputs_kernel(
     int num_heads,
@@ -36,7 +41,8 @@ void emit_outputs_kernel(
     const int* __restrict__ chunk_token_ends,
     const float* __restrict__ boundary_ptr,
     const io_t* __restrict__ r_ptr,
-    const io_t* __restrict__ log_decay_ptr,
+    const io_t* __restrict__ decay_ptr,
+    const io_t* __restrict__ decay_bias_ptr,
     const io_t* __restrict__ k_ptr,
     const io_t* __restrict__ v_ptr,
     const io_t* __restrict__ a_ptr,
@@ -71,8 +77,14 @@ void emit_outputs_kernel(
             kHeadSize +
         value_index;
     shared.r[value_index] = to_float(r_ptr[input_index]);
-    shared.decay[value_index] =
-        expf(to_float(log_decay_ptr[input_index]));
+    float decay_input = to_float(decay_ptr[input_index]);
+    if constexpr (DecayInput == RecurrentDecayInput::kDecayLogits) {
+      if (decay_bias_ptr != nullptr) {
+        decay_input += to_float(
+            decay_bias_ptr[head_index * kHeadSize + value_index]);
+      }
+    }
+    shared.decay[value_index] = recurrent_retention<DecayInput>(decay_input);
     shared.k[value_index] = to_float(k_ptr[input_index]);
     shared.a[value_index] = to_float(a_ptr[input_index]);
     shared.b[value_index] = to_float(b_ptr[input_index]);
@@ -107,7 +119,7 @@ void emit_outputs_kernel(
   }
 }
 
-template <typename io_t>
+template <typename io_t, RecurrentDecayInput DecayInput>
 void launch_replay(
     int num_chunks,
     int num_heads,
@@ -115,7 +127,8 @@ void launch_replay(
     const torch::Tensor& chunk_token_ends,
     const torch::Tensor& boundary,
     const torch::Tensor& r,
-    const torch::Tensor& log_decay,
+    const torch::Tensor& decay,
+    const torch::Tensor& decay_bias,
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& a,
@@ -124,14 +137,15 @@ void launch_replay(
     torch::Tensor* state_dot_a,
     float scale,
     cudaStream_t stream) {
-  emit_outputs_kernel<io_t>
+  emit_outputs_kernel<io_t, DecayInput>
       <<<num_chunks * num_heads, kHeadSize, 0, stream>>>(
           num_heads,
           chunk_token_starts.data_ptr<int>(),
           chunk_token_ends.data_ptr<int>(),
           boundary.data_ptr<float>(),
           r.data_ptr<io_t>(),
-          log_decay.data_ptr<io_t>(),
+          decay.data_ptr<io_t>(),
+          decay_bias.defined() ? decay_bias.data_ptr<io_t>() : nullptr,
           k.data_ptr<io_t>(),
           v.data_ptr<io_t>(),
           a.data_ptr<io_t>(),
@@ -144,6 +158,50 @@ void launch_replay(
 }
 
 }  // namespace
+
+template <flash_rwkv::wkv7::RecurrentDecayInput DecayInput>
+void launch_chunk_replay_fp32_impl(
+    int num_chunks,
+    int num_heads,
+    const torch::Tensor& chunk_token_starts,
+    const torch::Tensor& chunk_token_ends,
+    const torch::Tensor& boundary,
+    const torch::Tensor& r,
+    const torch::Tensor& decay,
+    const torch::Tensor& decay_bias,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    torch::Tensor& output,
+    torch::Tensor* state_dot_a,
+    float scale,
+    cudaStream_t stream) {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      r.scalar_type(),
+      "flash_rwkv_chunk_replay_fp32",
+      [&] {
+        launch_replay<scalar_t, DecayInput>(
+            num_chunks,
+            num_heads,
+            chunk_token_starts,
+            chunk_token_ends,
+            boundary,
+            r,
+            decay,
+            decay_bias,
+            k,
+            v,
+            a,
+            b,
+            output,
+            state_dot_a,
+            scale,
+            stream);
+      });
+}
 
 void launch_chunk_replay_fp32(
     int num_chunks,
@@ -161,27 +219,33 @@ void launch_chunk_replay_fp32(
     torch::Tensor* state_dot_a,
     float scale,
     cudaStream_t stream) {
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      at::ScalarType::Half,
-      at::ScalarType::BFloat16,
-      r.scalar_type(),
-      "flash_rwkv_chunk_replay_fp32",
-      [&] {
-        launch_replay<scalar_t>(
-            num_chunks,
-            num_heads,
-            chunk_token_starts,
-            chunk_token_ends,
-            boundary,
-            r,
-            log_decay,
-            k,
-            v,
-            a,
-            b,
-            output,
-            state_dot_a,
-            scale,
-            stream);
-      });
+  launch_chunk_replay_fp32_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kLogDecay>(
+      num_chunks, num_heads, chunk_token_starts, chunk_token_ends, boundary,
+      r, log_decay, torch::Tensor(), k, v, a, b, output, state_dot_a, scale,
+      stream);
+}
+
+void launch_chunk_replay_fp32_from_decay_logits(
+    int num_chunks,
+    int num_heads,
+    const torch::Tensor& chunk_token_starts,
+    const torch::Tensor& chunk_token_ends,
+    const torch::Tensor& boundary,
+    const torch::Tensor& r,
+    const torch::Tensor& decay_logits,
+    const torch::Tensor& decay_bias,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    torch::Tensor& output,
+    torch::Tensor* state_dot_a,
+    float scale,
+    cudaStream_t stream) {
+  launch_chunk_replay_fp32_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kDecayLogits>(
+      num_chunks, num_heads, chunk_token_starts, chunk_token_ends, boundary,
+      r, decay_logits, decay_bias, k, v, a, b, output, state_dot_a, scale,
+      stream);
 }

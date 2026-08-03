@@ -7,6 +7,31 @@ import torch
 from .validation import validate_rwkv7_inputs
 
 
+def decay_logits_to_log_decay_reference(
+    decay_logits: torch.Tensor,
+    decay_bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Independent producer oracle for the canonical recurrence input.
+
+    This reference-only helper intentionally spells out the RWKV-7 producer
+    formula instead of calling any product-path conversion helper.
+    """
+
+    combined = decay_logits
+    if decay_bias is not None:
+        if decay_logits.ndim < 2:
+            raise ValueError("decay_logits must include [H,D] dimensions")
+        heads, head_size = decay_logits.shape[-2:]
+        if decay_bias.shape == (heads, head_size):
+            shaped_bias = decay_bias
+        elif decay_bias.ndim == 1 and decay_bias.numel() == heads * head_size:
+            shaped_bias = decay_bias.reshape(heads, head_size)
+        else:
+            raise ValueError("decay_bias must have shape [H,D] or [H*D]")
+        combined = decay_logits + shaped_bias
+    return -0.6065306597126334 * torch.sigmoid(combined)
+
+
 def _run_sequence(
     r: torch.Tensor,
     log_decay: torch.Tensor,
@@ -160,3 +185,35 @@ def rwkv7_reference(
     if not output_final_state:
         return output, None
     return output, final_state_result
+
+
+def rwkv7_decay_logits_reference(
+    r: torch.Tensor,
+    decay_logits: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    scale: float = 1.0,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    cu_seqlens: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
+    decay_bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Evaluate raw RWKV-7 decay logits through the independent FP32 oracle."""
+
+    return rwkv7_reference(
+        r,
+        decay_logits_to_log_decay_reference(decay_logits, decay_bias),
+        k,
+        v,
+        a,
+        b,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+    )

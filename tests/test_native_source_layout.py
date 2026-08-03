@@ -12,14 +12,24 @@ ROOT = Path(__file__).parents[1]
 CSRC = ROOT / "csrc"
 EXPECTED_NATIVE_OPS = {
     "infer_chunk_bf16_forward_k1_prepare",
+    "infer_chunk_bf16_forward_k1_prepare_from_decay_logits",
     "infer_chunk_bf16_forward_k2_recurrence",
     "materialized_chunk_fp32",
+    "materialized_chunk_fp32_from_decay_logits",
+    "prepare_recurrent_metadata",
     "pretrain_recurrent_fp32io16_backward",
+    "pretrain_recurrent_fp32io16_from_decay_logits_backward",
+    "pretrain_recurrent_fp32io16_from_decay_logits_forward",
     "pretrain_recurrent_fp32io16_forward",
     "recompute_chunk_fp32",
+    "recompute_chunk_fp32_from_decay_logits",
     "recurrent_fp16",
+    "recurrent_fp16_from_decay_logits",
     "recurrent_fp32",
+    "recurrent_fp32_from_decay_logits",
     "statetune_recurrent_fp32io16_backward",
+    "statetune_recurrent_fp32io16_from_decay_logits_backward",
+    "statetune_recurrent_fp32io16_from_decay_logits_forward",
     "statetune_recurrent_fp32io16_forward",
 }
 
@@ -59,13 +69,26 @@ def test_tracked_paths_and_text_do_not_use_architecture_placeholders() -> None:
     ]
     assert offenders == []
 EXPECTED_ARGUMENTS = {
+    "prepare_recurrent_metadata": (
+        "query_start_loc", "state_indices", "total_tokens", "state_pool_size",
+    ),
     "recurrent_fp32": (
         "query_start_loc", "state_indices", "state", "r", "log_decay", "k",
-        "v", "a", "b", "output", "scale",
+        "v", "a", "b", "output", "scale", "validated_metadata",
     ),
     "recurrent_fp16": (
         "query_start_loc", "state_indices", "state", "r", "log_decay", "k",
-        "v", "a", "b", "output", "scale",
+        "v", "a", "b", "output", "scale", "validated_metadata",
+    ),
+    "recurrent_fp32_from_decay_logits": (
+        "query_start_loc", "state_indices", "state", "r", "decay_logits",
+        "k", "v", "a", "b", "output", "scale", "decay_bias",
+        "elapsed_t", "validated_metadata",
+    ),
+    "recurrent_fp16_from_decay_logits": (
+        "query_start_loc", "state_indices", "state", "r", "decay_logits",
+        "k", "v", "a", "b", "output", "scale", "decay_bias",
+        "elapsed_t", "validated_metadata",
     ),
     "pretrain_recurrent_fp32io16_forward": (
         "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
@@ -77,11 +100,27 @@ EXPECTED_ARGUMENTS = {
         "state", "r", "log_decay", "k", "v", "a", "b", "output",
         "boundary", "state_dot_a", "scale",
     ),
+    "pretrain_recurrent_fp32io16_from_decay_logits_forward": (
+        "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
+        "state", "r", "decay_logits", "k", "v", "a", "b", "output",
+        "boundary", "state_dot_a", "scale",
+    ),
+    "statetune_recurrent_fp32io16_from_decay_logits_forward": (
+        "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
+        "state", "r", "decay_logits", "k", "v", "a", "b", "output",
+        "boundary", "state_dot_a", "scale",
+    ),
     "materialized_chunk_fp32": (
         "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
         "state_indices", "state", "r", "log_decay", "k", "v", "a", "b",
         "output", "transform", "bias", "boundary", "build_warps", "stages",
         "state_tile", "scale", "state_dot_a",
+    ),
+    "materialized_chunk_fp32_from_decay_logits": (
+        "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
+        "state_indices", "state", "r", "decay_logits", "k", "v", "a",
+        "b", "output", "transform", "bias", "boundary", "build_warps",
+        "stages", "state_tile", "scale", "state_dot_a", "decay_bias",
     ),
     "pretrain_recurrent_fp32io16_backward": (
         "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
@@ -97,10 +136,29 @@ EXPECTED_ARGUMENTS = {
         "grad_r", "grad_log_decay", "grad_k", "grad_v", "grad_a", "grad_b",
         "grad_initial_state", "scale",
     ),
+    "pretrain_recurrent_fp32io16_from_decay_logits_backward": (
+        "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
+        "final_state", "r", "decay_logits", "k", "v", "a", "b",
+        "state_dot_a", "grad_output", "grad_final_state", "boundary",
+        "grad_r", "grad_decay_logits", "grad_k", "grad_v", "grad_a",
+        "grad_b", "grad_initial_state", "scale",
+    ),
+    "statetune_recurrent_fp32io16_from_decay_logits_backward": (
+        "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
+        "final_state", "r", "decay_logits", "k", "v", "a", "b",
+        "state_dot_a", "grad_output", "grad_final_state", "boundary",
+        "grad_r", "grad_decay_logits", "grad_k", "grad_v", "grad_a",
+        "grad_b", "grad_initial_state", "scale",
+    ),
     "infer_chunk_bf16_forward_k1_prepare": (
         "chunk_token_starts", "chunk_token_ends", "r", "log_decay", "k", "v",
         "a", "b", "chunk_transform", "chunk_bias", "token_transform",
         "token_bias", "scale",
+    ),
+    "infer_chunk_bf16_forward_k1_prepare_from_decay_logits": (
+        "chunk_token_starts", "chunk_token_ends", "r", "decay_logits", "k",
+        "v", "a", "b", "chunk_transform", "chunk_bias", "token_transform",
+        "token_bias", "scale", "decay_bias",
     ),
     "infer_chunk_bf16_forward_k2_recurrence": (
         "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
@@ -111,6 +169,11 @@ EXPECTED_ARGUMENTS = {
         "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
         "state_indices", "state", "r", "log_decay", "k", "v", "a", "b",
         "output", "boundary", "scale",
+    ),
+    "recompute_chunk_fp32_from_decay_logits": (
+        "sequence_chunk_offsets", "chunk_token_starts", "chunk_token_ends",
+        "state_indices", "state", "r", "decay_logits", "k", "v", "a",
+        "b", "output", "boundary", "scale", "decay_bias",
     ),
 }
 
@@ -188,25 +251,16 @@ def test_inference_operator_benchmark_binds_repository_source_root() -> None:
     assert len(_source_digest()) == 64
 
 
-def test_gpu_workflow_owns_its_exact_fla_reference_environment() -> None:
+def test_gpu_workflow_is_independent_of_unmerged_fla_revisions() -> None:
     workflow = (ROOT / ".github/workflows/pro6000-gpu.yml").read_text()
-    fla_revision = "fcd4502ab957513a3d97dbd8aa64851e5e4dba11"
-    fla_requirement = (
-        "flash-linear-attention @ git+https://github.com/"
-        f"rwkv-rs/fla-rwkv.git@{fla_revision}"
-    )
 
     assert "--no-deps --no-build-isolation -e ." in workflow
-    requirement_position = workflow.index(fla_requirement)
-    assert "--no-deps" in workflow[requirement_position - 100:requirement_position]
-    assert workflow.index("--no-deps --no-build-isolation -e .") < workflow.index(
-        fla_requirement
-    )
-    assert f'revision = "{fla_revision}"' in workflow
-    assert 'distribution("flash-linear-attention")' in workflow
-    assert 'direct_url["url"] != "https://github.com/rwkv-rs/fla-rwkv.git"' in workflow
-    assert 'for name in ("fla", "fla.ops.rwkv7")' in workflow
-    assert "module_path.is_relative_to(package_root)" in workflow
+    assert "flash-linear-attention" not in workflow
+    assert "fla-rwkv" not in workflow
+    assert "benchmark_fused_decay_recurrent.py" in workflow
+    assert "unfused_correct_product" in workflow
+    assert "fused_raw_product" in workflow
+    assert "fused decay launch gate failed" in workflow
 
 
 def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:
@@ -276,14 +330,18 @@ def test_packed_hot_path_preserves_scheduler_owned_device_metadata() -> None:
     assert ".item(" not in native_validation
     assert "validate_recurrent_metadata_kernel" in native_validation
     assert "kDuplicateStateSlot" in native_validation
-    assert "atomicCAS(&slot_claims[state_slot], 0, 1)" in native_validation
-    assert "for (int other" not in native_validation
-    assert '"metadata_validation_complexity": "O(sequence_count + state_pool_size)"' in (
+    assert "query_start_loc_snapshot" in native_validation
+    assert "validated_state_indices[earlier]" in native_validation
+    assert '"metadata_validation_complexity": "O(sequence_count^2) once per ticket"' in (
         benchmark_case
     )
-    assert '"metadata_validation_strategy": "device_slot_claim_bitmap"' in benchmark_case
+    assert (
+        '"metadata_validation_strategy": '
+        '"immutable_device_snapshot_prior_slot_scan"'
+    ) in benchmark_case
     assert '"metadata_host_round_trip": False' in benchmark_case
-    assert '"kernel_launches_per_operator": 2' in benchmark_case
+    assert '"metadata_prepare_kernel_launches": 1' in benchmark_case
+    assert '"kernel_launches_per_operator": 1' in benchmark_case
     assert '"decode_b2048": (1,) * 2048' in (
         ROOT
         / "benchmarks/infer/wkv7/"
@@ -385,8 +443,12 @@ def test_statetune_owns_public_native_bindings_over_shared_recurrence() -> None:
     assert source.relative_to(ROOT).as_posix() in sources
     assert "statetune_recurrent_fp32io16_forward" in contents
     assert "statetune_recurrent_fp32io16_backward" in contents
+    assert "statetune_recurrent_fp32io16_from_decay_logits_forward" in contents
+    assert "statetune_recurrent_fp32io16_from_decay_logits_backward" in contents
     assert "&recurrent_common_fp32io16_forward" in contents
     assert "&recurrent_common_fp32io16_backward" in contents
+    assert "&recurrent_common_fp32io16_from_decay_logits_forward" in contents
+    assert "&recurrent_common_fp32io16_from_decay_logits_backward" in contents
     assert "_statetune_recurrent_source_manifest" not in contents
     assert {
         "csrc/common/wkv7/recurrent_common_fp32io16.cpp",
@@ -394,7 +456,7 @@ def test_statetune_owns_public_native_bindings_over_shared_recurrence() -> None:
         "csrc/common/wkv7/recurrent_common_fp32io16_backward.cu",
     } <= sources
     assert tuple(inspect.signature(statetune_recurrent_fp32io16_forward).parameters) == (
-        "r", "log_decay", "k", "v", "a", "b", "scale", "initial_state",
+        "r", "decay_logits", "k", "v", "a", "b", "scale", "initial_state",
         "output_final_state",
     )
 
@@ -448,8 +510,33 @@ def test_infer_modules_own_distinct_sources_and_tests() -> None:
         path.name.startswith("benchmark_") for path in wkv7_benchmarks.glob("*.py")
     )
     kernel_benchmark = (ROOT / "benchmarks/kernel_benchmark.py").read_text()
-    assert "infer_chunk_bf16_forward" in kernel_benchmark
-    assert "infer_chunk_bf16_forward_varlen" in kernel_benchmark
+    assert "recurrent_fp32_from_decay_logits" in kernel_benchmark
+    assert "recurrent_fp16_from_decay_logits" in kernel_benchmark
+    fused_benchmark = (
+        wkv7_benchmarks / "benchmark_fused_decay_recurrent.py"
+    ).read_text()
+    assert "unfused_correct_product" in fused_benchmark
+    assert "fused_raw_product" in fused_benchmark
+
+
+def test_chunk_native_paths_fuse_the_raw_decay_transform() -> None:
+    kda_prepare = (
+        CSRC / "infer/wkv7/infer_common_chunk_bf16_forward_k1_prepare.cu"
+    ).read_text()
+    factor_recompute = (
+        CSRC
+        / "rl_infctx/wkv7/rl_infctx_common_chunk_fp32io16_forward_recompute.cu"
+    ).read_text()
+
+    for source in (kda_prepare, factor_recompute):
+        assert "RecurrentDecayInput::kDecayLogits" in source
+        assert "recurrent_retention<DecayInput>" in source
+        assert "decay_bias_ptr" in source
+    assert "infer_chunk_bf16_forward_k1_prepare_from_decay_logits_cuda" in (
+        kda_prepare
+    )
+    assert "launch_chunk_replay_fp32_from_decay_logits" in factor_recompute
+    assert "recompute_chunk_fp32_from_decay_logits_cuda" in factor_recompute
 
 
 def test_registration_preserves_exact_native_operator_surface() -> None:

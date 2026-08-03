@@ -12,13 +12,17 @@ import platform
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
+from typing import Callable
 
 import torch
 from torch.nn import functional
+from torch.profiler import ProfilerActivity, profile
 
-from flash_rwkv import rwkv7_reference, statetune_recurrent_fp32io16_forward
+from flash_rwkv import statetune_recurrent_fp32io16_forward
 from flash_rwkv.benchmark_contract import format_result, summarize_samples
+from flash_rwkv.ops import _canonical_statetune_recurrent_fp32io16
 from flash_rwkv.provenance import imported_source_family
+from flash_rwkv.reference import rwkv7_decay_logits_reference
 from flash_rwkv.registry import get_kernel_spec
 
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
@@ -29,6 +33,11 @@ OPERATOR_SPEC = get_kernel_spec(
     provider="flash_rwkv",
 )
 MODE = "fp32io16"
+CORRECTNESS_LIMITS = {
+    "output_relative_rmse": 0.007,
+    "final_state_relative_rmse": 0.008,
+    "gradient_relative_rmse": 0.008,
+}
 
 
 def _git_revision() -> str | None:
@@ -66,16 +75,7 @@ def _inputs(
     )
     tensors = (
         normal(0.05).to(torch.bfloat16),
-        (
-            -0.05
-            - 0.15
-            * torch.rand(
-                shape,
-                device="cuda",
-                dtype=torch.float32,
-                generator=generator,
-            )
-        ).to(torch.bfloat16),
+        normal(1.0).to(torch.bfloat16),
         normal(0.05).to(torch.bfloat16),
         normal(0.05).to(torch.bfloat16),
         (-direction).to(torch.bfloat16),
@@ -105,6 +105,25 @@ def _inputs(
     return tensors, initial_state, grad_output, grad_final_state
 
 
+def _unfused_correct_statetune(
+    inputs: tuple[torch.Tensor, ...],
+    initial_state: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    r, decay_logits, k, v, a, b = inputs
+    log_decay = -0.6065306597126334 * torch.sigmoid(decay_logits)
+    return _canonical_statetune_recurrent_fp32io16(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        initial_state=initial_state,
+        output_final_state=True,
+        scale=0.125,
+    )
+
+
 def _run(
     implementation: str,
     base_inputs: tuple[torch.Tensor, ...],
@@ -114,17 +133,27 @@ def _run(
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
     inputs = tuple(tensor.detach().clone().requires_grad_(True) for tensor in base_inputs)
     initial_state = base_initial_state.detach().clone().requires_grad_(True)
-    operation = (
-        rwkv7_reference
-        if implementation == "torch"
-        else statetune_recurrent_fp32io16_forward
-    )
-    output, final_state = operation(
-        *inputs,
-        initial_state=initial_state,
-        output_final_state=True,
-        scale=0.125,
-    )
+    if implementation == "torch":
+        output, final_state = rwkv7_decay_logits_reference(
+            *inputs,
+            initial_state=initial_state,
+            output_final_state=True,
+            scale=0.125,
+        )
+    elif implementation == "unfused":
+        output, final_state = _unfused_correct_statetune(
+            inputs,
+            initial_state,
+        )
+    elif implementation == "fused":
+        output, final_state = statetune_recurrent_fp32io16_forward(
+            *inputs,
+            initial_state=initial_state,
+            output_final_state=True,
+            scale=0.125,
+        )
+    else:
+        raise ValueError(f"unknown implementation: {implementation}")
     assert final_state is not None
     loss = (output.float() * grad_output).sum()
     loss = loss + (final_state * grad_final_state).sum()
@@ -147,35 +176,108 @@ def _correctness(
     grad_final_state: torch.Tensor,
 ) -> dict[str, object]:
     expected = _run("torch", inputs, initial_state, grad_output, grad_final_state)
-    actual = _run("flash", inputs, initial_state, grad_output, grad_final_state)
-    output_error = _relative_rmse(actual[0], expected[0])
-    state_error = _relative_rmse(actual[1], expected[1])
-    gradient_errors = tuple(
-        _relative_rmse(value, reference)
-        for value, reference in zip(actual[2], expected[2], strict=True)
-    )
-    passed = (
-        output_error <= 0.02
-        and state_error <= 0.02
-        and max(gradient_errors) <= 0.08
-        and all(torch.isfinite(gradient).all().item() for gradient in actual[2])
-        and all(torch.count_nonzero(gradient).item() > 0 for gradient in actual[2])
+    implementations = {
+        name: _run(name, inputs, initial_state, grad_output, grad_final_state)
+        for name in ("unfused", "fused")
+    }
+    errors: dict[str, dict[str, object]] = {}
+    passed = True
+    for name, actual in implementations.items():
+        output_error = _relative_rmse(actual[0], expected[0])
+        state_error = _relative_rmse(actual[1], expected[1])
+        gradient_errors = tuple(
+            _relative_rmse(value, reference)
+            for value, reference in zip(actual[2], expected[2], strict=True)
+        )
+        finite = all(
+            torch.isfinite(gradient).all().item() for gradient in actual[2]
+        )
+        nonzero = all(
+            torch.count_nonzero(gradient).item() > 0 for gradient in actual[2]
+        )
+        implementation_passed = (
+            output_error <= CORRECTNESS_LIMITS["output_relative_rmse"]
+            and state_error <= CORRECTNESS_LIMITS[
+                "final_state_relative_rmse"
+            ]
+            and max(gradient_errors)
+            <= CORRECTNESS_LIMITS["gradient_relative_rmse"]
+            and finite
+            and nonzero
+        )
+        passed = passed and implementation_passed
+        errors[name] = {
+            "passed": implementation_passed,
+            "output_relative_rmse": output_error,
+            "final_state_relative_rmse": state_error,
+            "gradient_relative_rmse": gradient_errors,
+            "all_gradients_finite": finite,
+            "all_gradients_nonzero": nonzero,
+        }
+    unfused = implementations["unfused"]
+    fused = implementations["fused"]
+    cross_errors = {
+        "output_relative_rmse": _relative_rmse(unfused[0], fused[0]),
+        "final_state_relative_rmse": _relative_rmse(unfused[1], fused[1]),
+        "gradient_relative_rmse": tuple(
+            _relative_rmse(left, right)
+            for left, right in zip(unfused[2], fused[2], strict=True)
+        ),
+    }
+    cross_passed = (
+        cross_errors["output_relative_rmse"]
+        <= CORRECTNESS_LIMITS["output_relative_rmse"]
+        and cross_errors["final_state_relative_rmse"]
+        <= CORRECTNESS_LIMITS["final_state_relative_rmse"]
+        and max(cross_errors["gradient_relative_rmse"])
+        <= CORRECTNESS_LIMITS["gradient_relative_rmse"]
     )
     return {
-        "passed": passed,
-        "output_relative_rmse": output_error,
-        "final_state_relative_rmse": state_error,
-        "gradient_relative_rmse": gradient_errors,
-        "all_gradients_finite": all(
-            torch.isfinite(gradient).all().item() for gradient in actual[2]
-        ),
-        "all_gradients_nonzero": all(
-            torch.count_nonzero(gradient).item() > 0 for gradient in actual[2]
-        ),
+        "passed": passed and cross_passed,
+        "oracle": "independent raw decay producer plus FP32 torch recurrence",
+        "limits": CORRECTNESS_LIMITS,
+        "implementations": errors,
+        "unfused_vs_fused": {**cross_errors, "passed": cross_passed},
     }
 
 
+def _training_launch(
+    implementation: str,
+    inputs: tuple[torch.Tensor, ...],
+    initial_state: torch.Tensor,
+    grad_output: torch.Tensor,
+    grad_final_state: torch.Tensor,
+) -> tuple[Callable[[], None], tuple[torch.Tensor, ...]]:
+    leaves = tuple(tensor.detach().requires_grad_(True) for tensor in inputs)
+    state_leaf = initial_state.detach().requires_grad_(True)
+
+    def launch() -> None:
+        for tensor in (*leaves, state_leaf):
+            tensor.grad = None
+        if implementation == "unfused":
+            output, final_state = _unfused_correct_statetune(
+                leaves,
+                state_leaf,
+            )
+        elif implementation == "fused":
+            output, final_state = statetune_recurrent_fp32io16_forward(
+                *leaves,
+                initial_state=state_leaf,
+                output_final_state=True,
+                scale=0.125,
+            )
+        else:
+            raise ValueError(f"unknown implementation: {implementation}")
+        assert final_state is not None
+        loss = (output.float() * grad_output).sum()
+        loss = loss + (final_state * grad_final_state).sum()
+        loss.backward()
+
+    return launch, (*leaves, state_leaf)
+
+
 def _measure(
+    implementation: str,
     inputs: tuple[torch.Tensor, ...],
     initial_state: torch.Tensor,
     grad_output: torch.Tensor,
@@ -184,22 +286,13 @@ def _measure(
     warmup: int,
     iters: int,
 ) -> list[float]:
-    leaves = tuple(tensor.detach().requires_grad_(True) for tensor in inputs)
-    state_leaf = initial_state.detach().requires_grad_(True)
-
-    def launch() -> None:
-        for tensor in (*leaves, state_leaf):
-            tensor.grad = None
-        output, final_state = statetune_recurrent_fp32io16_forward(
-            *leaves,
-            initial_state=state_leaf,
-            output_final_state=True,
-            scale=0.125,
-        )
-        assert final_state is not None
-        loss = (output.float() * grad_output).sum()
-        loss = loss + (final_state * grad_final_state).sum()
-        loss.backward()
+    launch, _ = _training_launch(
+        implementation,
+        inputs,
+        initial_state,
+        grad_output,
+        grad_final_state,
+    )
 
     for _ in range(warmup):
         launch()
@@ -214,6 +307,46 @@ def _measure(
         end.synchronize()
         samples.append(start.elapsed_time(end))
     return samples
+
+
+def _launch_trace(
+    implementation: str,
+    inputs: tuple[torch.Tensor, ...],
+    initial_state: torch.Tensor,
+    grad_output: torch.Tensor,
+    grad_final_state: torch.Tensor,
+) -> dict[str, object]:
+    launch, _ = _training_launch(
+        implementation,
+        inputs,
+        initial_state,
+        grad_output,
+        grad_final_state,
+    )
+    launch()
+    torch.cuda.synchronize()
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
+    ) as trace:
+        launch()
+        torch.cuda.synchronize()
+    cuda_kernel_names = [
+        event.name
+        for event in trace.events()
+        if "cuda" in str(event.device_type).lower()
+    ]
+    return {
+        "cuda_kernel_count": len(cuda_kernel_names),
+        "cuda_kernel_names": cuda_kernel_names,
+        "forward_recurrent_kernel_count": sum(
+            "recurrent_common_fp32io16_forward_kernel" in name
+            for name in cuda_kernel_names
+        ),
+        "backward_recurrent_kernel_count": sum(
+            "recurrent_common_fp32io16_backward_kernel" in name
+            for name in cuda_kernel_names
+        ),
+    }
 
 
 def _parse_case(value: str) -> tuple[int, int]:
@@ -256,14 +389,43 @@ def main() -> None:
         )
         if not correctness["passed"]:
             raise RuntimeError(f"StateTune correctness gate failed: {correctness}")
-        samples = _measure(
-            inputs,
-            initial_state,
-            grad_output,
-            grad_final_state,
-            warmup=arguments.warmup,
-            iters=arguments.iters,
-        )
+        samples_by_implementation = {
+            implementation: _measure(
+                implementation,
+                inputs,
+                initial_state,
+                grad_output,
+                grad_final_state,
+                warmup=arguments.warmup,
+                iters=arguments.iters,
+            )
+            for implementation in ("unfused", "fused")
+        }
+        launch_traces = {
+            implementation: _launch_trace(
+                implementation,
+                inputs,
+                initial_state,
+                grad_output,
+                grad_final_state,
+            )
+            for implementation in ("unfused", "fused")
+        }
+        if (
+            launch_traces["unfused"]["cuda_kernel_count"]
+            <= launch_traces["fused"]["cuda_kernel_count"]
+        ):
+            raise RuntimeError(
+                "StateTune fusion did not eliminate transform launches: "
+                f"{launch_traces}"
+            )
+        samples = samples_by_implementation["fused"]
+        unfused_p50 = summarize_samples(
+            label=f"statetune-unfused-B{batch_size}T{token_count}",
+            batch_size=batch_size,
+            token_count=token_count,
+            samples_ms=samples_by_implementation["unfused"],
+        ).p50_ms
         row = summarize_samples(
             label=f"statetune-B{batch_size}T{token_count}",
             batch_size=batch_size,
@@ -276,7 +438,38 @@ def main() -> None:
             source_revision=source_revision,
             mode=MODE,
         )
-        rows.append({**row, "correctness": correctness, "raw_samples_ms": samples})
+        rows.append(
+            {
+                **row,
+                "correctness": correctness,
+                "raw_samples_ms": samples,
+                "training_ab": {
+                    "A": "unfused_correct_product",
+                    "B": "public_raw_fused_recurrent",
+                    "same_inputs_initial_state_loss_upstream_gradients": True,
+                    "metadata_boundary": (
+                        "both private canonical and public raw wrappers build "
+                        "identical fixed-length chunk metadata inside timing"
+                    ),
+                    "unfused_raw_samples_ms": samples_by_implementation[
+                        "unfused"
+                    ],
+                    "fused_raw_samples_ms": samples,
+                    "unfused_p50_ms": unfused_p50,
+                    "fused_p50_ms": row["p50_ms"],
+                    "fused_speedup_over_unfused": (
+                        unfused_p50 / float(row["p50_ms"])
+                    ),
+                    "timed_transform_materialization_bytes": {
+                        "unfused": (
+                            inputs[1].numel() * inputs[1].element_size()
+                        ),
+                        "fused": 0,
+                    },
+                    "launch_trace": launch_traces,
+                },
+            }
+        )
         print(
             f"{format_result(row)} provider={row['provider']} "
             f"name={row['name']} source_revision={row['source_revision']} "
@@ -293,8 +486,11 @@ def main() -> None:
         "warmup": arguments.warmup,
         "iters": arguments.iters,
         "measurement_boundary": (
-            "public recurrent forward, final-state objective, and backward; "
-            "input construction and correctness oracle are excluded"
+            "A includes raw-logit to canonical-log-decay producer, private "
+            "canonical recurrent forward, final-state objective, and backward; "
+            "B includes public raw fused recurrent forward, the identical "
+            "objective, and backward; input construction and correctness "
+            "oracle are excluded"
         ),
         "hardware": {
             "name": properties.name,

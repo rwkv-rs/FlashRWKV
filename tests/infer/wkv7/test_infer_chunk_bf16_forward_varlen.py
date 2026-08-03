@@ -12,8 +12,8 @@ import torch.nn.functional as functional
 from flash_rwkv import (
     infer_chunk_bf16_forward,
     infer_chunk_bf16_forward_varlen,
-    rwkv7_reference,
 )
+from flash_rwkv.reference import rwkv7_decay_logits_reference
 
 
 HEAD_SIZE = 64
@@ -60,14 +60,7 @@ def _inputs(
     )
     tensors = (
         normal(0.05),
-        -0.05
-        - 0.15
-        * torch.rand(
-            shape,
-            generator=generator,
-            device="cuda",
-            dtype=torch.float32,
-        ),
+        normal(1.0),
         normal(0.05),
         normal(0.05),
         -direction,
@@ -96,17 +89,26 @@ def test_kda_k1_k2_fixed_matches_fp32_oracle(sequence_length: int) -> None:
             dtype=torch.float32,
         )
     ).to(torch.bfloat16)
-    expected_output, expected_state = rwkv7_reference(
+    decay_bias = torch.linspace(
+        -0.2,
+        0.2,
+        2 * HEAD_SIZE,
+        device="cuda",
+        dtype=torch.bfloat16,
+    ).reshape(2, HEAD_SIZE)
+    expected_output, expected_state = rwkv7_decay_logits_reference(
         *inputs,
         initial_state=initial_state,
         output_final_state=True,
         scale=0.125,
+        decay_bias=decay_bias,
     )
     output, final_state = infer_chunk_bf16_forward(
         *inputs,
         initial_state=initial_state,
         output_final_state=True,
         scale=0.125,
+        decay_bias=decay_bias,
     )
     torch.cuda.synchronize()
 
@@ -138,12 +140,20 @@ def test_kda_k1_k2_varlen_isolates_sequences() -> None:
             dtype=torch.float32,
         )
     ).to(torch.bfloat16)
-    expected_output, expected_state = rwkv7_reference(
+    decay_bias = torch.linspace(
+        0.1,
+        -0.1,
+        2 * HEAD_SIZE,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    expected_output, expected_state = rwkv7_decay_logits_reference(
         *inputs,
         initial_state=initial_state,
         output_final_state=True,
         cu_seqlens=cu_seqlens,
         scale=0.125,
+        decay_bias=decay_bias,
     )
     output, final_state = infer_chunk_bf16_forward_varlen(
         *inputs,
@@ -151,6 +161,7 @@ def test_kda_k1_k2_varlen_isolates_sequences() -> None:
         output_final_state=True,
         cu_seqlens=cu_seqlens,
         scale=0.125,
+        decay_bias=decay_bias,
     )
     torch.cuda.synchronize()
 

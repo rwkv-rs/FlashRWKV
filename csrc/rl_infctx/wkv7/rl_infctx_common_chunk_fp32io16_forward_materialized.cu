@@ -10,9 +10,14 @@
 #include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
 
+#include "../../common/wkv7/recurrent_decay.cuh"
+
 namespace {
 
 constexpr int kHeadSize = 64;
+
+using flash_rwkv::wkv7::RecurrentDecayInput;
+using flash_rwkv::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -30,7 +35,7 @@ struct BuildShared {
   float v[Stages][kHeadSize];
 };
 
-template <typename io_t, int Stages>
+template <typename io_t, int Stages, RecurrentDecayInput DecayInput>
 __device__ __forceinline__ void load_build_token(
     BuildShared<Stages>& shared,
     int buffer,
@@ -38,7 +43,8 @@ __device__ __forceinline__ void load_build_token(
     int token_index,
     int head_index,
     int num_heads,
-    const io_t* log_decay_ptr,
+    const io_t* decay_ptr,
+    const io_t* decay_bias_ptr,
     const io_t* k_ptr,
     const io_t* v_ptr,
     const io_t* a_ptr,
@@ -47,8 +53,14 @@ __device__ __forceinline__ void load_build_token(
       (static_cast<int64_t>(token_index) * num_heads + head_index) *
           kHeadSize +
       column;
-  shared.decay[buffer][column] =
-      expf(to_float(log_decay_ptr[input_index]));
+  float decay_input = to_float(decay_ptr[input_index]);
+  if constexpr (DecayInput == RecurrentDecayInput::kDecayLogits) {
+    if (decay_bias_ptr != nullptr) {
+      decay_input += to_float(
+          decay_bias_ptr[head_index * kHeadSize + column]);
+    }
+  }
+  shared.decay[buffer][column] = recurrent_retention<DecayInput>(decay_input);
   shared.k[buffer][column] = to_float(k_ptr[input_index]);
   shared.v[buffer][column] = to_float(v_ptr[input_index]);
   shared.a[buffer][column] = to_float(a_ptr[input_index]);
@@ -103,13 +115,18 @@ __device__ __forceinline__ void update_bias_column(
   }
 }
 
-template <typename io_t, int BuildWarps, int Stages>
+template <
+    typename io_t,
+    int BuildWarps,
+    int Stages,
+    RecurrentDecayInput DecayInput>
 __global__ __launch_bounds__(BuildWarps * 32, 2)
 void build_transforms_kernel(
     int num_heads,
     const int* __restrict__ chunk_token_starts,
     const int* __restrict__ chunk_token_ends,
-    const io_t* __restrict__ log_decay_ptr,
+    const io_t* __restrict__ decay_ptr,
+    const io_t* __restrict__ decay_bias_ptr,
     const io_t* __restrict__ k_ptr,
     const io_t* __restrict__ v_ptr,
     const io_t* __restrict__ a_ptr,
@@ -137,14 +154,15 @@ void build_transforms_kernel(
   const int token_start = chunk_token_starts[chunk_index];
   const int token_end = chunk_token_ends[chunk_index];
   if (thread < kHeadSize) {
-    load_build_token(
+    load_build_token<io_t, Stages, DecayInput>(
         shared,
         0,
         thread,
         token_start,
         head_index,
         num_heads,
-        log_decay_ptr,
+        decay_ptr,
+        decay_bias_ptr,
         k_ptr,
         v_ptr,
         a_ptr,
@@ -159,14 +177,15 @@ void build_transforms_kernel(
     if constexpr (Stages == 2) {
       if (thread >= kHeadSize &&
           token_start + token_offset + 1 < token_end) {
-        load_build_token(
+        load_build_token<io_t, Stages, DecayInput>(
             shared,
             buffer ^ 1,
             thread - kHeadSize,
             token_start + token_offset + 1,
             head_index,
             num_heads,
-            log_decay_ptr,
+            decay_ptr,
+            decay_bias_ptr,
             k_ptr,
             v_ptr,
             a_ptr,
@@ -191,14 +210,15 @@ void build_transforms_kernel(
     if constexpr (Stages == 1) {
       if (thread < kHeadSize &&
           token_start + token_offset + 1 < token_end) {
-        load_build_token(
+        load_build_token<io_t, Stages, DecayInput>(
             shared,
             0,
             thread,
             token_start + token_offset + 1,
             head_index,
             num_heads,
-            log_decay_ptr,
+            decay_ptr,
+            decay_bias_ptr,
             k_ptr,
             v_ptr,
             a_ptr,
@@ -319,13 +339,18 @@ void scan_boundaries_kernel(
   }
 }
 
-template <typename io_t, int BuildWarps, int Stages>
+template <
+    typename io_t,
+    int BuildWarps,
+    int Stages,
+    RecurrentDecayInput DecayInput>
 void launch_build(
     int num_chunks,
     int num_heads,
     const torch::Tensor& chunk_token_starts,
     const torch::Tensor& chunk_token_ends,
-    const torch::Tensor& log_decay,
+    const torch::Tensor& decay,
+    const torch::Tensor& decay_bias,
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& a,
@@ -333,12 +358,13 @@ void launch_build(
     torch::Tensor& transform,
     torch::Tensor& bias,
     cudaStream_t stream) {
-  build_transforms_kernel<io_t, BuildWarps, Stages>
+  build_transforms_kernel<io_t, BuildWarps, Stages, DecayInput>
       <<<num_chunks * num_heads, BuildWarps * 32, 0, stream>>>(
           num_heads,
           chunk_token_starts.data_ptr<int>(),
           chunk_token_ends.data_ptr<int>(),
-          log_decay.data_ptr<io_t>(),
+          decay.data_ptr<io_t>(),
+          decay_bias.defined() ? decay_bias.data_ptr<io_t>() : nullptr,
           k.data_ptr<io_t>(),
           v.data_ptr<io_t>(),
           a.data_ptr<io_t>(),
@@ -347,7 +373,7 @@ void launch_build(
           bias.data_ptr<float>());
 }
 
-template <typename io_t>
+template <typename io_t, RecurrentDecayInput DecayInput>
 void dispatch_build(
     int build_warps,
     int stages,
@@ -355,7 +381,8 @@ void dispatch_build(
     int num_heads,
     const torch::Tensor& chunk_token_starts,
     const torch::Tensor& chunk_token_ends,
-    const torch::Tensor& log_decay,
+    const torch::Tensor& decay,
+    const torch::Tensor& decay_bias,
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& a,
@@ -364,12 +391,13 @@ void dispatch_build(
     torch::Tensor& bias,
     cudaStream_t stream) {
   if (build_warps == 2 && stages == 1) {
-    launch_build<io_t, 2, 1>(
+    launch_build<io_t, 2, 1, DecayInput>(
         num_chunks,
         num_heads,
         chunk_token_starts,
         chunk_token_ends,
-        log_decay,
+        decay,
+        decay_bias,
         k,
         v,
         a,
@@ -380,12 +408,13 @@ void dispatch_build(
     return;
   }
   if (build_warps == 4 && stages == 1) {
-    launch_build<io_t, 4, 1>(
+    launch_build<io_t, 4, 1, DecayInput>(
         num_chunks,
         num_heads,
         chunk_token_starts,
         chunk_token_ends,
-        log_decay,
+        decay,
+        decay_bias,
         k,
         v,
         a,
@@ -395,12 +424,13 @@ void dispatch_build(
         stream);
     return;
   }
-  launch_build<io_t, 4, 2>(
+  launch_build<io_t, 4, 2, DecayInput>(
       num_chunks,
       num_heads,
       chunk_token_starts,
       chunk_token_ends,
-      log_decay,
+      decay,
+      decay_bias,
       k,
       v,
       a,
@@ -481,7 +511,7 @@ void dispatch_scan(
       stream);
 }
 
-template <typename io_t>
+template <typename io_t, RecurrentDecayInput DecayInput>
 void launch_materialized_chunk(
     int num_sequences,
     int num_chunks,
@@ -495,7 +525,8 @@ void launch_materialized_chunk(
     const torch::Tensor& state_indices,
     torch::Tensor& state,
     const torch::Tensor& r,
-    const torch::Tensor& log_decay,
+    const torch::Tensor& decay,
+    const torch::Tensor& decay_bias,
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& a,
@@ -507,14 +538,15 @@ void launch_materialized_chunk(
     torch::Tensor* state_dot_a,
     float scale,
     cudaStream_t stream) {
-  dispatch_build<io_t>(
+  dispatch_build<io_t, DecayInput>(
       build_warps,
       stages,
       num_chunks,
       num_heads,
       chunk_token_starts,
       chunk_token_ends,
-      log_decay,
+      decay,
+      decay_bias,
       k,
       v,
       a,
@@ -537,35 +569,30 @@ void launch_materialized_chunk(
       stream);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  launch_chunk_replay_fp32(
-      num_chunks,
-      num_heads,
-      chunk_token_starts,
-      chunk_token_ends,
-      boundary,
-      r,
-      log_decay,
-      k,
-      v,
-      a,
-      b,
-      output,
-      state_dot_a,
-      scale,
-      stream);
+  if constexpr (DecayInput == RecurrentDecayInput::kDecayLogits) {
+    launch_chunk_replay_fp32_from_decay_logits(
+        num_chunks, num_heads, chunk_token_starts, chunk_token_ends, boundary,
+        r, decay, decay_bias, k, v, a, b, output, state_dot_a, scale, stream);
+  } else {
+    launch_chunk_replay_fp32(
+        num_chunks, num_heads, chunk_token_starts, chunk_token_ends, boundary,
+        r, decay, k, v, a, b, output, state_dot_a, scale, stream);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }  // namespace
 
-void materialized_chunk_fp32_cuda(
+template <flash_rwkv::wkv7::RecurrentDecayInput DecayInput>
+void materialized_chunk_fp32_cuda_impl(
     torch::Tensor sequence_chunk_offsets,
     torch::Tensor chunk_token_starts,
     torch::Tensor chunk_token_ends,
     torch::Tensor state_indices,
     torch::Tensor state,
     torch::Tensor r,
-    torch::Tensor log_decay,
+    torch::Tensor decay,
+    torch::Tensor decay_bias,
     torch::Tensor k,
     torch::Tensor v,
     torch::Tensor a,
@@ -591,7 +618,7 @@ void materialized_chunk_fp32_cuda(
       r.scalar_type(),
       "flash_rwkv_materialized_chunk_fp32",
       [&] {
-        launch_materialized_chunk<scalar_t>(
+        launch_materialized_chunk<scalar_t, DecayInput>(
             num_sequences,
             num_chunks,
             num_heads,
@@ -604,7 +631,8 @@ void materialized_chunk_fp32_cuda(
             state_indices,
             state,
             r,
-            log_decay,
+            decay,
+            decay_bias,
             k,
             v,
             a,
@@ -617,4 +645,63 @@ void materialized_chunk_fp32_cuda(
             static_cast<float>(scale),
             stream);
       });
+}
+
+void materialized_chunk_fp32_cuda(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor state_indices,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor log_decay,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor transform,
+    torch::Tensor bias,
+    torch::Tensor boundary,
+    torch::Tensor state_dot_a,
+    int64_t build_warps,
+    int64_t stages,
+    int64_t state_tile,
+    double scale) {
+  materialized_chunk_fp32_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kLogDecay>(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends,
+      state_indices, state, r, log_decay, torch::Tensor(), k, v, a, b,
+      output, transform, bias, boundary, state_dot_a, build_warps, stages,
+      state_tile, scale);
+}
+
+void materialized_chunk_fp32_from_decay_logits_cuda(
+    torch::Tensor sequence_chunk_offsets,
+    torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,
+    torch::Tensor state_indices,
+    torch::Tensor state,
+    torch::Tensor r,
+    torch::Tensor decay_logits,
+    torch::Tensor decay_bias,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor a,
+    torch::Tensor b,
+    torch::Tensor output,
+    torch::Tensor transform,
+    torch::Tensor bias,
+    torch::Tensor boundary,
+    torch::Tensor state_dot_a,
+    int64_t build_warps,
+    int64_t stages,
+    int64_t state_tile,
+    double scale) {
+  materialized_chunk_fp32_cuda_impl<
+      flash_rwkv::wkv7::RecurrentDecayInput::kDecayLogits>(
+      sequence_chunk_offsets, chunk_token_starts, chunk_token_ends,
+      state_indices, state, r, decay_logits, decay_bias, k, v, a, b, output,
+      transform, bias, boundary, state_dot_a, build_warps, stages, state_tile,
+      scale);
 }

@@ -65,9 +65,10 @@ class Inputs:
     seq_lens: tuple[int, ...]
     offsets: torch.Tensor
     state_indices: torch.Tensor
+    validated_metadata: object
     initial_state: torch.Tensor
     r: torch.Tensor
-    log_decay: torch.Tensor
+    decay_logits: torch.Tensor
     k: torch.Tensor
     v: torch.Tensor
     a: torch.Tensor
@@ -149,7 +150,7 @@ def _make_inputs(
         device="cuda",
         generator=generator,
     )
-    log_decay = -0.05 - 0.15 * torch.rand(
+    decay_logits = torch.randn(
         shape,
         dtype=torch.float32,
         device="cuda",
@@ -158,14 +159,23 @@ def _make_inputs(
     offsets = [0]
     for length in seq_lens:
         offsets.append(offsets[-1] + length)
+    cuda_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    cuda_state_indices = torch.arange(
+        len(seq_lens),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    validated_metadata = _C.prepare_recurrent_metadata(
+        cuda_offsets,
+        cuda_state_indices,
+        total_tokens,
+        len(seq_lens),
+    )
     return Inputs(
         seq_lens=seq_lens,
-        offsets=torch.tensor(offsets, device="cuda", dtype=torch.int32),
-        state_indices=torch.arange(
-            len(seq_lens),
-            device="cuda",
-            dtype=torch.int32,
-        ),
+        offsets=cuda_offsets,
+        state_indices=cuda_state_indices,
+        validated_metadata=validated_metadata,
         initial_state=0.02
         * torch.randn(
             (
@@ -179,7 +189,7 @@ def _make_inputs(
             generator=generator,
         ),
         r=normal(0.05).to(dtype),
-        log_decay=log_decay.to(dtype),
+        decay_logits=decay_logits.to(dtype),
         k=normal(0.05).to(dtype),
         v=normal(0.05).to(dtype),
         a=(-direction).to(dtype),
@@ -224,18 +234,21 @@ def _chunk_metadata(
 def _recurrent_expected(inputs: Inputs) -> tuple[torch.Tensor, torch.Tensor]:
     state = inputs.initial_state.clone()
     output = torch.empty_like(inputs.v)
-    _C.recurrent_fp32(
+    _C.recurrent_fp32_from_decay_logits(
         inputs.offsets,
         inputs.state_indices,
         state,
         inputs.r,
-        inputs.log_decay,
+        inputs.decay_logits,
         inputs.k,
         inputs.v,
         inputs.a,
         inputs.b,
         output,
         1.0,
+        None,
+        None,
+        inputs.validated_metadata,
     )
     torch.cuda.synchronize()
     return output, state
@@ -278,14 +291,14 @@ def _run_candidate(
     output = torch.empty_like(inputs.v)
 
     def call() -> None:
-        _C.materialized_chunk_fp32(
+        _C.materialized_chunk_fp32_from_decay_logits(
             sequence_chunk_offsets,
             chunk_starts,
             chunk_ends,
             inputs.state_indices,
             state,
             inputs.r,
-            inputs.log_decay,
+            inputs.decay_logits,
             inputs.k,
             inputs.v,
             inputs.a,
@@ -298,6 +311,8 @@ def _run_candidate(
             config.stages,
             config.state_tile,
             1.0,
+            None,
+            None,
         )
 
     state.copy_(inputs.initial_state)
@@ -466,7 +481,9 @@ def run(tuning: TuningConfig) -> dict[str, object]:
             "preallocated low-level three-kernel operator; state reset is "
             "ordered before the start event"
         ),
-        "correctness_baseline": "validated recurrent_fp32 low-level operator",
+        "correctness_baseline": (
+            "validated recurrent_fp32_from_decay_logits low-level operator"
+        ),
         "candidate_space": [
             config_as_dict(config) for config in enumerate_chunk_configs()
         ],
