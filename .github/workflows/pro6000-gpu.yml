@@ -253,6 +253,15 @@ jobs:
             --warmup-iters 3 \
             --samples 10 \
             --output artifacts/fused-decay-recurrent-benchmark.json
+          .venv/bin/python benchmarks/kernel_benchmark.py \
+            --identities \
+            vllm-rwkv/infer_recurrent_fp32io16_forward_varlen \
+            vllm-rwkv/infer_recurrent_fp16_forward_varlen \
+            flashkda-derived/infer_chunk_bf16_forward \
+            flashkda-derived/infer_chunk_bf16_forward_varlen \
+            --warmup-iters 3 \
+            --iters 10 \
+            --output artifacts/kernel-benchmark.json
       - name: Record immutable run identity
         env:
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
@@ -567,6 +576,59 @@ jobs:
                   f"unfused_launches={unfused_trace['cuda_kernel_count']} "
                   f"fused_launches={fused_trace['cuda_kernel_count']}"
               )
+          report.extend(("```", ""))
+
+          kernel_path = Path("artifacts/kernel-benchmark.json")
+          kernel_payload = json.loads(kernel_path.read_text())
+          expected_kernel_identities = {
+              "vllm-rwkv/infer_recurrent_fp32io16_forward_varlen",
+              "vllm-rwkv/infer_recurrent_fp16_forward_varlen",
+              "flashkda-derived/infer_chunk_bf16_forward",
+              "flashkda-derived/infer_chunk_bf16_forward_varlen",
+          }
+          actual_kernel_identities = {
+              kernel["identity"] for kernel in kernel_payload["kernels"]
+          }
+          flash_source = kernel_payload["source"]["flash_rwkv"]
+          if (
+              actual_kernel_identities != expected_kernel_identities
+              or kernel_payload["kernel_count"] != 4
+              or kernel_payload["case_count"] != 84
+              or not kernel_payload["matrix_complete"]
+              or not kernel_payload["all_cases_valid"]
+              or not kernel_payload["all_cases_measured"]
+              or flash_source["revision"] != os.environ["HEAD_SHA"]
+              or flash_source["dirty"] is not False
+          ):
+              raise SystemExit(
+                  f"invalid non-FLA kernel benchmark evidence: {kernel_payload}"
+              )
+          report.extend((f"#### `{kernel_path.name}`", "", "```text"))
+          for kernel in kernel_payload["kernels"]:
+              if (
+                  kernel["case_count"] != 21
+                  or kernel["valid_measurement_count"] != 21
+                  or kernel["measured_row_count"] != 21
+                  or not kernel["matrix_complete"]
+              ):
+                  raise SystemExit(
+                      f"incomplete kernel benchmark matrix: {kernel}"
+                  )
+              for case in kernel["cases"]:
+                  measurement = case["measurement"]
+                  row = measurement["row"]
+                  if not measurement["valid"] or row is None:
+                      raise SystemExit(
+                          f"invalid kernel benchmark row: {kernel['identity']} {case}"
+                      )
+                  report.append(
+                      f"RESULT B={row['B']} T={row['T']} iters={row['iters']} "
+                      f"p10_ms={metric(row['p10_ms'])} "
+                      f"p50_ms={metric(row['p50_ms'])} "
+                      f"p90_ms={metric(row['p90_ms'])} "
+                      f"tok_s_p50={metric(row['tok_s_p50'])} "
+                      f"identity={kernel['identity']}"
+                  )
           report.extend(("```", ""))
           Path("artifacts/benchmark-report.md").write_text(
               "\n".join(report), encoding="utf-8"

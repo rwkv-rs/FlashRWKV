@@ -165,6 +165,26 @@ def test_racecheck_covers_registered_statetune_result_identity() -> None:
     assert '"statetune_results": statetune_results' in source
 
 
+def test_racecheck_covers_fused_raw_decay_chunk_families() -> None:
+    source = (ROOT / "tests/racecheck/fused_operators.py").read_text()
+
+    required_public_calls = {
+        "infer_chunk_bf16_forward(": "infer_chunk_bf16_forward_raw_decay_bias",
+        "infer_chunk_bf16_forward_varlen(": (
+            "infer_chunk_bf16_forward_varlen_raw_decay_bias"
+        ),
+        "rl_infctx_chunk_fp32io16_factor_recompute(": (
+            "rl_infctx_chunk_fp32io16_factor_recompute_packed_raw_decay_bias"
+        ),
+        "rwkv7_chunk(": "rwkv7_chunk_materialized_raw_decay_bias",
+    }
+    for public_call, result_name in required_public_calls.items():
+        assert public_call in source
+        assert result_name in source
+    assert "decay_bias=" in source
+    assert "*run_fused_decay_chunk_paths()," in source
+
+
 @pytest.mark.parametrize(
     ("name", "layouts", "message"),
     [
