@@ -261,6 +261,13 @@ def test_gpu_workflow_is_independent_of_unmerged_fla_revisions() -> None:
     assert "unfused_correct_product" in workflow
     assert "fused_raw_product" in workflow
     assert "fused decay launch gate failed" in workflow
+    assert "benchmarks/kernel_benchmark.py" in workflow
+    assert "vllm-rwkv/infer_recurrent_fp32io16_forward_varlen" in workflow
+    assert "vllm-rwkv/infer_recurrent_fp16_forward_varlen" in workflow
+    assert "flashkda-derived/infer_chunk_bf16_forward" in workflow
+    assert "flashkda-derived/infer_chunk_bf16_forward_varlen" in workflow
+    assert 'kernel_payload["case_count"] != 84' in workflow
+    assert 'kernel["valid_measurement_count"] != 21' in workflow
 
 
 def test_gpu_workflow_binds_dispatch_evidence_to_the_exact_pull_head() -> None:

@@ -11,6 +11,8 @@ import torch
 
 from flash_rwkv import (
     _C,
+    infer_chunk_bf16_forward,
+    infer_chunk_bf16_forward_varlen,
     infer_cmix_mix_fp16,
     infer_tmix_kk_a_gate_fp16,
     infer_tmix_lnx_rkvres_xg_fp16,
@@ -25,6 +27,8 @@ from flash_rwkv import (
     pretrain_tmix_lnx_rkvres_xg_bf16,
     pretrain_tmix_mix6_bf16,
     pretrain_tmix_vres_gate_bf16,
+    rl_infctx_chunk_fp32io16_factor_recompute,
+    rwkv7_chunk,
     rwkv7_recurrent_stateful,
     statetune_recurrent_fp32io16_forward,
 )
@@ -62,6 +66,10 @@ def _bf16(shape: tuple[int, ...], *, scale: float = 0.2) -> torch.Tensor:
 
 def _fp16(shape: tuple[int, ...], *, scale: float = 0.2) -> torch.Tensor:
     return torch.randn(*shape, device="cuda", dtype=torch.float16).mul_(scale)
+
+
+def _bf16_forward(shape: tuple[int, ...], *, scale: float = 0.02) -> torch.Tensor:
+    return torch.randn(*shape, device="cuda", dtype=torch.bfloat16).mul_(scale)
 
 
 def _training_token(
@@ -276,6 +284,130 @@ def run_inference() -> list[str]:
     return names
 
 
+def _assert_finite_forward(
+    result: tuple[torch.Tensor, torch.Tensor | None],
+    *,
+    operator: str,
+) -> None:
+    output, final_state = result
+    if final_state is None:
+        raise AssertionError(f"{operator} omitted final state")
+    if not torch.isfinite(output).all().item():
+        raise AssertionError(f"{operator} output is non-finite")
+    if not torch.isfinite(final_state).all().item():
+        raise AssertionError(f"{operator} final state is non-finite")
+    torch.cuda.synchronize()
+
+
+def run_fused_decay_chunk_paths() -> list[str]:
+    """Exercise every raw-decay chunk family under Compute Sanitizer."""
+
+    names: list[str] = []
+    kda_fixed_shape = (1, 17, 1, 64)
+    kda_fixed_inputs = tuple(_bf16_forward(kda_fixed_shape) for _ in range(6))
+    kda_decay_bias = torch.linspace(
+        -0.2,
+        0.2,
+        64,
+        device="cuda",
+        dtype=torch.bfloat16,
+    ).reshape(1, 64)
+    _assert_finite_forward(
+        infer_chunk_bf16_forward(
+            *kda_fixed_inputs,
+            initial_state=torch.full(
+                (1, 1, 64, 64),
+                0.02,
+                device="cuda",
+                dtype=torch.bfloat16,
+            ),
+            decay_bias=kda_decay_bias,
+        ),
+        operator="infer_chunk_bf16_forward",
+    )
+    names.append("infer_chunk_bf16_forward_raw_decay_bias")
+
+    kda_packed_shape = (1, 18, 1, 64)
+    kda_packed_inputs = tuple(_bf16_forward(kda_packed_shape) for _ in range(6))
+    kda_cu_seqlens = torch.tensor([0, 1, 18], device="cuda", dtype=torch.int32)
+    _assert_finite_forward(
+        infer_chunk_bf16_forward_varlen(
+            *kda_packed_inputs,
+            initial_state=torch.full(
+                (2, 1, 64, 64),
+                0.02,
+                device="cuda",
+                dtype=torch.bfloat16,
+            ),
+            cu_seqlens=kda_cu_seqlens,
+            decay_bias=kda_decay_bias,
+        ),
+        operator="infer_chunk_bf16_forward_varlen",
+    )
+    names.append("infer_chunk_bf16_forward_varlen_raw_decay_bias")
+
+    rl_fixed_shape = (1, 17, 1, 64)
+    rl_fixed_inputs = tuple(_fp16(rl_fixed_shape, scale=0.02) for _ in range(6))
+    rl_decay_bias = torch.linspace(
+        0.15,
+        -0.15,
+        64,
+        device="cuda",
+        dtype=torch.float16,
+    ).reshape(1, 64)
+    rl_initial_state = torch.full(
+        (1, 1, 64, 64),
+        0.02,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    _assert_finite_forward(
+        rl_infctx_chunk_fp32io16_factor_recompute(
+            *rl_fixed_inputs,
+            initial_state=rl_initial_state,
+            chunk_size=16,
+            decay_bias=rl_decay_bias,
+        ),
+        operator="rl_infctx_chunk_fp32io16_factor_recompute_fixed",
+    )
+    names.append("rl_infctx_chunk_fp32io16_factor_recompute_fixed_raw_decay_bias")
+
+    rl_packed_shape = (1, 20, 1, 64)
+    rl_packed_inputs = tuple(_fp16(rl_packed_shape, scale=0.02) for _ in range(6))
+    rl_cu_seqlens = torch.tensor([0, 3, 20], device="cuda", dtype=torch.int64)
+    rl_state_indices = torch.tensor([2, 0], device="cuda", dtype=torch.int32)
+    _assert_finite_forward(
+        rl_infctx_chunk_fp32io16_factor_recompute(
+            *rl_packed_inputs,
+            initial_state=torch.full(
+                (3, 1, 64, 64),
+                0.02,
+                device="cuda",
+                dtype=torch.float32,
+            ),
+            cu_seqlens=rl_cu_seqlens,
+            state_indices=rl_state_indices,
+            chunk_size=16,
+            decay_bias=rl_decay_bias,
+        ),
+        operator="rl_infctx_chunk_fp32io16_factor_recompute_packed",
+    )
+    names.append("rl_infctx_chunk_fp32io16_factor_recompute_packed_raw_decay_bias")
+
+    _assert_finite_forward(
+        rwkv7_chunk(
+            *rl_fixed_inputs,
+            initial_state=rl_initial_state,
+            output_final_state=True,
+            chunk_size=16,
+            decay_bias=rl_decay_bias,
+        ),
+        operator="rwkv7_chunk_materialized",
+    )
+    names.append("rwkv7_chunk_materialized_raw_decay_bias")
+    return names
+
+
 def run_hostile_packed_metadata() -> list[str]:
     names: list[str] = []
     packed_shape = (1, 3, 1, 64)
@@ -341,6 +473,7 @@ def main() -> None:
         *run_training(),
         *(f"{result['name']}_{result['input_dtype']}" for result in statetune_results),
         *run_inference(),
+        *run_fused_decay_chunk_paths(),
         *run_hostile_packed_metadata(),
     ]
     print(
