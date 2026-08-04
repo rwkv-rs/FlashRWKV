@@ -336,9 +336,9 @@ def _source_digest() -> str:
     digest = hashlib.sha256()
     for path in sorted(
         (
-            SOURCE_ROOT / "csrc/infer/tmix/infer_common_tmix_fp16_forward_registration.cpp",
+            SOURCE_ROOT / "csrc/infer/tmix/registration/infer_common_tmix_fp16_forward.cpp",
             SOURCE_ROOT / "csrc/infer/tmix/infer_common_tmix_fp16_forward.cu",
-            SOURCE_ROOT / "csrc/infer/cmix/infer_common_cmix_fp16_forward_registration.cpp",
+            SOURCE_ROOT / "csrc/infer/cmix/registration/infer_common_cmix_fp16_forward.cpp",
             SOURCE_ROOT / "csrc/infer/cmix/infer_common_cmix_fp16_forward.cu",
             SOURCE_ROOT / "flash_rwkv/inference_blocks.py",
             Path(__file__),
