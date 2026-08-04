@@ -222,14 +222,8 @@ def _prepare_tmix_mix6_varlen(
     )
     mixes = tuple(_random((channels,)) for _ in range(6))
     result: tuple[torch.Tensor, ...] = ()
-    previous = torch.empty_like(x)
+    previous = x.roll(1, dims=0)
     previous[cu_seqlens[:-1]] = initial_state[state_indices]
-    if token_count > 1:
-        token_indices = torch.arange(
-            x.shape[0], device="cuda", dtype=torch.int32
-        )
-        is_not_first = (token_indices % token_count) != 0
-        previous[is_not_first] = x[:-batch_size]
     delta = previous.float() - x.float()
     expected = tuple((x.float() + delta * mix.float()).half() for mix in mixes)
 
@@ -256,14 +250,8 @@ def _prepare_cmix_mix_varlen(
     )
     mix = _random((channels,))
     result: tuple[torch.Tensor, ...] = ()
-    previous = torch.empty_like(x)
+    previous = x.roll(1, dims=0)
     previous[cu_seqlens[:-1]] = initial_state[state_indices]
-    if token_count > 1:
-        token_indices = torch.arange(
-            x.shape[0], device="cuda", dtype=torch.int32
-        )
-        is_not_first = (token_indices % token_count) != 0
-        previous[is_not_first] = x[:-batch_size]
     expected = (
         (x.float() + (previous.float() - x.float()) * mix.float()).half(),
         expected_state,
