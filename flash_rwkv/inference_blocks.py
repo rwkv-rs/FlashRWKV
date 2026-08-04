@@ -42,6 +42,60 @@ def infer_tmix_mix6_fp16(
     )
 
 
+def infer_tmix_mix6_fp16_varlen(
+    x: torch.Tensor,
+    state_pool: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    mixes: Sequence[torch.Tensor],
+    *,
+    token_batch_indices: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, ...]:
+    """Create six TimeMix projections for packed sequences.
+
+    ``state_pool`` is updated in place at the last token of every non-empty
+    sequence.  ``state_indices`` selects the state row for each sequence and
+    ``cu_seqlens`` describes the packed token ranges.  Callers that already
+    maintain a token-to-sequence map can pass it as ``token_batch_indices``;
+    otherwise the native kernel locates the sequence from ``cu_seqlens``.
+    """
+
+    num_sequences, total_tokens, channels = _validate_packed_shift_inputs(
+        x, state_pool, state_indices, cu_seqlens
+    )
+    if len(mixes) != 6:
+        raise ValueError("mixes must contain x_r, x_w, x_k, x_v, x_a, and x_g")
+    for name, mix in zip(
+        ("x_r", "x_w", "x_k", "x_v", "x_a", "x_g"), mixes, strict=True
+    ):
+        _validate_vector(mix, channels, x, name)
+    if token_batch_indices is None:
+        token_batch_indices = torch.empty(
+            0, dtype=torch.int32, device=x.device
+        )
+    else:
+        _validate_packed_index_tensor(
+            token_batch_indices,
+            x,
+            "token_batch_indices",
+            expected_size=total_tokens,
+        )
+    _load_extension()
+    return tuple(
+        torch.ops.rwkv7_fast_ops_fp16.tmix_mix6_varlen(
+            num_sequences,
+            total_tokens,
+            channels,
+            x,
+            state_pool,
+            state_indices,
+            cu_seqlens,
+            token_batch_indices,
+            *mixes,
+        )
+    )
+
+
 def infer_tmix_kk_a_gate_fp16(
     key: torch.Tensor,
     key_scale: torch.Tensor,
@@ -178,6 +232,52 @@ def infer_cmix_mix_fp16(
     )
 
 
+def infer_cmix_mix_fp16_varlen(
+    x: torch.Tensor,
+    state_pool: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    mix: torch.Tensor,
+    *,
+    token_batch_indices: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Create the ChannelMix input for packed sequences and update state.
+
+    The state/cache contract is identical to
+    :func:`infer_tmix_mix6_fp16_varlen`: each non-empty packed sequence reads
+    its first-token predecessor from ``state_pool[state_indices[b]]`` and
+    writes its final input row back to that state row.
+    """
+
+    num_sequences, total_tokens, channels = _validate_packed_shift_inputs(
+        x, state_pool, state_indices, cu_seqlens
+    )
+    _validate_vector(mix, channels, x, "mix")
+    if token_batch_indices is None:
+        token_batch_indices = torch.empty(
+            0, dtype=torch.int32, device=x.device
+        )
+    else:
+        _validate_packed_index_tensor(
+            token_batch_indices,
+            x,
+            "token_batch_indices",
+            expected_size=total_tokens,
+        )
+    _load_extension()
+    return torch.ops.rwkv7_fast_ops_fp16.cmix_mix_varlen(
+        num_sequences,
+        total_tokens,
+        channels,
+        x,
+        state_pool,
+        state_indices,
+        cu_seqlens,
+        token_batch_indices,
+        mix,
+    )
+
+
 def _validate_shift_inputs(
     x: torch.Tensor,
     shift_state: torch.Tensor,
@@ -193,6 +293,60 @@ def _validate_shift_inputs(
     if _storage_ranges_overlap(x, shift_state):
         raise ValueError(f"{state_name} must not alias x")
     return batch_size, token_count, channels
+
+
+def _validate_packed_shift_inputs(
+    x: torch.Tensor,
+    state_pool: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> tuple[int, int, int]:
+    if not isinstance(x, torch.Tensor):
+        raise TypeError("x must be a torch.Tensor")
+    if x.ndim != 2 or any(dimension <= 0 for dimension in x.shape):
+        raise ValueError("x must have non-empty shape [total_tokens, C]")
+    _validate_tensor(x, x, "x")
+    total_tokens, channels = x.shape
+    _validate_tensor(state_pool, x, "state_pool")
+    if state_pool.ndim != 2 or state_pool.shape[0] <= 0 or state_pool.shape[1] != channels:
+        raise ValueError(f"state_pool must have shape [state_pool_size, {channels}]")
+    _validate_packed_index_tensor(
+        state_indices, x, "state_indices", expected_size=None
+    )
+    _validate_packed_index_tensor(
+        cu_seqlens, x, "cu_seqlens", expected_size=state_indices.numel() + 1
+    )
+    num_sequences = state_indices.numel()
+    if num_sequences <= 0:
+        raise ValueError("state_indices must contain at least one sequence")
+    if channels % 2:
+        raise ValueError("FP16 fused mix operators require an even channel count")
+    if _storage_ranges_overlap(x, state_pool):
+        raise ValueError("state_pool must not alias x")
+    return num_sequences, total_tokens, channels
+
+
+def _validate_packed_index_tensor(
+    tensor: torch.Tensor,
+    reference: torch.Tensor,
+    name: str,
+    *,
+    expected_size: int | None,
+) -> None:
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor")
+    if tensor.dtype != torch.int32:
+        raise TypeError(f"{name} must have dtype torch.int32")
+    if not tensor.is_cuda:
+        raise ValueError(f"{name} must be a CUDA tensor")
+    if not tensor.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
+    if tensor.device != reference.device:
+        raise ValueError(f"{name} must be on the same CUDA device as the primary input")
+    if tensor.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if expected_size is not None and tensor.numel() != expected_size:
+        raise ValueError(f"{name} must have {expected_size} entries")
 
 
 def _validate_sequence(tensor: torch.Tensor, name: str) -> tuple[int, int, int]:

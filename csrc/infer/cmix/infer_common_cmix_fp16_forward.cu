@@ -224,6 +224,88 @@ __global__ void zero_vec4_kernel(dtype* __restrict__ out, int64_t n_vec4) {
   }
 }
 
+__device__ inline int packed_sequence_for_token(
+    const int* __restrict__ cu_seqlens,
+    int num_sequences,
+    int token) {
+  int low = 0;
+  int high = num_sequences;
+  while (low < high) {
+    const int middle = low + (high - low) / 2;
+    if (cu_seqlens[middle + 1] <= token) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
+
+template <bool HasTokenBatchIndices>
+__global__ void cmix_mix_varlen_kernel(
+    int num_sequences,
+    int C,
+    const dtype* __restrict__ x,
+    dtype* __restrict__ state_pool,
+    const int* __restrict__ state_indices,
+    const int* __restrict__ cu_seqlens,
+    const int* __restrict__ token_batch_indices,
+    const dtype* __restrict__ x_k,
+    dtype* __restrict__ out,
+    int64_t total_pairs) {
+  const int64_t pair_idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (pair_idx >= total_pairs) {
+    return;
+  }
+
+  const int c_pairs = C >> 1;
+  const int token = static_cast<int>(pair_idx / c_pairs);
+  const int c = static_cast<int>(pair_idx - static_cast<int64_t>(token) * c_pairs) << 1;
+  const int sequence = HasTokenBatchIndices
+      ? token_batch_indices[token]
+      : packed_sequence_for_token(cu_seqlens, num_sequences, token);
+  const int token_start = cu_seqlens[sequence];
+  const int64_t idx = static_cast<int64_t>(token) * C + c;
+  const int state_row = state_indices[sequence];
+
+  const __half2 cur2 = load_h2(x + idx);
+  const __half2 prev2 = token == token_start
+      ? load_h2(state_pool + static_cast<int64_t>(state_row) * C + c)
+      : load_h2(x + idx - C);
+  const float2 cur = __half22float2(cur2);
+  const float2 prev = __half22float2(prev2);
+  const float2 mix = __half22float2(load_h2(x_k + c));
+  store_h2(out + idx,
+           cur.x + (prev.x - cur.x) * mix.x,
+           cur.y + (prev.y - cur.y) * mix.y);
+}
+
+__global__ void update_shift_state_varlen_kernel(
+    int C,
+    const dtype* __restrict__ x,
+    dtype* __restrict__ state_pool,
+    const int* __restrict__ state_indices,
+    const int* __restrict__ cu_seqlens,
+    int num_sequences,
+    int64_t total_pairs) {
+  const int64_t pair_idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (pair_idx >= total_pairs) {
+    return;
+  }
+  const int c_pairs = C >> 1;
+  const int sequence = static_cast<int>(pair_idx / c_pairs);
+  const int c = static_cast<int>(pair_idx - static_cast<int64_t>(sequence) * c_pairs) << 1;
+  if (sequence >= num_sequences) {
+    return;
+  }
+  const int last_token = cu_seqlens[sequence + 1] - 1;
+  const int state_row = state_indices[sequence];
+  *reinterpret_cast<__half2*>(state_pool + static_cast<int64_t>(state_row) * C + c) =
+      load_h2(x + static_cast<int64_t>(last_token) * C + c);
+}
+
 template <bool UpdateShift>
 __global__ void cmix_mix_kernel(
     int T,
@@ -1202,6 +1284,45 @@ at::Tensor cmix_mix_cuda(
   return out;
 }
 
+at::Tensor cmix_mix_varlen_cuda(
+    int num_sequences,
+    int total_tokens,
+    int C,
+    at::Tensor x,
+    at::Tensor state_pool,
+    at::Tensor state_indices,
+    at::Tensor cu_seqlens,
+    at::Tensor token_batch_indices,
+    at::Tensor x_k) {
+  auto out = at::empty_like(x);
+  constexpr int threads = 256;
+  const int64_t total_pairs = static_cast<int64_t>(total_tokens) * (C / 2);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  const bool has_token_batch_indices = token_batch_indices.numel() != 0;
+  if (has_token_batch_indices) {
+    cmix_mix_varlen_kernel<true><<<
+        static_cast<int>(ceil_div(total_pairs, threads)), threads, 0, stream>>>(
+        num_sequences, C, x.data_ptr<dtype>(), state_pool.data_ptr<dtype>(),
+        state_indices.data_ptr<int>(), cu_seqlens.data_ptr<int>(),
+        token_batch_indices.data_ptr<int>(), x_k.data_ptr<dtype>(),
+        out.data_ptr<dtype>(), total_pairs);
+  } else {
+    cmix_mix_varlen_kernel<false><<<
+        static_cast<int>(ceil_div(total_pairs, threads)), threads, 0, stream>>>(
+        num_sequences, C, x.data_ptr<dtype>(), state_pool.data_ptr<dtype>(),
+        state_indices.data_ptr<int>(), cu_seqlens.data_ptr<int>(), nullptr,
+        x_k.data_ptr<dtype>(), out.data_ptr<dtype>(), total_pairs);
+  }
+  const int64_t state_pairs = static_cast<int64_t>(num_sequences) * (C / 2);
+  update_shift_state_varlen_kernel<<<
+      static_cast<int>(ceil_div(state_pairs, threads)), threads, 0, stream>>>(
+      C, x.data_ptr<dtype>(), state_pool.data_ptr<dtype>(),
+      state_indices.data_ptr<int>(), cu_seqlens.data_ptr<int>(), num_sequences,
+      state_pairs);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 at::Tensor cmix_mix_cfg_cuda(
     int B,
     int T,
@@ -1319,4 +1440,3 @@ void cmix_mix_3d_out_cuda(
     at::Tensor out) {
   launch_cmix_mix_3d(B, T, C, x, shift_state, x_k, out);
 }
-

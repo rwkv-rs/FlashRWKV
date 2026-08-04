@@ -19,9 +19,11 @@ import torch
 
 from flash_rwkv import (
     infer_cmix_mix_fp16,
+    infer_cmix_mix_fp16_varlen,
     infer_tmix_kk_a_gate_fp16,
     infer_tmix_lnx_rkvres_xg_fp16,
     infer_tmix_mix6_fp16,
+    infer_tmix_mix6_fp16_varlen,
     infer_tmix_vres_gate_fp16,
 )
 from flash_rwkv.benchmark_contract import (
@@ -180,12 +182,116 @@ def _prepare_cmix(batch_size: int, token_count: int, channels: int) -> PreparedC
     return PreparedCase(reset, launch, lambda: result, expected)
 
 
+def _packed_metadata(
+    batch_size: int,
+    token_count: int,
+    channels: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    total_tokens = batch_size * token_count
+    x = _random((total_tokens, channels))
+    state_indices = torch.arange(
+        1, batch_size + 1, device="cuda", dtype=torch.int32
+    )
+    state_pool = _random((batch_size + 2, channels))
+    initial_state = state_pool.clone()
+    cu_seqlens = torch.arange(
+        0,
+        total_tokens + 1,
+        token_count,
+        device="cuda",
+        dtype=torch.int32,
+    )
+    last_tokens = cu_seqlens[1:] - 1
+    expected_state = initial_state.clone()
+    expected_state[state_indices] = x[last_tokens]
+    return x, state_pool, initial_state, state_indices, cu_seqlens, expected_state
+
+
+def _prepare_tmix_mix6_varlen(
+    batch_size: int, token_count: int, channels: int
+) -> PreparedCase:
+    x, state_pool, initial_state, state_indices, cu_seqlens, expected_state = (
+        _packed_metadata(batch_size, token_count, channels)
+    )
+    mixes = tuple(_random((channels,)) for _ in range(6))
+    result: tuple[torch.Tensor, ...] = ()
+    previous = torch.empty_like(x)
+    previous[cu_seqlens[:-1]] = initial_state[state_indices]
+    if token_count > 1:
+        token_indices = torch.arange(
+            x.shape[0], device="cuda", dtype=torch.int32
+        )
+        is_not_first = (token_indices % token_count) != 0
+        previous[is_not_first] = x[:-batch_size]
+    delta = previous.float() - x.float()
+    expected = tuple((x.float() + delta * mix.float()).half() for mix in mixes)
+
+    def reset() -> None:
+        state_pool.copy_(initial_state)
+
+    def launch() -> None:
+        nonlocal result
+        result = (
+            *infer_tmix_mix6_fp16_varlen(
+                x, state_pool, state_indices, cu_seqlens, mixes
+            ),
+            state_pool.clone(),
+        )
+
+    return PreparedCase(reset, launch, lambda: result, (*expected, expected_state))
+
+
+def _prepare_cmix_mix_varlen(
+    batch_size: int, token_count: int, channels: int
+) -> PreparedCase:
+    x, state_pool, initial_state, state_indices, cu_seqlens, expected_state = (
+        _packed_metadata(batch_size, token_count, channels)
+    )
+    mix = _random((channels,))
+    result: tuple[torch.Tensor, ...] = ()
+    previous = torch.empty_like(x)
+    previous[cu_seqlens[:-1]] = initial_state[state_indices]
+    if token_count > 1:
+        token_indices = torch.arange(
+            x.shape[0], device="cuda", dtype=torch.int32
+        )
+        is_not_first = (token_indices % token_count) != 0
+        previous[is_not_first] = x[:-batch_size]
+    expected = (
+        (x.float() + (previous.float() - x.float()) * mix.float()).half(),
+        expected_state,
+    )
+
+    def reset() -> None:
+        state_pool.copy_(initial_state)
+
+    def launch() -> None:
+        nonlocal result
+        result = (
+            infer_cmix_mix_fp16_varlen(
+                x, state_pool, state_indices, cu_seqlens, mix
+            ),
+            state_pool.clone(),
+        )
+
+    return PreparedCase(reset, launch, lambda: result, expected)
+
+
 BUILDERS: dict[str, Callable[[int, int, int], PreparedCase]] = {
     "albatross/infer_tmix_mix6_fp16_forward": _prepare_mix6,
     "albatross/infer_tmix_kk_a_gate_fp16_forward": _prepare_kk_gate,
     "albatross/infer_tmix_lnx_rkvres_xg_fp16_forward": _prepare_lnx,
     "albatross/infer_tmix_vres_gate_fp16_forward": _prepare_vres,
     "albatross/infer_cmix_mix_fp16_forward": _prepare_cmix,
+    "flash_rwkv/infer_tmix_mix6_fp16_varlen_forward": _prepare_tmix_mix6_varlen,
+    "flash_rwkv/infer_cmix_mix_fp16_varlen_forward": _prepare_cmix_mix_varlen,
 }
 
 

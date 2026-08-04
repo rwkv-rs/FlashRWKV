@@ -20,6 +20,21 @@ std::vector<torch::Tensor> tmix_mix6_cuda(
     torch::Tensor x_v,
     torch::Tensor x_a,
     torch::Tensor x_g);
+std::vector<torch::Tensor> tmix_mix6_varlen_cuda(
+    int B,
+    int total_tokens,
+    int C,
+    torch::Tensor x,
+    torch::Tensor state_pool,
+    torch::Tensor state_indices,
+    torch::Tensor cu_seqlens,
+    torch::Tensor token_batch_indices,
+    torch::Tensor x_r,
+    torch::Tensor x_w,
+    torch::Tensor x_k,
+    torch::Tensor x_v,
+    torch::Tensor x_a,
+    torch::Tensor x_g);
 std::vector<torch::Tensor> tmix_mix6_cfg_cuda(
     int B,
     int T,
@@ -261,6 +276,79 @@ void check_half2_same_device(
   }
 }
 
+void check_int32_cuda_contig(const torch::Tensor& x, const char* name) {
+  TORCH_CHECK(x.is_cuda(), name, " must be CUDA");
+  TORCH_CHECK(x.is_contiguous(), name, " must be contiguous");
+  TORCH_CHECK(x.scalar_type() == torch::kInt32, name, " must be int32");
+}
+
+void check_tmix_mix6_varlen_inputs(
+    int64_t B,
+    int64_t total_tokens,
+    int64_t C,
+    const torch::Tensor& x,
+    const torch::Tensor& state_pool,
+    const torch::Tensor& state_indices,
+    const torch::Tensor& cu_seqlens,
+    const torch::Tensor& token_batch_indices,
+    const torch::Tensor& x_r,
+    const torch::Tensor& x_w,
+    const torch::Tensor& x_k,
+    const torch::Tensor& x_v,
+    const torch::Tensor& x_a,
+    const torch::Tensor& x_g) {
+  TORCH_CHECK(B > 0 && B <= std::numeric_limits<int>::max(),
+              "B must be positive int32");
+  TORCH_CHECK(total_tokens > 0 && total_tokens <= std::numeric_limits<int>::max(),
+              "total_tokens must be positive int32");
+  TORCH_CHECK(C > 0 && C <= std::numeric_limits<int>::max() && (C % 2) == 0,
+              "C must be positive even int32");
+  check_half_cuda_contig(x, "x");
+  TORCH_CHECK(x.dim() == 2 && x.size(0) == total_tokens && x.size(1) == C,
+              "x must have shape [total_tokens,C]");
+  check_half_cuda_contig(state_pool, "state_pool");
+  TORCH_CHECK(state_pool.dim() == 2 && state_pool.size(0) > 0 &&
+                  state_pool.size(1) == C,
+              "state_pool must have shape [state_pool_size,C]");
+  check_int32_cuda_contig(state_indices, "state_indices");
+  check_int32_cuda_contig(cu_seqlens, "cu_seqlens");
+  TORCH_CHECK(state_indices.dim() == 1 && state_indices.size(0) == B,
+              "state_indices must have shape [B]");
+  TORCH_CHECK(cu_seqlens.dim() == 1 && cu_seqlens.size(0) == B + 1,
+              "cu_seqlens must have shape [B+1]");
+  check_int32_cuda_contig(token_batch_indices, "token_batch_indices");
+  TORCH_CHECK(token_batch_indices.numel() == 0 ||
+                  (token_batch_indices.dim() == 1 &&
+                   token_batch_indices.size(0) == total_tokens),
+              "token_batch_indices must be empty or have shape [total_tokens]");
+  check_vec(x_r, C, "x_r");
+  check_vec(x_w, C, "x_w");
+  check_vec(x_k, C, "x_k");
+  check_vec(x_v, C, "x_v");
+  check_vec(x_a, C, "x_a");
+  check_vec(x_g, C, "x_g");
+  check_same_device({
+      {&x, "x"}, {&state_pool, "state_pool"}, {&state_indices, "state_indices"},
+      {&cu_seqlens, "cu_seqlens"}, {&token_batch_indices, "token_batch_indices"},
+      {&x_r, "x_r"}, {&x_w, "x_w"}, {&x_k, "x_k"}, {&x_v, "x_v"},
+      {&x_a, "x_a"}, {&x_g, "x_g"}});
+  check_half2_aligned(x, "x");
+  check_half2_aligned(state_pool, "state_pool");
+  check_half2_aligned(x_r, "x_r");
+  check_half2_aligned(x_w, "x_w");
+  check_half2_aligned(x_k, "x_k");
+  check_half2_aligned(x_v, "x_v");
+  check_half2_aligned(x_a, "x_a");
+  check_half2_aligned(x_g, "x_g");
+  check_no_storage_overlap(state_pool, "state_pool", x, "x");
+  check_no_storage_overlap(state_pool, "state_pool", x_r, "x_r");
+  check_no_storage_overlap(state_pool, "state_pool", x_w, "x_w");
+  check_no_storage_overlap(state_pool, "state_pool", x_k, "x_k");
+  check_no_storage_overlap(state_pool, "state_pool", x_v, "x_v");
+  check_no_storage_overlap(state_pool, "state_pool", x_a, "x_a");
+  check_no_storage_overlap(state_pool, "state_pool", x_g, "x_g");
+}
+
 }  // namespace
 
 std::vector<torch::Tensor> tmix_mix6(
@@ -292,6 +380,30 @@ std::vector<torch::Tensor> tmix_mix6(
   return tmix_mix6_cuda(
       static_cast<int>(B), static_cast<int>(T), static_cast<int>(C),
       x, shift_state, x_r, x_w, x_k, x_v, x_a, x_g);
+}
+
+std::vector<torch::Tensor> tmix_mix6_varlen(
+    int64_t B,
+    int64_t total_tokens,
+    int64_t C,
+    torch::Tensor x,
+    torch::Tensor state_pool,
+    torch::Tensor state_indices,
+    torch::Tensor cu_seqlens,
+    torch::Tensor token_batch_indices,
+    torch::Tensor x_r,
+    torch::Tensor x_w,
+    torch::Tensor x_k,
+    torch::Tensor x_v,
+    torch::Tensor x_a,
+    torch::Tensor x_g) {
+  check_tmix_mix6_varlen_inputs(
+      B, total_tokens, C, x, state_pool, state_indices, cu_seqlens,
+      token_batch_indices, x_r, x_w, x_k, x_v, x_a, x_g);
+  return tmix_mix6_varlen_cuda(
+      static_cast<int>(B), static_cast<int>(total_tokens), static_cast<int>(C),
+      x, state_pool, state_indices, cu_seqlens, token_batch_indices,
+      x_r, x_w, x_k, x_v, x_a, x_g);
 }
 
 std::vector<torch::Tensor> tmix_mix6_cfg(
@@ -761,6 +873,11 @@ TORCH_LIBRARY_FRAGMENT(rwkv7_fast_ops_fp16, m) {
       "tmix_mix6(int B, int T, int C, Tensor x, Tensor(a!) shift_state, "
       "Tensor x_r, Tensor x_w, Tensor x_k, Tensor x_v, Tensor x_a, Tensor x_g) -> Tensor[]");
   m.def(
+      "tmix_mix6_varlen(int B, int total_tokens, int C, Tensor x, "
+      "Tensor(a!) state_pool, Tensor state_indices, Tensor cu_seqlens, "
+      "Tensor token_batch_indices, Tensor x_r, Tensor x_w, Tensor x_k, "
+      "Tensor x_v, Tensor x_a, Tensor x_g) -> Tensor[]");
+  m.def(
       "tmix_mix6_cfg(int B, int T, int C, Tensor x, Tensor(a!) shift_state, "
       "Tensor x_r, Tensor x_w, Tensor x_k, Tensor x_v, Tensor x_a, Tensor x_g, int threads) -> Tensor[]");
   m.def(
@@ -802,6 +919,7 @@ TORCH_LIBRARY_FRAGMENT(rwkv7_fast_ops_fp16, m) {
 
 TORCH_LIBRARY_IMPL(rwkv7_fast_ops_fp16, CUDA, m) {
   m.impl("tmix_mix6", &tmix_mix6);
+  m.impl("tmix_mix6_varlen", &tmix_mix6_varlen);
   m.impl("tmix_mix6_cfg", &tmix_mix6_cfg);
   m.impl("tmix_mix6_3d", &tmix_mix6_3d);
   m.impl("tmix_mix6_cfg_out", &tmix_mix6_cfg_out);

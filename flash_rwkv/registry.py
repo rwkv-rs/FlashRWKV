@@ -478,6 +478,48 @@ INFERENCE_OPERATOR_SPECS: tuple[InferenceOperatorSpec, ...] = (
         input_contract=("x[B,T,C]", "shift_state[B,C]", "mix[C]"),
         output_contract=("mixed[B,T,C]", "updated shift_state[B,C]"),
     ),
+    InferenceOperatorSpec(
+        provider="flash_rwkv",
+        name="infer_tmix_mix6_fp16_varlen_forward",
+        family="tmix",
+        dtype="float16",
+        state_behavior="mutates_shift",
+        native_op="rwkv7_fast_ops_fp16::tmix_mix6_varlen",
+        source_revision="0b5a07a5d7babbaa5d47cb57139ba239991b8a74",
+        input_contract=(
+            "x[total_tokens,C]",
+            "state_pool[state_pool_size,C]",
+            "state_indices[B]",
+            "cu_seqlens[B+1]",
+            "optional token_batch_indices[total_tokens]",
+            "six mix vectors[C]",
+        ),
+        output_contract=(
+            "six mixed tensors[total_tokens,C]",
+            "updated state_pool[state_pool_size,C]",
+        ),
+    ),
+    InferenceOperatorSpec(
+        provider="flash_rwkv",
+        name="infer_cmix_mix_fp16_varlen_forward",
+        family="cmix",
+        dtype="float16",
+        state_behavior="mutates_shift",
+        native_op="rwkv7_fast_ops_fp16::cmix_mix_varlen",
+        source_revision="0b5a07a5d7babbaa5d47cb57139ba239991b8a74",
+        input_contract=(
+            "x[total_tokens,C]",
+            "state_pool[state_pool_size,C]",
+            "state_indices[B]",
+            "cu_seqlens[B+1]",
+            "optional token_batch_indices[total_tokens]",
+            "mix[C]",
+        ),
+        output_contract=(
+            "mixed[total_tokens,C]",
+            "updated state_pool[state_pool_size,C]",
+        ),
+    ),
 )
 
 _BY_IDENTITY = {spec.identity: spec for spec in KERNEL_SPECS}

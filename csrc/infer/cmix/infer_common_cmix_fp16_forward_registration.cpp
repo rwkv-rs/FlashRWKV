@@ -119,6 +119,16 @@ torch::Tensor cmix_mix_cuda(
     torch::Tensor x,
     torch::Tensor shift_state,
     torch::Tensor x_k);
+torch::Tensor cmix_mix_varlen_cuda(
+    int B,
+    int total_tokens,
+    int C,
+    torch::Tensor x,
+    torch::Tensor state_pool,
+    torch::Tensor state_indices,
+    torch::Tensor cu_seqlens,
+    torch::Tensor token_batch_indices,
+    torch::Tensor x_k);
 torch::Tensor cmix_mix_cfg_cuda(
     int B,
     int T,
@@ -222,6 +232,58 @@ void check_half2_same_device(
     check_half2_aligned(*tensor, name);
     TORCH_CHECK(tensor->get_device() == device, "all tensors must be on the same CUDA device");
   }
+}
+
+void check_int32_cuda_contig(const torch::Tensor& x, const char* name) {
+  TORCH_CHECK(x.is_cuda(), name, " must be CUDA");
+  TORCH_CHECK(x.is_contiguous(), name, " must be contiguous");
+  TORCH_CHECK(x.scalar_type() == torch::kInt32, name, " must be int32");
+}
+
+void check_cmix_mix_varlen_inputs(
+    int64_t B,
+    int64_t total_tokens,
+    int64_t C,
+    const torch::Tensor& x,
+    const torch::Tensor& state_pool,
+    const torch::Tensor& state_indices,
+    const torch::Tensor& cu_seqlens,
+    const torch::Tensor& token_batch_indices,
+    const torch::Tensor& x_k) {
+  TORCH_CHECK(B > 0 && B <= std::numeric_limits<int>::max(),
+              "B must be positive int32");
+  TORCH_CHECK(total_tokens > 0 && total_tokens <= std::numeric_limits<int>::max(),
+              "total_tokens must be positive int32");
+  TORCH_CHECK(C > 0 && C <= std::numeric_limits<int>::max() && (C % 2) == 0,
+              "C must be positive even int32");
+  check_half_cuda_contig(x, "x");
+  TORCH_CHECK(x.dim() == 2 && x.size(0) == total_tokens && x.size(1) == C,
+              "x must have shape [total_tokens,C]");
+  check_half_cuda_contig(state_pool, "state_pool");
+  TORCH_CHECK(state_pool.dim() == 2 && state_pool.size(0) > 0 &&
+                  state_pool.size(1) == C,
+              "state_pool must have shape [state_pool_size,C]");
+  check_int32_cuda_contig(state_indices, "state_indices");
+  check_int32_cuda_contig(cu_seqlens, "cu_seqlens");
+  TORCH_CHECK(state_indices.dim() == 1 && state_indices.size(0) == B,
+              "state_indices must have shape [B]");
+  TORCH_CHECK(cu_seqlens.dim() == 1 && cu_seqlens.size(0) == B + 1,
+              "cu_seqlens must have shape [B+1]");
+  check_int32_cuda_contig(token_batch_indices, "token_batch_indices");
+  TORCH_CHECK(token_batch_indices.numel() == 0 ||
+                  (token_batch_indices.dim() == 1 &&
+                   token_batch_indices.size(0) == total_tokens),
+              "token_batch_indices must be empty or have shape [total_tokens]");
+  check_vec(x_k, C, "x_k");
+  check_same_device({
+      {&x, "x"}, {&state_pool, "state_pool"}, {&state_indices, "state_indices"},
+      {&cu_seqlens, "cu_seqlens"}, {&token_batch_indices, "token_batch_indices"},
+      {&x_k, "x_k"}});
+  check_half2_aligned(x, "x");
+  check_half2_aligned(state_pool, "state_pool");
+  check_half2_aligned(x_k, "x_k");
+  check_no_storage_overlap(state_pool, "state_pool", x, "x");
+  check_no_storage_overlap(state_pool, "state_pool", x_k, "x_k");
 }
 
 }  // namespace
@@ -541,6 +603,24 @@ torch::Tensor cmix_mix(
       static_cast<int>(B), static_cast<int>(T), static_cast<int>(C), x, shift_state, x_k);
 }
 
+torch::Tensor cmix_mix_varlen(
+    int64_t B,
+    int64_t total_tokens,
+    int64_t C,
+    torch::Tensor x,
+    torch::Tensor state_pool,
+    torch::Tensor state_indices,
+    torch::Tensor cu_seqlens,
+    torch::Tensor token_batch_indices,
+    torch::Tensor x_k) {
+  check_cmix_mix_varlen_inputs(
+      B, total_tokens, C, x, state_pool, state_indices, cu_seqlens,
+      token_batch_indices, x_k);
+  return cmix_mix_varlen_cuda(
+      static_cast<int>(B), static_cast<int>(total_tokens), static_cast<int>(C),
+      x, state_pool, state_indices, cu_seqlens, token_batch_indices, x_k);
+}
+
 torch::Tensor cmix_mix_cfg(
     int64_t B,
     int64_t T,
@@ -672,6 +752,7 @@ TORCH_LIBRARY_FRAGMENT(rwkv7_fast_ops_fp16, m) {
   m.def("cmix_sparse_down_relu_rows_t512_reuse_cfg(int B, int T, int C, int F, Tensor preact, Tensor value_fc, int accumulators) -> Tensor");
   m.def("cmix_sparse_down_relu_rows_t512_reuse_cfg_out(int B, int T, int C, int F, Tensor preact, Tensor value_fc, Tensor(a!) out, int accumulators) -> ()");
   m.def("cmix_mix(int B, int T, int C, Tensor x, Tensor(a!) shift_state, Tensor x_k) -> Tensor");
+  m.def("cmix_mix_varlen(int B, int total_tokens, int C, Tensor x, Tensor(a!) state_pool, Tensor state_indices, Tensor cu_seqlens, Tensor token_batch_indices, Tensor x_k) -> Tensor");
   m.def("cmix_mix_cfg(int B, int T, int C, Tensor x, Tensor(a!) shift_state, Tensor x_k, int threads) -> Tensor");
   m.def("cmix_mix_cfg_out(int B, int T, int C, Tensor x, Tensor(a!) shift_state, Tensor x_k, Tensor(b!) out, int threads) -> ()");
   m.def("cmix_mix_3d(int B, int T, int C, Tensor x, Tensor(a!) shift_state, Tensor x_k) -> Tensor");
@@ -693,6 +774,7 @@ TORCH_LIBRARY_IMPL(rwkv7_fast_ops_fp16, CUDA, m) {
   m.impl("cmix_sparse_down_relu_rows_t512_reuse_cfg", &cmix_sparse_down_relu_rows_t512_reuse_cfg);
   m.impl("cmix_sparse_down_relu_rows_t512_reuse_cfg_out", &cmix_sparse_down_relu_rows_t512_reuse_cfg_out);
   m.impl("cmix_mix", &cmix_mix);
+  m.impl("cmix_mix_varlen", &cmix_mix_varlen);
   m.impl("cmix_mix_cfg", &cmix_mix_cfg);
   m.impl("cmix_mix_cfg_out", &cmix_mix_cfg_out);
   m.impl("cmix_mix_3d", &cmix_mix_3d);
