@@ -485,7 +485,7 @@ INFERENCE_OPERATOR_SPECS: tuple[InferenceOperatorSpec, ...] = (
         dtype="float16",
         state_behavior="mutates_shift",
         native_op="rwkv7_fast_ops_fp16::tmix_mix6_varlen",
-        source_revision="0b5a07a5d7babbaa5d47cb57139ba239991b8a74",
+        source_revision="55b6894079e8a9966ceed1adac54dd0dfd084018",
         input_contract=(
             "x[total_tokens,C]",
             "state_pool[state_pool_size,C]",
@@ -506,7 +506,7 @@ INFERENCE_OPERATOR_SPECS: tuple[InferenceOperatorSpec, ...] = (
         dtype="float16",
         state_behavior="mutates_shift",
         native_op="rwkv7_fast_ops_fp16::cmix_mix_varlen",
-        source_revision="0b5a07a5d7babbaa5d47cb57139ba239991b8a74",
+        source_revision="55b6894079e8a9966ceed1adac54dd0dfd084018",
         input_contract=(
             "x[total_tokens,C]",
             "state_pool[state_pool_size,C]",

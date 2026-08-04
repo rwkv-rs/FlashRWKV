@@ -20,5 +20,5 @@ def test_inference_registry_binds_fixed_and_packed_public_ops() -> None:
         spec.source_revision for spec in INFERENCE_OPERATOR_SPECS
     } == {
         "ee3308f6922e59f2166c7fac3c5a192340a2b48e",
-        "0b5a07a5d7babbaa5d47cb57139ba239991b8a74",
+        "55b6894079e8a9966ceed1adac54dd0dfd084018",
     }
