@@ -63,7 +63,10 @@ def test_cmix_packed_matches_reference_and_updates_state(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_tmix_packed_matches_reference_without_token_map() -> None:
+@pytest.mark.parametrize("provide_token_batch_indices", [False, True])
+def test_tmix_packed_matches_reference(
+    provide_token_batch_indices: bool,
+) -> None:
     device = torch.device("cuda")
     channels = 128
     x = torch.randn(5, channels, device=device, dtype=torch.float16)
@@ -75,9 +78,19 @@ def test_tmix_packed_matches_reference_without_token_map() -> None:
         torch.randn(channels, device=device, dtype=torch.float16).mul_(0.2)
         for _ in range(6)
     )
+    token_batch_indices = (
+        torch.tensor([0, 0, 1, 1, 1], device=device, dtype=torch.int32)
+        if provide_token_batch_indices
+        else None
+    )
 
     outputs = infer_tmix_mix6_fp16_varlen(
-        x, state_pool, state_indices, cu_seqlens, mixes
+        x,
+        state_pool,
+        state_indices,
+        cu_seqlens,
+        mixes,
+        token_batch_indices=token_batch_indices,
     )
 
     previous = torch.empty_like(x)
