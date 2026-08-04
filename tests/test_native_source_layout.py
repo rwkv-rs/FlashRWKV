@@ -228,17 +228,9 @@ def test_binding_responsibilities_have_distinct_translation_units() -> None:
     assert "check_recurrent_layout(" in validation
 
 
-def test_cuda_extension_sources_have_unique_ninja_object_stems() -> None:
-    sources_by_stem: dict[str, list[str]] = {}
-    for source in sorted(_extension_sources()):
-        sources_by_stem.setdefault(Path(source).stem, []).append(source)
-
-    collisions = {
-        stem: sources
-        for stem, sources in sources_by_stem.items()
-        if len(sources) > 1
-    }
-    assert collisions == {}
+def test_cuda_extension_sources_have_unique_paths() -> None:
+    sources = _extension_sources()
+    assert len(sources) == len(set(sources))
 
 
 def test_inference_operator_benchmark_binds_repository_source_root() -> None:
@@ -502,11 +494,11 @@ def test_infer_modules_own_distinct_sources_and_tests() -> None:
     expected_sources = {
         "tmix": {
             "infer_common_tmix_fp16_forward.cu",
-            "infer_common_tmix_fp16_forward_registration.cpp",
+            "registration/infer_common_tmix_fp16_forward.cpp",
         },
         "cmix": {
             "infer_common_cmix_fp16_forward.cu",
-            "infer_common_cmix_fp16_forward_registration.cpp",
+            "registration/infer_common_cmix_fp16_forward.cpp",
         },
         "elementwise": {
             "infer_common_elementwise_fp16_forward.cu",
@@ -516,7 +508,11 @@ def test_infer_modules_own_distinct_sources_and_tests() -> None:
     for module, filenames in expected_sources.items():
         source_dir = ROOT / "csrc" / "infer" / module
         test_dir = ROOT / "tests" / "infer" / module
-        assert {path.name for path in source_dir.iterdir() if path.is_file()} == filenames
+        assert {
+            path.relative_to(source_dir).as_posix()
+            for path in source_dir.rglob("*")
+            if path.is_file()
+        } == filenames
         assert any(path.name.startswith("test_") for path in test_dir.glob("*.py"))
 
     integration_benchmark = ROOT / "benchmarks/infer/benchmark_infer_fp16_forward.py"

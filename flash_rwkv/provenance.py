@@ -47,9 +47,9 @@ IMPORTED_SOURCE_FAMILIES: tuple[ImportedSourceFamily, ...] = (
         revision="ee3308f6922e59f2166c7fac3c5a192340a2b48e",
         license="Apache-2.0",
         paths=(
-            "csrc/infer/tmix/infer_common_tmix_fp16_forward_registration.cpp",
+            "csrc/infer/tmix/registration/infer_common_tmix_fp16_forward.cpp",
             "csrc/infer/tmix/infer_common_tmix_fp16_forward.cu",
-            "csrc/infer/cmix/infer_common_cmix_fp16_forward_registration.cpp",
+            "csrc/infer/cmix/registration/infer_common_cmix_fp16_forward.cpp",
             "csrc/infer/cmix/infer_common_cmix_fp16_forward.cu",
             "csrc/infer/elementwise/infer_common_elementwise_fp16_forward_registration.cpp",
             "csrc/infer/elementwise/infer_common_elementwise_fp16_forward.cu",
