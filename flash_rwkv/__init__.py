@@ -12,18 +12,75 @@ except ImportError:
 
 from .tmix.wkv7 import (
     infer_chunk_bf16_forward_varlen,
+    infer_recurrent_add_vec_forward_varlen,
+    infer_recurrent_fp16_advance_i32,
+    infer_recurrent_fp16_advance_i32_varlen,
     infer_recurrent_fp16_forward_varlen,
     infer_recurrent_fp32io16_forward_varlen,
     pretrain_recurrent_fp32io16,
     prepare_recurrent_metadata,
 )
+from .embedding import infer_embedding_ln0_forward_varlen
+from .tmix.mix6 import (
+    infer_tmix_mix6_add_layer_norm_forward_varlen,
+    infer_tmix_mix6_forward_varlen,
+    pretrain_tmix_mix6_bf16,
+)
+from .tmix.kk_a_gate import infer_tmix_kk_a_gate_forward_varlen
+from .tmix.linear import (
+    infer_tmix_linear_act_sigmoid_forward_varlen,
+    infer_tmix_linear_act_tanh_forward_varlen,
+    infer_tmix_linear_attention_c2c_forward_varlen,
+    infer_tmix_linear_ffn_key_forward_varlen,
+    infer_tmix_linear_forward_varlen,
+    infer_tmix_linear_rank_in_forward_varlen,
+    infer_tmix_linear_rank_out_forward_varlen,
+    infer_tmix_linear_rank_out_sigmoid_forward_varlen,
+    infer_tmix_linear_rank_out_tanh_forward_varlen,
+    infer_tmix_linear_t_forward_varlen,
+    infer_tmix_linear_t_sigmoid_forward_varlen,
+    infer_tmix_linear_t_tanh_forward_varlen,
+    infer_tmix_linear_t_vres_forward_varlen,
+    infer_tmix_lowrank_in_forward_varlen,
+    infer_tmix_lowrank_out_forward_varlen,
+    infer_tmix_lowrank_vres_forward_varlen,
+    infer_tmix_lowrank_wagv_in_forward_varlen,
+)
+from .tmix.lnx_rkvres_xg import (
+    infer_tmix_lnx_rkvres_xg_forward_varlen,
+    pretrain_tmix_lnx_rkvres_xg_bf16,
+)
+from .tmix.normalization import (
+    infer_tmix_add_forward_varlen,
+    infer_tmix_add_last_layer_norm_forward_varlen,
+    infer_tmix_add_layer_norm_forward_varlen,
+    infer_tmix_layer_norm_forward_varlen,
+)
+from .tmix.vres_gate import (
+    infer_tmix_vres_gate_forward_varlen,
+    pretrain_tmix_vres_gate_bf16,
+)
+from .cmix.mix import (
+    infer_cmix_add_layer_norm_mix_forward_varlen,
+    infer_cmix_linear_ffn_down_forward_varlen,
+    infer_cmix_mix_forward_varlen,
+    infer_cmix_relu_square_forward_varlen,
+    pretrain_cmix_bf16,
+)
+from .cmix.sparse import (
+    infer_cmix_sparse_down_relu_forward_varlen,
+    infer_cmix_sparse_forward_varlen,
+    infer_cmix_sparse_up_forward_varlen,
+)
+from .head.linear import (
+    infer_head_last_norm_forward_varlen,
+    infer_head_linear_all_forward_varlen,
+    infer_head_linear_forward_varlen,
+    infer_head_linear_last_forward_varlen,
+)
 from .tmix.wkv7.statetune import statetune_recurrent_fp32io16
 from .tmix.a_gate import pretrain_tmix_a_gate_bf16
-from .tmix.vres_gate import pretrain_tmix_vres_gate_bf16
-from .tmix.mix6 import pretrain_tmix_mix6_bf16
 from .tmix.kk_pre import pretrain_tmix_kk_pre_bf16
-from .tmix.lnx_rkvres_xg import pretrain_tmix_lnx_rkvres_xg_bf16
-from .cmix.mix import pretrain_cmix_bf16
 from .head.l2wrap_ce import pretrain_head_l2wrap_ce_bf16
 from .loss.l2wrap_ce import pretrain_l2wrap_ce_bf16
 from .rl_infctx.wkv7 import (
@@ -32,9 +89,50 @@ from .rl_infctx.wkv7 import (
 )
 
 __all__ = [
+    "infer_embedding_ln0_forward_varlen",
     "infer_chunk_bf16_forward_varlen",
+    "infer_recurrent_add_vec_forward_varlen",
+    "infer_recurrent_fp16_advance_i32",
+    "infer_recurrent_fp16_advance_i32_varlen",
     "infer_recurrent_fp16_forward_varlen",
     "infer_recurrent_fp32io16_forward_varlen",
+    "infer_tmix_mix6_add_layer_norm_forward_varlen",
+    "infer_tmix_mix6_forward_varlen",
+    "infer_tmix_kk_a_gate_forward_varlen",
+    "infer_tmix_linear_act_sigmoid_forward_varlen",
+    "infer_tmix_linear_act_tanh_forward_varlen",
+    "infer_tmix_linear_attention_c2c_forward_varlen",
+    "infer_tmix_linear_ffn_key_forward_varlen",
+    "infer_tmix_linear_forward_varlen",
+    "infer_tmix_linear_rank_in_forward_varlen",
+    "infer_tmix_linear_rank_out_forward_varlen",
+    "infer_tmix_linear_rank_out_sigmoid_forward_varlen",
+    "infer_tmix_linear_rank_out_tanh_forward_varlen",
+    "infer_tmix_linear_t_forward_varlen",
+    "infer_tmix_linear_t_sigmoid_forward_varlen",
+    "infer_tmix_linear_t_tanh_forward_varlen",
+    "infer_tmix_linear_t_vres_forward_varlen",
+    "infer_tmix_lowrank_in_forward_varlen",
+    "infer_tmix_lowrank_out_forward_varlen",
+    "infer_tmix_lowrank_vres_forward_varlen",
+    "infer_tmix_lowrank_wagv_in_forward_varlen",
+    "infer_tmix_lnx_rkvres_xg_forward_varlen",
+    "infer_tmix_add_forward_varlen",
+    "infer_tmix_add_last_layer_norm_forward_varlen",
+    "infer_tmix_add_layer_norm_forward_varlen",
+    "infer_tmix_layer_norm_forward_varlen",
+    "infer_tmix_vres_gate_forward_varlen",
+    "infer_cmix_add_layer_norm_mix_forward_varlen",
+    "infer_cmix_linear_ffn_down_forward_varlen",
+    "infer_cmix_mix_forward_varlen",
+    "infer_cmix_relu_square_forward_varlen",
+    "infer_cmix_sparse_down_relu_forward_varlen",
+    "infer_cmix_sparse_forward_varlen",
+    "infer_cmix_sparse_up_forward_varlen",
+    "infer_head_last_norm_forward_varlen",
+    "infer_head_linear_all_forward_varlen",
+    "infer_head_linear_forward_varlen",
+    "infer_head_linear_last_forward_varlen",
     "pretrain_recurrent_fp32io16",
     "statetune_recurrent_fp32io16",
     "prepare_recurrent_metadata",

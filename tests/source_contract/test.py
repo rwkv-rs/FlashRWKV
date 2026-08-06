@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import re
 from pathlib import Path
 
@@ -32,6 +33,19 @@ MIRRORED_MODULES = (
     "tmix/normalization",
     "tmix/vres_gate",
     "tmix/wkv7",
+)
+PUBLIC_INFERENCE_MODULES = (
+    "flash_rwkv.embedding",
+    "flash_rwkv.tmix.mix6",
+    "flash_rwkv.tmix.kk_a_gate",
+    "flash_rwkv.tmix.linear",
+    "flash_rwkv.tmix.lnx_rkvres_xg",
+    "flash_rwkv.tmix.normalization",
+    "flash_rwkv.tmix.vres_gate",
+    "flash_rwkv.tmix.wkv7",
+    "flash_rwkv.cmix.mix",
+    "flash_rwkv.cmix.sparse",
+    "flash_rwkv.head.linear",
 )
 
 
@@ -135,6 +149,30 @@ def test_python_surface_stays_operator_only() -> None:
                 assert not argument_names.intersection(
                     {"input_ids", "attention_mask", "position_ids"}
                 ), path
+
+
+def test_root_exports_all_public_inference_operators() -> None:
+    import flash_rwkv
+
+    expected = {}
+    for module_name in PUBLIC_INFERENCE_MODULES:
+        module = importlib.import_module(module_name)
+        for name in module.__all__:
+            if not name.startswith("infer_"):
+                continue
+            assert name not in expected, (
+                f"public inference operator {name} is exported by both "
+                f"{expected[name].__module__} and {module_name}"
+            )
+            expected[name] = getattr(module, name)
+
+    assert len(expected) == 44
+    root_inference_names = {
+        name for name in flash_rwkv.__all__ if name.startswith("infer_")
+    }
+    assert root_inference_names == set(expected)
+    for name, operator in expected.items():
+        assert getattr(flash_rwkv, name) is operator
 
 
 def test_fp16_elapsed_advance_stays_in_the_wkv7_owner() -> None:
