@@ -1,96 +1,53 @@
 # SPDX-License-Identifier: MIT
 
-from .architecture import (
-    BUILD_TARGET_MATRIX,
-    MINIMUM_WHEEL_ARCHITECTURE,
-    RUNTIME_VALIDATED_ARCHITECTURES,
-    TRANSLATION_UNIT_ARCHITECTURES,
-)
-from .channel_mix import pretrain_cmix_bf16
-from .config import ChunkConfig, enumerate_chunk_configs
-from .head_l2wrap_ce import pretrain_head_l2wrap_ce_bf16
-from .inference_blocks import (
-    infer_cmix_mix_fp16,
-    infer_tmix_kk_a_gate_fp16,
-    infer_tmix_lnx_rkvres_xg_fp16,
-    infer_tmix_mix6_fp16,
-    infer_tmix_vres_gate_fp16,
-)
-from .l2wrap_ce import pretrain_l2wrap_ce_bf16
-from .ops import (
-    RWKV7_RECURRENT_HEAD_SIZES,
-    infer_chunk_bf16_forward,
+# Load PyTorch before the native module.  The extension links against
+# ``libc10`` and the other libraries loaded by PyTorch; importing ``_C``
+# first makes the optional import fail even when the editable build exists.
+import torch as _torch  # noqa: F401
+
+try:
+    from . import _C
+except ImportError:
+    _C = None
+
+from .tmix.wkv7 import (
     infer_chunk_bf16_forward_varlen,
     infer_recurrent_fp16_forward_varlen,
     infer_recurrent_fp32io16_forward_varlen,
-    prepare_recurrent_metadata,
     pretrain_recurrent_fp32io16,
-    pretrain_recurrent_fp32io16_forward,
+    prepare_recurrent_metadata,
+)
+from .tmix.wkv7.statetune import statetune_recurrent_fp32io16
+from .tmix.a_gate import pretrain_tmix_a_gate_bf16
+from .tmix.vres_gate import pretrain_tmix_vres_gate_bf16
+from .tmix.mix6 import pretrain_tmix_mix6_bf16
+from .tmix.kk_pre import pretrain_tmix_kk_pre_bf16
+from .tmix.lnx_rkvres_xg import pretrain_tmix_lnx_rkvres_xg_bf16
+from .cmix.mix import pretrain_cmix_bf16
+from .head.l2wrap_ce import pretrain_head_l2wrap_ce_bf16
+from .loss.l2wrap_ce import pretrain_l2wrap_ce_bf16
+from .rl_infctx.wkv7 import (
+    rl_infctx_chunk_fp32io16,
     rl_infctx_chunk_fp32io16_factor_recompute,
-    rwkv7,
-    rwkv7_chunk,
-    rwkv7_from_decay_logits,
-    rwkv7_recurrent,
-    rwkv7_recurrent_stateful,
-    statetune_recurrent_fp32io16_forward,
 )
-from .registry import (
-    KernelSpec,
-    TrainingOperatorSpec,
-    get_kernel_spec,
-    kernel_specs,
-    training_operator_specs,
-)
-from .time_mix import (
-    pretrain_tmix_a_gate_bf16,
-    pretrain_tmix_kk_pre_bf16,
-    pretrain_tmix_lnx_rkvres_xg_bf16,
-    pretrain_tmix_mix6_bf16,
-    pretrain_tmix_vres_gate_bf16,
-)
-from .validation import validate_packed_metadata_strict
 
 __all__ = [
-    "BUILD_TARGET_MATRIX",
-    "MINIMUM_WHEEL_ARCHITECTURE",
-    "RUNTIME_VALIDATED_ARCHITECTURES",
-    "RWKV7_RECURRENT_HEAD_SIZES",
-    "TRANSLATION_UNIT_ARCHITECTURES",
-    "ChunkConfig",
-    "KernelSpec",
-    "TrainingOperatorSpec",
-    "enumerate_chunk_configs",
-    "get_kernel_spec",
-    "infer_chunk_bf16_forward",
     "infer_chunk_bf16_forward_varlen",
-    "infer_cmix_mix_fp16",
     "infer_recurrent_fp16_forward_varlen",
     "infer_recurrent_fp32io16_forward_varlen",
-    "infer_tmix_kk_a_gate_fp16",
-    "infer_tmix_lnx_rkvres_xg_fp16",
-    "infer_tmix_mix6_fp16",
-    "infer_tmix_vres_gate_fp16",
-    "kernel_specs",
+    "pretrain_recurrent_fp32io16",
+    "statetune_recurrent_fp32io16",
     "prepare_recurrent_metadata",
+    "pretrain_tmix_a_gate_bf16",
+    "pretrain_tmix_vres_gate_bf16",
+    "pretrain_tmix_mix6_bf16",
+    "pretrain_tmix_kk_pre_bf16",
+    "pretrain_tmix_lnx_rkvres_xg_bf16",
     "pretrain_cmix_bf16",
     "pretrain_head_l2wrap_ce_bf16",
     "pretrain_l2wrap_ce_bf16",
-    "pretrain_recurrent_fp32io16",
-    "pretrain_recurrent_fp32io16_forward",
-    "pretrain_tmix_a_gate_bf16",
-    "pretrain_tmix_kk_pre_bf16",
-    "pretrain_tmix_lnx_rkvres_xg_bf16",
-    "pretrain_tmix_mix6_bf16",
-    "pretrain_tmix_vres_gate_bf16",
+    "rl_infctx_chunk_fp32io16",
     "rl_infctx_chunk_fp32io16_factor_recompute",
-    "rwkv7",
-    "rwkv7_chunk",
-    "rwkv7_from_decay_logits",
-    "rwkv7_recurrent",
-    "rwkv7_recurrent_stateful",
-    "statetune_recurrent_fp32io16_forward",
-    "training_operator_specs",
-    "validate_packed_metadata_strict",
 ]
 
 __version__ = "0.1.0"

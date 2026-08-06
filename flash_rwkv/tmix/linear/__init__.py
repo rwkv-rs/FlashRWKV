@@ -1,0 +1,372 @@
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import torch
+
+from ..wkv7 import _extension
+
+
+def _check_rows(tensor: torch.Tensor, name: str, *, rows: int | None = None) -> None:
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor")
+    if tensor.dtype != torch.float16:
+        raise TypeError(f"{name} must have dtype torch.float16")
+    if not tensor.is_cuda or not tensor.is_contiguous():
+        raise ValueError(f"{name} must be CUDA and contiguous")
+    if tensor.ndim != 2 or tensor.shape[0] <= 0:
+        raise ValueError(f"{name} must have packed shape [total_tokens,features]")
+    if rows is not None and tensor.shape[0] != rows:
+        raise ValueError(f"{name} must have {rows} packed rows")
+
+
+def infer_tmix_linear_forward_varlen(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    weight_is_transposed: bool = False,
+) -> torch.Tensor:
+    """Packed Albatross ordinary TMix linear caller path."""
+
+    _check_rows(x, "x")
+    _check_rows(weight, "weight")
+    if weight.device != x.device:
+        raise ValueError("weight must share x's device")
+    if weight_is_transposed:
+        if weight.shape[0] != x.shape[1]:
+            raise ValueError("transposed weight first dimension must match x")
+    elif weight.shape[1] != x.shape[1]:
+        raise ValueError("weight second dimension must match x")
+    return _extension().tmix_linear_forward_varlen(
+        x, weight, bool(weight_is_transposed)
+    )
+
+
+def infer_tmix_linear_attention_c2c_forward_varlen(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    """Packed Albatross attention c2c original-layout linear caller path."""
+
+    _check_rows(x, "x")
+    _check_rows(weight, "weight")
+    if weight.device != x.device or weight.shape[1] != x.shape[1]:
+        raise ValueError("weight must have shape [N,C] and share x's device")
+    return _extension().tmix_linear_attention_c2c_forward_varlen(x, weight)
+
+
+def infer_tmix_linear_ffn_key_forward_varlen(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    """Packed Albatross FFN key original-layout linear caller path."""
+
+    _check_rows(x, "x")
+    _check_rows(weight, "weight")
+    if weight.device != x.device or weight.shape[1] != x.shape[1]:
+        raise ValueError("weight must have shape [N,C] and share x's device")
+    return _extension().tmix_linear_ffn_key_forward_varlen(x, weight)
+
+
+def _check_linear_t(x: torch.Tensor, weight_t: torch.Tensor) -> None:
+    _check_rows(x, "x")
+    _check_rows(weight_t, "weight_t")
+    if weight_t.device != x.device or weight_t.shape[1] != x.shape[1]:
+        raise ValueError("weight_t must have shape [N,K]")
+
+
+def infer_tmix_linear_t_forward_varlen(
+    x: torch.Tensor, weight_t: torch.Tensor
+) -> torch.Tensor:
+    """Packed Albatross ``linear_t_f16`` caller path."""
+
+    _check_linear_t(x, weight_t)
+    return _extension().tmix_linear_t_forward_varlen(x, weight_t)
+
+
+def infer_tmix_linear_t_tanh_forward_varlen(
+    x: torch.Tensor, weight_t: torch.Tensor
+) -> torch.Tensor:
+    """Packed Albatross ``linear_t_act_f16`` tanh caller path."""
+
+    _check_linear_t(x, weight_t)
+    return _extension().tmix_linear_t_tanh_forward_varlen(x, weight_t)
+
+
+def infer_tmix_linear_t_sigmoid_forward_varlen(
+    x: torch.Tensor, weight_t: torch.Tensor
+) -> torch.Tensor:
+    """Packed Albatross ``linear_t_act_f16`` sigmoid caller path."""
+
+    _check_linear_t(x, weight_t)
+    return _extension().tmix_linear_t_sigmoid_forward_varlen(x, weight_t)
+
+
+def infer_tmix_linear_act_tanh_forward_varlen(x: torch.Tensor) -> torch.Tensor:
+    """Packed Albatross ``act_tanh`` caller helper for large-rank paths."""
+
+    _check_rows(x, "x")
+    if x.numel() % 2:
+        raise ValueError("x must contain an even number of elements")
+    return _extension().tmix_linear_act_tanh_forward_varlen(x)
+
+
+def infer_tmix_linear_act_sigmoid_forward_varlen(x: torch.Tensor) -> torch.Tensor:
+    """Packed Albatross ``act_sigmoid`` caller helper for large-rank paths."""
+
+    _check_rows(x, "x")
+    if x.numel() % 2:
+        raise ValueError("x must contain an even number of elements")
+    return _extension().tmix_linear_act_sigmoid_forward_varlen(x)
+
+
+def infer_tmix_linear_t_vres_forward_varlen(
+    x: torch.Tensor,
+    weight_t: torch.Tensor,
+    v: torch.Tensor,
+    v_first: torch.Tensor,
+    v0: torch.Tensor,
+) -> torch.Tensor:
+    """Packed Albatross ``linear_t_vres_f16`` caller path."""
+
+    _check_linear_t(x, weight_t)
+    for name, tensor in (("v", v), ("v_first", v_first)):
+        _check_rows(tensor, name, rows=x.shape[0])
+        if tensor.device != x.device or tensor.shape[1] != weight_t.shape[0]:
+            raise ValueError(f"{name} must have shape [total_tokens,N]")
+    if (
+        v0.dtype != torch.float16
+        or not v0.is_cuda
+        or not v0.is_contiguous()
+        or v0.device != x.device
+        or v0.shape != (weight_t.shape[0],)
+    ):
+        raise ValueError("v0 must be contiguous CUDA float16 with shape [N]")
+    return _extension().tmix_linear_t_vres_forward_varlen(
+        x, weight_t, v, v_first, v0
+    )
+
+
+def _check_rank_source(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    weight_t: torch.Tensor | None,
+    *,
+    input_projection: bool,
+) -> None:
+    if weight is None and weight_t is None:
+        raise ValueError("one of weight or weight_t must be provided")
+    if weight is not None:
+        if weight.dtype != torch.float16 or not weight.is_cuda or not weight.is_contiguous():
+            raise ValueError("weight must be contiguous CUDA float16")
+        if weight.device != x.device or weight.ndim != 2 or weight.shape[0] != x.shape[1]:
+            raise ValueError(
+                "weight must have shape [input,rank] for rank-in or [rank,output] for rank-out"
+            )
+    if weight_t is not None:
+        if weight_t.dtype != torch.float16 or not weight_t.is_cuda or not weight_t.is_contiguous():
+            raise ValueError("weight_t must be contiguous CUDA float16")
+        if weight_t.device != x.device or weight_t.ndim != 2 or weight_t.shape[1] != x.shape[1]:
+            raise ValueError(
+                "weight_t must have shape [rank,input] for rank-in or [output,rank] for rank-out"
+            )
+    if weight is not None and weight_t is not None and weight.shape[1] != weight_t.shape[0]:
+        raise ValueError("weight and weight_t must describe the same rank projection")
+
+
+def infer_tmix_linear_rank_in_forward_varlen(
+    x: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    weight_t: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Canonical Albatross ``linear_rank_in`` caller dispatch.
+
+    ``weight`` is the runtime [C,rank] layout and ``weight_t`` is the
+    original [rank,C] layout.  The upstream ``linear_t_f16`` family is used
+    for the M<=7 window; larger packed batches use the exact Albatross
+    ``linear_f16``/``linear_f16_orig`` body and the canonical C=4096 table.
+    """
+
+    _check_rows(x, "x")
+    _check_rank_source(x, weight, weight_t, input_projection=True)
+    if weight_t is not None and x.shape[0] <= 7:
+        return infer_tmix_linear_t_forward_varlen(x, weight_t)
+    return _extension().tmix_linear_rank_in_dispatch_forward_varlen(
+        x, weight, weight_t
+    )
+
+
+def infer_tmix_linear_rank_out_forward_varlen(
+    x: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    weight_t: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Canonical Albatross ``linear_rank_out`` caller dispatch."""
+
+    _check_rows(x, "x")
+    _check_rank_source(x, weight, weight_t, input_projection=False)
+    output_channels = weight_t.shape[0] if weight_t is not None else weight.shape[1]
+    if weight_t is not None and output_channels >= 1024 and x.shape[0] <= 4:
+        return infer_tmix_linear_t_forward_varlen(x, weight_t)
+    return _extension().tmix_linear_rank_out_dispatch_forward_varlen(
+        x, weight, weight_t
+    )
+
+
+def infer_tmix_linear_rank_out_tanh_forward_varlen(
+    x: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    weight_t: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Canonical Albatross ``linear_rank_out_act(..., tanh)`` dispatch."""
+
+    _check_rows(x, "x")
+    _check_rank_source(x, weight, weight_t, input_projection=False)
+    output_channels = weight_t.shape[0] if weight_t is not None else weight.shape[1]
+    if weight_t is not None and output_channels >= 1024 and x.shape[0] <= 4:
+        return infer_tmix_linear_t_tanh_forward_varlen(x, weight_t)
+    return infer_tmix_linear_rank_out_forward_varlen(
+        infer_tmix_linear_act_tanh_forward_varlen(x), weight, weight_t
+    )
+
+
+def infer_tmix_linear_rank_out_sigmoid_forward_varlen(
+    x: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    weight_t: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Canonical Albatross ``linear_rank_out_act(..., sigmoid)`` dispatch."""
+
+    _check_rows(x, "x")
+    _check_rank_source(x, weight, weight_t, input_projection=False)
+    output_channels = weight_t.shape[0] if weight_t is not None else weight.shape[1]
+    if weight_t is not None and output_channels >= 1024 and x.shape[0] <= 4:
+        return infer_tmix_linear_t_sigmoid_forward_varlen(x, weight_t)
+    return infer_tmix_linear_rank_out_forward_varlen(
+        infer_tmix_linear_act_sigmoid_forward_varlen(x), weight, weight_t
+    )
+
+
+def infer_tmix_lowrank_in_forward_varlen(
+    x_w: torch.Tensor,
+    x_a: torch.Tensor,
+    x_g: torch.Tensor,
+    w1: torch.Tensor,
+    a1: torch.Tensor,
+    g1: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    rows = x_w.shape[0]
+    for name, tensor in (("x_w", x_w), ("x_a", x_a), ("x_g", x_g)):
+        _check_rows(tensor, name, rows=rows)
+        if tensor.device != x_w.device:
+            raise ValueError(f"{name} must share x_w's device")
+    for name, tensor in (("w1", w1), ("a1", a1), ("g1", g1)):
+        _check_rows(tensor, name)
+        if tensor.device != x_w.device or tensor.shape[1] != x_w.shape[1]:
+            raise ValueError(f"{name} must have shape [rank,C]")
+    return tuple(_extension().tmix_lowrank_in_forward_varlen(x_w, x_a, x_g, w1, a1, g1))
+
+
+def infer_tmix_lowrank_wagv_in_forward_varlen(
+    x_w: torch.Tensor,
+    x_a: torch.Tensor,
+    x_g: torch.Tensor,
+    x_v: torch.Tensor,
+    w1: torch.Tensor,
+    a1: torch.Tensor,
+    g1: torch.Tensor,
+    v1: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Packed Albatross ``linear_wagv_rank_in_f16`` caller path."""
+
+    rows = x_w.shape[0]
+    for name, tensor in (
+        ("x_w", x_w),
+        ("x_a", x_a),
+        ("x_g", x_g),
+        ("x_v", x_v),
+    ):
+        _check_rows(tensor, name, rows=rows)
+        if tensor.device != x_w.device or tensor.shape[1] != x_w.shape[1]:
+            raise ValueError(f"{name} must match x_w's packed shape and device")
+    for name, tensor in (("w1", w1), ("a1", a1), ("g1", g1), ("v1", v1)):
+        _check_rows(tensor, name)
+        if tensor.device != x_w.device or tensor.shape[1] != x_w.shape[1]:
+            raise ValueError(f"{name} must have shape [rank,C]")
+    return tuple(
+        _extension().tmix_lowrank_wagv_in_forward_varlen(
+            x_w, x_a, x_g, x_v, w1, a1, g1, v1
+        )
+    )
+
+
+def infer_tmix_lowrank_out_forward_varlen(
+    w1: torch.Tensor,
+    a1: torch.Tensor,
+    g1: torch.Tensor,
+    w2: torch.Tensor,
+    a2: torch.Tensor,
+    g2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    rows = w1.shape[0]
+    for name, tensor in (("w1", w1), ("a1", a1), ("g1", g1)):
+        _check_rows(tensor, name, rows=rows)
+    for name, tensor in (("w2", w2), ("a2", a2), ("g2", g2)):
+        _check_rows(tensor, name)
+        if tensor.device != w1.device or tensor.shape[1] != w1.shape[1]:
+            raise ValueError(f"{name} must have shape [C,rank]")
+    return tuple(_extension().tmix_lowrank_out_forward_varlen(w1, a1, g1, w2, a2, g2))
+
+
+def infer_tmix_lowrank_vres_forward_varlen(
+    w1: torch.Tensor,
+    a1: torch.Tensor,
+    g1: torch.Tensor,
+    v1: torch.Tensor,
+    w2: torch.Tensor,
+    a2: torch.Tensor,
+    g2: torch.Tensor,
+    v2: torch.Tensor,
+    v: torch.Tensor,
+    v_first: torch.Tensor,
+    v0: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    rows = w1.shape[0]
+    for name, tensor in (("w1", w1), ("a1", a1), ("g1", g1), ("v1", v1)):
+        _check_rows(tensor, name, rows=rows)
+    for name, tensor in (("w2", w2), ("a2", a2), ("g2", g2), ("v2", v2)):
+        _check_rows(tensor, name)
+        if tensor.device != w1.device or tensor.shape[1] != w1.shape[1]:
+            raise ValueError(f"{name} must have shape [C,rank]")
+    for name, tensor in (("v", v), ("v_first", v_first)):
+        _check_rows(tensor, name, rows=rows)
+        if tensor.device != w1.device or tensor.shape[1] != w2.shape[0]:
+            raise ValueError(f"{name} must have shape [total_tokens,C]")
+    if v0.dtype != torch.float16 or not v0.is_cuda or not v0.is_contiguous():
+        raise ValueError("v0 must be contiguous CUDA float16")
+    if v0.ndim != 1 or v0.shape[0] != v.shape[1] or v0.device != w1.device:
+        raise ValueError("v0 must have shape [C]")
+    return tuple(
+        _extension().tmix_lowrank_vres_forward_varlen(
+            w1, a1, g1, v1, w2, a2, g2, v2, v, v_first, v0
+        )
+    )
+
+
+__all__ = [
+    "infer_tmix_linear_forward_varlen",
+    "infer_tmix_linear_attention_c2c_forward_varlen",
+    "infer_tmix_linear_ffn_key_forward_varlen",
+    "infer_tmix_linear_t_forward_varlen",
+    "infer_tmix_linear_t_tanh_forward_varlen",
+    "infer_tmix_linear_t_sigmoid_forward_varlen",
+    "infer_tmix_linear_act_tanh_forward_varlen",
+    "infer_tmix_linear_act_sigmoid_forward_varlen",
+    "infer_tmix_linear_t_vres_forward_varlen",
+    "infer_tmix_linear_rank_in_forward_varlen",
+    "infer_tmix_linear_rank_out_forward_varlen",
+    "infer_tmix_linear_rank_out_tanh_forward_varlen",
+    "infer_tmix_linear_rank_out_sigmoid_forward_varlen",
+    "infer_tmix_lowrank_in_forward_varlen",
+    "infer_tmix_lowrank_wagv_in_forward_varlen",
+    "infer_tmix_lowrank_out_forward_varlen",
+    "infer_tmix_lowrank_vres_forward_varlen",
+]

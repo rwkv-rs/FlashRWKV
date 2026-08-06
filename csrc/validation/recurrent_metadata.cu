@@ -96,22 +96,15 @@ __global__ void validate_recurrent_metadata_kernel(
   }
 }
 
-}  // namespace
-
 PreparedRecurrentMetadata launch_recurrent_metadata_validation(
     torch::Tensor query_start_loc,
     torch::Tensor state_indices,
     int64_t total_tokens,
-    int64_t state_pool_size,
-    bool snapshot) {
+    int64_t state_pool_size) {
   const c10::cuda::CUDAGuard device_guard(query_start_loc.device());
   auto status = torch::empty({1}, query_start_loc.options());
-  auto query_start_loc_snapshot = snapshot
-      ? torch::empty_like(query_start_loc)
-      : torch::Tensor();
-  auto state_indices_snapshot = snapshot
-      ? torch::empty_like(state_indices)
-      : torch::Tensor();
+  auto query_start_loc_snapshot = torch::empty_like(query_start_loc);
+  auto state_indices_snapshot = torch::empty_like(state_indices);
   const int num_sequences = static_cast<int>(state_indices.numel());
   constexpr int threads = 256;
   validate_recurrent_metadata_kernel<<<
@@ -125,8 +118,8 @@ PreparedRecurrentMetadata launch_recurrent_metadata_validation(
       static_cast<int>(total_tokens),
       static_cast<int>(state_pool_size),
       status.data_ptr<int>(),
-      snapshot ? query_start_loc_snapshot.data_ptr<int>() : nullptr,
-      snapshot ? state_indices_snapshot.data_ptr<int>() : nullptr);
+      query_start_loc_snapshot.data_ptr<int>(),
+      state_indices_snapshot.data_ptr<int>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return PreparedRecurrentMetadata{
       std::move(query_start_loc_snapshot),
@@ -134,16 +127,7 @@ PreparedRecurrentMetadata launch_recurrent_metadata_validation(
       std::move(status)};
 }
 
-torch::Tensor validate_recurrent_metadata_cuda(
-    torch::Tensor query_start_loc,
-    torch::Tensor state_indices,
-    int64_t total_tokens,
-    int64_t state_pool_size) {
-  return launch_recurrent_metadata_validation(
-             std::move(query_start_loc), std::move(state_indices),
-             total_tokens, state_pool_size, true)
-      .status;
-}
+}  // namespace
 
 PreparedRecurrentMetadata prepare_recurrent_metadata_cuda(
     torch::Tensor query_start_loc,
@@ -151,8 +135,8 @@ PreparedRecurrentMetadata prepare_recurrent_metadata_cuda(
     int64_t total_tokens,
     int64_t state_pool_size) {
   return launch_recurrent_metadata_validation(
-      std::move(query_start_loc), std::move(state_indices),
-      total_tokens, state_pool_size, true);
+      std::move(query_start_loc), std::move(state_indices), total_tokens,
+      state_pool_size);
 }
 
 }  // namespace flash_rwkv::validation

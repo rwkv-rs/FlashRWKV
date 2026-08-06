@@ -1,0 +1,449 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to BlinkDL/Albatross
+// Adapted from BlinkDL/Albatross commit ee3308f6922e59f2166c7fac3c5a192340a2b48e.
+// The original dispatch surface is split by caller ownership here.  This
+// binding keeps packed token rows and uses the CUDA implementation in the
+// matching .cu file; no legacy rwkv7_v3a_ops namespace is exported.
+
+#include <torch/extension.h>
+
+#include <cstdint>
+#include <optional>
+#include <utility>
+#include <vector>
+
+torch::Tensor tmix_linear_forward_varlen_cuda(
+    torch::Tensor x,
+    torch::Tensor weight,
+    bool weight_is_transposed,
+    int64_t caller_group);
+torch::Tensor tmix_linear_t_forward_varlen_cuda(
+    torch::Tensor x, torch::Tensor weight_t);
+torch::Tensor tmix_linear_t_tanh_forward_varlen_cuda(
+    torch::Tensor x, torch::Tensor weight_t);
+torch::Tensor tmix_linear_t_sigmoid_forward_varlen_cuda(
+    torch::Tensor x, torch::Tensor weight_t);
+torch::Tensor tmix_linear_act_tanh_forward_varlen_cuda(torch::Tensor x);
+torch::Tensor tmix_linear_act_sigmoid_forward_varlen_cuda(torch::Tensor x);
+torch::Tensor tmix_linear_t_vres_forward_varlen_cuda(
+    torch::Tensor x,
+    torch::Tensor weight_t,
+    torch::Tensor v,
+    torch::Tensor v_first,
+    torch::Tensor v0);
+torch::Tensor tmix_linear_rank_in_dispatch_forward_varlen_cuda(
+    torch::Tensor x,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> weight_t);
+torch::Tensor tmix_linear_rank_out_dispatch_forward_varlen_cuda(
+    torch::Tensor x,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> weight_t);
+std::vector<torch::Tensor> tmix_lowrank_in_forward_varlen_cuda(
+    torch::Tensor x_w,
+    torch::Tensor x_a,
+    torch::Tensor x_g,
+    torch::Tensor w1,
+    torch::Tensor a1,
+    torch::Tensor g1);
+std::vector<torch::Tensor> tmix_lowrank_wagv_in_forward_varlen_cuda(
+    torch::Tensor x_w,
+    torch::Tensor x_a,
+    torch::Tensor x_g,
+    torch::Tensor x_v,
+    torch::Tensor w1,
+    torch::Tensor a1,
+    torch::Tensor g1,
+    torch::Tensor v1);
+std::vector<torch::Tensor> tmix_lowrank_out_forward_varlen_cuda(
+    torch::Tensor w1,
+    torch::Tensor a1,
+    torch::Tensor g1,
+    torch::Tensor w2,
+    torch::Tensor a2,
+    torch::Tensor g2);
+std::vector<torch::Tensor> tmix_lowrank_vres_forward_varlen_cuda(
+    torch::Tensor w1,
+    torch::Tensor a1,
+    torch::Tensor g1,
+    torch::Tensor v1,
+    torch::Tensor w2,
+    torch::Tensor a2,
+    torch::Tensor g2,
+    torch::Tensor v2,
+    torch::Tensor v,
+    torch::Tensor v_first,
+    torch::Tensor v0);
+
+namespace {
+
+void check_half(const torch::Tensor& tensor, const char* name) {
+  TORCH_CHECK(tensor.is_cuda(), name, " must be CUDA");
+  TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
+  TORCH_CHECK(tensor.scalar_type() == torch::kFloat16, name, " must be float16");
+}
+
+void check_same(const torch::Tensor& first, const torch::Tensor& other, const char* name) {
+  TORCH_CHECK(other.device() == first.device(), name, " must share the input device");
+}
+
+void check_rows(const torch::Tensor& tensor, const torch::Tensor& reference, const char* name) {
+  check_half(tensor, name);
+  check_same(reference, tensor, name);
+  TORCH_CHECK(tensor.dim() == 2 && tensor.size(0) == reference.size(0),
+              name, " must have packed shape [total_tokens,features]");
+}
+
+void check_linear_t(const torch::Tensor& x, const torch::Tensor& weight_t) {
+  check_half(x, "x");
+  check_half(weight_t, "weight_t");
+  check_same(x, weight_t, "weight_t");
+  TORCH_CHECK(x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
+              "x must have packed shape [total_tokens,K]");
+  TORCH_CHECK(weight_t.dim() == 2 && weight_t.size(0) > 0 &&
+                  weight_t.size(1) == x.size(1),
+              "weight_t must have shape [N,K]");
+}
+
+void check_rank_dispatch(
+    const torch::Tensor& x,
+    const std::optional<torch::Tensor>& weight,
+    const std::optional<torch::Tensor>& weight_t,
+    bool input_projection) {
+  check_half(x, "x");
+  TORCH_CHECK(x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
+              "x must have packed shape [total_tokens,features]");
+  TORCH_CHECK(weight.has_value() || weight_t.has_value(),
+              "one of weight or weight_t must be provided");
+  if (weight.has_value()) {
+    check_half(*weight, "weight");
+    check_same(x, *weight, "weight");
+    TORCH_CHECK(weight->dim() == 2 && weight->size(0) > 0 &&
+                    weight->size(1) > 0,
+                "weight must have rank 2");
+    TORCH_CHECK(
+        weight->size(0) == x.size(1),
+        input_projection
+            ? "rank-in runtime weight must have shape [input,rank]"
+            : "rank-out runtime weight must have shape [rank,output]");
+  }
+  if (weight_t.has_value()) {
+    check_half(*weight_t, "weight_t");
+    check_same(x, *weight_t, "weight_t");
+    TORCH_CHECK(weight_t->dim() == 2 && weight_t->size(0) > 0 &&
+                    weight_t->size(1) > 0,
+                "weight_t must have rank 2");
+    TORCH_CHECK(
+        weight_t->size(1) == x.size(1),
+        input_projection
+            ? "rank-in original weight must have shape [rank,input]"
+            : "rank-out original weight must have shape [output,rank]");
+  }
+  if (weight.has_value() && weight_t.has_value()) {
+    const int64_t runtime_rank = input_projection ? weight->size(1) : weight->size(0);
+    const int64_t original_rank = input_projection ? weight_t->size(0) : weight_t->size(1);
+    TORCH_CHECK(runtime_rank == original_rank,
+                "weight and weight_t must describe the same rank projection");
+  }
+}
+
+}  // namespace
+
+torch::Tensor tmix_linear_caller_forward_varlen(
+    torch::Tensor x,
+    torch::Tensor weight,
+    bool weight_is_transposed,
+    int64_t caller_group) {
+  check_half(x, "x");
+  check_half(weight, "weight");
+  check_same(x, weight, "weight");
+  TORCH_CHECK(x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
+              "x must have packed shape [total_tokens,K]");
+  TORCH_CHECK(weight.dim() == 2 && weight.size(0) > 0 && weight.size(1) > 0,
+              "weight must have rank 2");
+  if (weight_is_transposed) {
+    TORCH_CHECK(weight.size(0) == x.size(1),
+                "transposed weight first dimension must match x");
+  } else {
+    TORCH_CHECK(weight.size(1) == x.size(1),
+                "weight second dimension must match x");
+  }
+  TORCH_CHECK(caller_group >= 0 && caller_group <= 3,
+              "caller_group must be 0 (generic), 1 (att_c2c), 2 (ffn_key), or 3 (head)");
+  return tmix_linear_forward_varlen_cuda(
+      x, weight, weight_is_transposed, caller_group);
+}
+
+torch::Tensor tmix_linear_forward_varlen(
+    torch::Tensor x, torch::Tensor weight, bool weight_is_transposed) {
+  return tmix_linear_caller_forward_varlen(x, weight, weight_is_transposed, 0);
+}
+
+torch::Tensor tmix_linear_attention_c2c_forward_varlen(
+    torch::Tensor x, torch::Tensor weight) {
+  return tmix_linear_caller_forward_varlen(x, weight, false, 1);
+}
+
+torch::Tensor tmix_linear_ffn_key_forward_varlen(
+    torch::Tensor x, torch::Tensor weight) {
+  return tmix_linear_caller_forward_varlen(x, weight, false, 2);
+}
+
+torch::Tensor tmix_linear_t_forward_varlen(
+    torch::Tensor x, torch::Tensor weight_t) {
+  check_linear_t(x, weight_t);
+  return tmix_linear_t_forward_varlen_cuda(x, weight_t);
+}
+
+torch::Tensor tmix_linear_t_tanh_forward_varlen(
+    torch::Tensor x, torch::Tensor weight_t) {
+  check_linear_t(x, weight_t);
+  return tmix_linear_t_tanh_forward_varlen_cuda(x, weight_t);
+}
+
+torch::Tensor tmix_linear_t_sigmoid_forward_varlen(
+    torch::Tensor x, torch::Tensor weight_t) {
+  check_linear_t(x, weight_t);
+  return tmix_linear_t_sigmoid_forward_varlen_cuda(x, weight_t);
+}
+
+torch::Tensor tmix_linear_act_tanh_forward_varlen(torch::Tensor x) {
+  check_half(x, "x");
+  TORCH_CHECK(x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
+              "x must have packed shape [total_tokens,features]");
+  return tmix_linear_act_tanh_forward_varlen_cuda(x);
+}
+
+torch::Tensor tmix_linear_act_sigmoid_forward_varlen(torch::Tensor x) {
+  check_half(x, "x");
+  TORCH_CHECK(x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
+              "x must have packed shape [total_tokens,features]");
+  return tmix_linear_act_sigmoid_forward_varlen_cuda(x);
+}
+
+torch::Tensor tmix_linear_t_vres_forward_varlen(
+    torch::Tensor x,
+    torch::Tensor weight_t,
+    torch::Tensor v,
+    torch::Tensor v_first,
+    torch::Tensor v0) {
+  check_linear_t(x, weight_t);
+  check_rows(v, x, "v");
+  check_rows(v_first, v, "v_first");
+  check_half(v0, "v0");
+  check_same(x, v0, "v0");
+  TORCH_CHECK(v.size(1) == weight_t.size(0),
+              "v must have shape [total_tokens,N]");
+  TORCH_CHECK(v0.dim() == 1 && v0.size(0) == weight_t.size(0),
+              "v0 must have shape [N]");
+  return tmix_linear_t_vres_forward_varlen_cuda(
+      x, weight_t, v, v_first, v0);
+}
+
+torch::Tensor tmix_linear_rank_in_dispatch_forward_varlen(
+    torch::Tensor x,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> weight_t) {
+  check_rank_dispatch(x, weight, weight_t, true);
+  return tmix_linear_rank_in_dispatch_forward_varlen_cuda(
+      x, std::move(weight), std::move(weight_t));
+}
+
+torch::Tensor tmix_linear_rank_out_dispatch_forward_varlen(
+    torch::Tensor x,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> weight_t) {
+  check_rank_dispatch(x, weight, weight_t, false);
+  return tmix_linear_rank_out_dispatch_forward_varlen_cuda(
+      x, std::move(weight), std::move(weight_t));
+}
+
+std::vector<torch::Tensor> tmix_lowrank_in_forward_varlen(
+    torch::Tensor x_w,
+    torch::Tensor x_a,
+    torch::Tensor x_g,
+    torch::Tensor w1,
+    torch::Tensor a1,
+    torch::Tensor g1) {
+  check_rows(x_w, x_w, "x_w");
+  for (const auto& item : {
+           std::pair<const torch::Tensor*, const char*>{&x_a, "x_a"},
+           {&x_g, "x_g"},
+       }) {
+    check_rows(*item.first, x_w, item.second);
+  }
+  for (const auto& item : {
+           std::pair<const torch::Tensor*, const char*>{&w1, "w1"},
+           {&a1, "a1"},
+           {&g1, "g1"},
+       }) {
+    check_half(*item.first, item.second);
+    check_same(x_w, *item.first, item.second);
+    TORCH_CHECK(item.first->dim() == 2 && item.first->size(1) == x_w.size(1),
+                item.second, " must have shape [rank,C]");
+  }
+  return tmix_lowrank_in_forward_varlen_cuda(x_w, x_a, x_g, w1, a1, g1);
+}
+
+std::vector<torch::Tensor> tmix_lowrank_wagv_in_forward_varlen(
+    torch::Tensor x_w,
+    torch::Tensor x_a,
+    torch::Tensor x_g,
+    torch::Tensor x_v,
+    torch::Tensor w1,
+    torch::Tensor a1,
+    torch::Tensor g1,
+    torch::Tensor v1) {
+  check_rows(x_w, x_w, "x_w");
+  for (const auto& item : {
+           std::pair<const torch::Tensor*, const char*>{&x_a, "x_a"},
+           {&x_g, "x_g"},
+           {&x_v, "x_v"},
+       }) {
+    check_rows(*item.first, x_w, item.second);
+  }
+  for (const auto& item : {
+           std::pair<const torch::Tensor*, const char*>{&w1, "w1"},
+           {&a1, "a1"},
+           {&g1, "g1"},
+           {&v1, "v1"},
+       }) {
+    check_half(*item.first, item.second);
+    check_same(x_w, *item.first, item.second);
+    TORCH_CHECK(item.first->dim() == 2 && item.first->size(1) == x_w.size(1),
+                item.second, " must have shape [rank,C]");
+  }
+  return tmix_lowrank_wagv_in_forward_varlen_cuda(
+      x_w, x_a, x_g, x_v, w1, a1, g1, v1);
+}
+
+std::vector<torch::Tensor> tmix_lowrank_out_forward_varlen(
+    torch::Tensor w1,
+    torch::Tensor a1,
+    torch::Tensor g1,
+    torch::Tensor w2,
+    torch::Tensor a2,
+    torch::Tensor g2) {
+  check_rows(w1, w1, "w1");
+  for (const auto& item : {
+           std::pair<const torch::Tensor*, const char*>{&a1, "a1"},
+           {&g1, "g1"},
+       }) {
+    check_rows(*item.first, w1, item.second);
+  }
+  for (const auto& item : {
+           std::pair<const torch::Tensor*, const char*>{&w2, "w2"},
+           {&a2, "a2"},
+           {&g2, "g2"},
+       }) {
+    check_half(*item.first, item.second);
+    check_same(w1, *item.first, item.second);
+    TORCH_CHECK(item.first->dim() == 2 && item.first->size(1) == w1.size(1),
+                item.second, " must have shape [C,rank]");
+  }
+  return tmix_lowrank_out_forward_varlen_cuda(w1, a1, g1, w2, a2, g2);
+}
+
+std::vector<torch::Tensor> tmix_lowrank_vres_forward_varlen(
+    torch::Tensor w1,
+    torch::Tensor a1,
+    torch::Tensor g1,
+    torch::Tensor v1,
+    torch::Tensor w2,
+    torch::Tensor a2,
+    torch::Tensor g2,
+    torch::Tensor v2,
+    torch::Tensor v,
+    torch::Tensor v_first,
+    torch::Tensor v0) {
+  for (const auto& item : {
+           std::pair<const torch::Tensor*, const char*>{&w1, "w1"},
+           {&a1, "a1"}, {&g1, "g1"}, {&v1, "v1"},
+       }) {
+    check_rows(*item.first, w1, item.second);
+  }
+  for (const auto& item : {
+           std::pair<const torch::Tensor*, const char*>{&w2, "w2"},
+           {&a2, "a2"}, {&g2, "g2"}, {&v2, "v2"},
+       }) {
+    check_half(*item.first, item.second);
+    check_same(w1, *item.first, item.second);
+    TORCH_CHECK(item.first->dim() == 2 && item.first->size(1) == w1.size(1),
+                item.second, " must have shape [C,rank]");
+  }
+  check_rows(v, w1, "v");
+  check_rows(v_first, v, "v_first");
+  check_half(v0, "v0");
+  check_same(v, v0, "v0");
+  TORCH_CHECK(v0.dim() == 1 && v0.size(0) == v.size(1),
+              "v0 must have shape [C]");
+  return tmix_lowrank_vres_forward_varlen_cuda(
+      w1, a1, g1, v1, w2, a2, g2, v2, v, v_first, v0);
+}
+
+void register_tmix_linear_bindings(py::module_& module) {
+  module.def(
+      "tmix_linear_forward_varlen", &tmix_linear_forward_varlen,
+      py::arg("x"), py::arg("weight"),
+      py::arg("weight_is_transposed") = false);
+  module.def(
+      "tmix_linear_attention_c2c_forward_varlen",
+      &tmix_linear_attention_c2c_forward_varlen,
+      py::arg("x"), py::arg("weight"));
+  module.def(
+      "tmix_linear_ffn_key_forward_varlen",
+      &tmix_linear_ffn_key_forward_varlen,
+      py::arg("x"), py::arg("weight"));
+  module.def(
+      "tmix_linear_t_forward_varlen", &tmix_linear_t_forward_varlen,
+      py::arg("x"), py::arg("weight_t"));
+  module.def(
+      "tmix_linear_t_tanh_forward_varlen",
+      &tmix_linear_t_tanh_forward_varlen,
+      py::arg("x"), py::arg("weight_t"));
+  module.def(
+      "tmix_linear_t_sigmoid_forward_varlen",
+      &tmix_linear_t_sigmoid_forward_varlen,
+      py::arg("x"), py::arg("weight_t"));
+  module.def(
+      "tmix_linear_act_tanh_forward_varlen",
+      &tmix_linear_act_tanh_forward_varlen,
+      py::arg("x"));
+  module.def(
+      "tmix_linear_act_sigmoid_forward_varlen",
+      &tmix_linear_act_sigmoid_forward_varlen,
+      py::arg("x"));
+  module.def(
+      "tmix_linear_t_vres_forward_varlen",
+      &tmix_linear_t_vres_forward_varlen,
+      py::arg("x"), py::arg("weight_t"), py::arg("v"),
+      py::arg("v_first"), py::arg("v0"));
+  module.def(
+      "tmix_linear_rank_in_dispatch_forward_varlen",
+      &tmix_linear_rank_in_dispatch_forward_varlen,
+      py::arg("x"), py::arg("weight") = py::none(),
+      py::arg("weight_t") = py::none());
+  module.def(
+      "tmix_linear_rank_out_dispatch_forward_varlen",
+      &tmix_linear_rank_out_dispatch_forward_varlen,
+      py::arg("x"), py::arg("weight") = py::none(),
+      py::arg("weight_t") = py::none());
+  module.def(
+      "tmix_lowrank_in_forward_varlen", &tmix_lowrank_in_forward_varlen,
+      py::arg("x_w"), py::arg("x_a"), py::arg("x_g"), py::arg("w1"),
+      py::arg("a1"), py::arg("g1"));
+  module.def(
+      "tmix_lowrank_wagv_in_forward_varlen",
+      &tmix_lowrank_wagv_in_forward_varlen,
+      py::arg("x_w"), py::arg("x_a"), py::arg("x_g"), py::arg("x_v"),
+      py::arg("w1"), py::arg("a1"), py::arg("g1"), py::arg("v1"));
+  module.def(
+      "tmix_lowrank_out_forward_varlen", &tmix_lowrank_out_forward_varlen,
+      py::arg("w1"), py::arg("a1"), py::arg("g1"), py::arg("w2"),
+      py::arg("a2"), py::arg("g2"));
+  module.def(
+      "tmix_lowrank_vres_forward_varlen", &tmix_lowrank_vres_forward_varlen,
+      py::arg("w1"), py::arg("a1"), py::arg("g1"), py::arg("v1"),
+      py::arg("w2"), py::arg("a2"), py::arg("g2"), py::arg("v2"),
+      py::arg("v"), py::arg("v_first"), py::arg("v0"));
+}

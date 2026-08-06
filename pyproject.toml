@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flash-rwkv"
 version = "0.1.0"
-description = "Source-attributed RWKV-7 recurrent and chunk CUDA kernels"
+description = "Source-attributed RWKV-7 recurrent inference CUDA kernel"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,11 +18,18 @@ dependencies = [
 ]
 license = "MIT"
 
+[dependency-groups]
+dev = [
+  "pytest>=8",
+]
+
 [project.urls]
 Repository = "https://github.com/rwkv-rs/FlashRWKV"
 
-[tool.setuptools]
-packages = ["flash_rwkv"]
+[tool.setuptools.packages.find]
+include = ["flash_rwkv", "flash_rwkv.*"]
 
-[tool.setuptools.package-data]
-flash_rwkv = ["chunk-tuning-v1.json"]
+[tool.pytest.ini_options]
+pythonpath = ["."]
+norecursedirs = ["tests_old", "benchmarks_old"]
+python_files = ["test.py", "test_*.py"]

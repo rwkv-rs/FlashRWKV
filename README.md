@@ -1,229 +1,185 @@
 # FlashRWKV
 
-FlashRWKV provides source-attributed RWKV-7 CUDA kernels behind one canonical
-recurrence contract. Kernel identity is the pair `(provider, name)`; origin,
-maturity, layout, autograd support, state behavior, and internal stages are
-recorded separately instead of being overloaded into an `algorithm` label.
+FlashRWKV 是 RWKV7 的 module-local CUDA kernel 后端。当前迁移树采用
+Albatross-first、train_temp-second、vllm-varlen-reference 的来源边界：
 
-The implementation targets head size 64 and canonical state layout
-`[N,H,K,V]`.
+- inference 数学、shape-specific family 和主 dispatch 来自 Albatross
+  `faster3a_2607`，revision
+  `ee3308f6922e59f2166c7fac3c5a192340a2b48e`；
+- train/pretrain forward/backward 来自 RWKV-LM `train_temp`，revision
+  `952102498e9ed367ea0a59ee64106916d474d30f`；
+- vllm-rwkv revision `6d683f9e49a2997e405c47edc147872c8609513b` 只参考
+  packed metadata、state slot 和 scheduler boundary，不是 kernel body 或 fallback；
+- BF16 chunk 保留 HANDOFF 指定的 FlashKDA revision
+  `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b` 的 RWKV7 chunk algebra。
 
-## Kernel registry
+实际可达 family、caller ownership、源码 revision 和未完成边界见
+[`docs/kernels/albatross-train-temp-manifest.md`](/home/caizus/Projects/MachineLearning/rwkv/flash-rwkv/docs/kernels/albatross-train-temp-manifest.md)。
 
-Canonical names follow:
+## Inference packed contract
 
-```text
-{pretrain|infer}_{recurrent|chunk}_{numerical-mode}_{forward|backward}[_varlen]
-```
-
-| Provider | Canonical name | Status | Layout | Autograd | State | Stages |
-| --- | --- | --- | --- | --- | --- | --- |
-| `rwkv-lm` | `pretrain_recurrent_fp32io16_forward` | stable | fixed | yes | functional FP32 | forward recurrence |
-| `rwkv-lm` | `pretrain_recurrent_fp32io16_backward` | stable | fixed | yes | functional FP32 | backward recurrence |
-| `vllm-rwkv` | `infer_recurrent_fp32io16_forward_varlen` | stable | packed | no | functional FP32 | forward recurrence |
-| `vllm-rwkv` | `infer_recurrent_fp16_forward_varlen` | stable | packed | no | functional FP16 | forward recurrence |
-| `flashkda-derived` | `infer_chunk_bf16_forward` | experimental | fixed | no | functional BF16 | K1 prepare → K2 recurrence |
-| `flashkda-derived` | `infer_chunk_bf16_forward_varlen` | experimental | packed | no | functional BF16 | K1 prepare → K2 recurrence |
-| `fla` | `pretrain_chunk_fp32io16_forward` | external | fixed | yes | functional FP32 | FLA chunk forward |
-| `fla` | `pretrain_chunk_fp32io16_backward` | external | fixed | yes | functional FP32 | FLA chunk backward |
-| `fla` | `infer_recurrent_fp32io16_forward_varlen` | external | packed | no | functional FP32 | FLA fused recurrent forward |
-
-`flash_rwkv.kernel_specs()` returns this immutable registry.
-`flash_rwkv.get_kernel_spec(name, provider=...)` resolves one identity and
-rejects ambiguous names. The FLA and vllm-rwkv providers intentionally share
-`infer_recurrent_fp32io16_forward_varlen`; the provider is therefore required
-for that lookup.
-
-The FP32 oracle `rwkv7_reference` is a correctness implementation, not a
-kernel. `rwkv7_recurrent_stateful` is an in-place state-pool wrapper over the
-vllm-rwkv recurrent kernels, not an additional kernel identity. The older
-`rwkv7(..., algorithm=...)` entrypoint remains as a compatibility layer.
-
-## Recurrence and layouts
-
-For every token, all providers evaluate:
+sequence-dependent operator 统一使用 packed token rows：
 
 ```text
-S_t = diag(exp(log_decay_t)) S_(t-1)
-    + b_t (a_t^T S_(t-1))
-    + k_t v_t^T
-y_t = scale * r_t^T S_t
+tokens:        [total_tokens, ...]
+cu_seqlens:    [batch_size + 1], CUDA contiguous int32
+state_indices: [batch_size], CUDA contiguous int32
 ```
 
-Fixed inputs use `[B,T,H,64]`. Packed-varlen inputs use
-`[1,total_tokens,H,64]` and strictly increasing `cu_seqlens[B+1]`.
+`cu_seqlens[0]` 必须为 `0`，最后一个 offset 必须等于
+`total_tokens`，每个 sequence 非空；同一个 launch 中 `state_indices` 不得重复，
+并且必须落在对应 state pool 范围内。所有输入必须 CUDA、contiguous、同 device；
+Python wrapper 不做 padding、CPU copy、dtype conversion 或隐式 contiguous copy。
 
-### Stable pretraining
+WKV recurrent 的 state pool 是 `[slots,H,D,D]`，canonical 内存解释为 `[K,V]`，
+kernel 原地更新选中的 slots。FP32-state path 支持 `D=64/128/256`，token I/O
+支持 FP16/BF16；FP16-state path 使用 Albatross family 的 FP16 state contract。
+raw `decay_logits` 是唯一 public decay boundary，kernel 内完成 retention transform；
+不提供 `log_decay`、`from_log_decay` 或独立 `elapsed_t` compatibility operator。
 
-The public autograd operation couples the two separately named native
-forward/backward kernels:
+metadata preparation 可以生成 reusable native ticket。ticket 绑定 metadata tensor
+identity、data pointer、shape/stride、version、device、stream、token 数量、state
+pool size 和 `max_seqlen` snapshot；ticket 与 launch 不匹配时 fail closed。
+
+典型 WKV 调用：
 
 ```python
-import torch
-from flash_rwkv import pretrain_recurrent_fp32io16_forward
-
-B, T, H, D = 2, 128, 32, 64
-shape = (B, T, H, D)
-r, log_decay, k, v, a, b = (
-    torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    for _ in range(6)
-)
-log_decay = (-0.5 * torch.sigmoid(log_decay)).requires_grad_(True)
-initial_state = torch.zeros(
-    B, H, D, D, device="cuda", dtype=torch.float32, requires_grad=True
+from flash_rwkv import (
+    infer_recurrent_fp32io16_forward_varlen,
+    prepare_recurrent_metadata,
 )
 
-output, final_state = pretrain_recurrent_fp32io16_forward(
+ticket = prepare_recurrent_metadata(
+    cu_seqlens,
+    state_indices,
+    total_tokens=r.shape[0],
+    state_pool_size=state_pool.shape[0],
+)
+output = infer_recurrent_fp32io16_forward_varlen(
     r,
-    log_decay,
+    decay_logits,
     k,
     v,
     a,
     b,
-    initial_state=initial_state,
-    output_final_state=True,
-)
-```
-
-The forward stores FP32 state at each 16-token checkpoint and the token
-auxiliary values needed by the reverse recurrence. The backward consumes that
-context and returns gradients for all six token inputs and the initial state.
-
-### Stable packed inference
-
-```python
-from flash_rwkv import infer_recurrent_fp32io16_forward_varlen
-
-output, final_state = infer_recurrent_fp32io16_forward_varlen(
-    r_packed,
-    log_decay_packed,
-    k_packed,
-    v_packed,
-    a_packed,
-    b_packed,
-    initial_state=initial_state,
+    state_pool=state_pool,
     cu_seqlens=cu_seqlens,
+    state_indices=state_indices,
+    validated_metadata=ticket,
 )
 ```
 
-Use `infer_recurrent_fp16_forward_varlen` only when both token tensors and
-global state are FP16.
+WKV FP32 inference 已收录 large、small-warp、short-block 三路 family；FP16
+inference 已收录 clone、exact、seq-v2、one-cp、one-direct family，并保留
+Albatross 的 `Tis1`、`AddW0`、`Grid2D` template dispatch。Albatross
+81-case operator correctness matrix 已在 SM120 上通过。canonical Albatross FP16
+source 只提供 `D=64`；`D=128/256` 不选择 generic 或临时替代，当前 binding 对其
+fail closed。FP16 `elapsed_state_pool` 已作为 request-state bundle 的内部组成部分
+接入；`infer_recurrent_fp16_advance_i32_varlen` 按 packed sequence length 机械迁移
+上游 `advance_i32` 的 slot advancement，并复用 recurrent metadata ticket；该
+operator 的 focused slot/state correctness 已通过。外部 caller 负责按自己的
+sequence lifecycle 调用该 module-local helper；FlashRWKV 不定义 model 或 layer loop。
 
-### Experimental KDA-derived two-stage inference
+## Module ownership
 
-`infer_chunk_bf16_forward` and
-`infer_chunk_bf16_forward_varlen` are complete logical operators composed of
-two visible native launches:
+当前 active module path 包括：
 
-1. K1 prepare builds per-chunk `P/Q` transforms and per-token output terms.
-2. K2 recurrence propagates the boundary state across chunks and produces
-   output/final state.
+- `tmix/wkv7`：recurrent、BF16 chunk、pretrain、StateTune；
+- `tmix/mix6`、`tmix/kk_a_gate`、`tmix/lnx_rkvres_xg`、`tmix/vres_gate`；
+- `cmix/mix`、`cmix/sparse`；
+- `tmix/linear`、`tmix/normalization`、`embedding`、`head/linear`；
+- `tmix/a_gate`、`tmix/kk_pre`；
+- `loss/l2wrap_ce`、`head/l2wrap_ce`；
+- `rl_infctx/wkv7`。
 
-Inputs, outputs, and global state are BF16. K1 workspaces and K2 local
-accumulators are FP32. The path implements RWKV-7 recurrence, not the original
-KDA attention operator.
+每个 family 有自己的 Python、test、benchmark 和同 stem native binding/implementation
+pair。`csrc/sm90` 保存 train_temp/训练相关实现，`csrc/sm120` 保存当前目标 GPU
+上的 inference/packed 实现。当前没有新的 `elementwise` module、`csrc/common`、
+global registry/provider 或 vllm fallback。
 
-### External FLA provider
+Albatross lightweight caller identity 已拆出 mix6、KK-A gate、LN/RKV/residual/XG、
+v-res gate、CMix mix/sparse 等 module-local path。`update_shift_state_last_kernel`
+是相应 stateful family 的内部 closure，不注册成独立 public operator。
 
-The adapters in `flash_rwkv.providers.fla` map the same tensor/state/scale
-contract to FLA's `chunk_rwkv7` and `fused_recurrent_rwkv7`. FLA source is not
-copied into this repository. The fixed training adapter uses chunk size 16
-with `safe_gate=True`; benchmark inputs keep `log_decay` in FLA's documented
-safe range.
+`rwkv7_v3a_ops` 的 `.cu` body 已按真实 caller 机械迁移到 `linear`、normalization、
+embedding、head 等 module；`tmix/linear` 已接入 `linear_t_f16`、tanh/sigmoid
+`linear_t_act_f16` 和 `linear_t_vres_f16` caller binding。FlashRWKV 是 operator
+library，不定义完整 model graph；外部 model caller 负责组合这些 module-local
+operator。当前仍需继续补齐各 operator 的 caller-specific split-K、row-tile、
+WMMA/CuBLASLt dispatch 证据，以及 fused TMix/CMix LN 的 packed request-boundary
+operator acceptance。
 
-## Installation
+## Training and auxiliary
 
-A CUDA-enabled PyTorch environment, matching CUDA toolkit, Ninja, and a C++
-toolchain are required.
+`train_temp` canonical body 已接入：
+
+- recurrent forward/backward：final state、final-state gradient、initial-state
+  gradient、state-dot-a、checkpoint/chunk metadata 和 tail chunk；
+- TMix a-gate、v-res gate、mix6、KK-pre、LN/RKV/residual/XG；
+- CMix forward/backward；
+- L2Wrap CE loss 和 head L2Wrap CE。
+
+训练 operator 保留 training 自己的 tensor layout、workspace、autograd、recompute、
+loss scaling 和 gradient 语义，不套用 inference state pool API。RL/Infctx 和
+StateTune 保留独立 public entry；RL 的 materialized/recompute/replay 与 StateTune
+的 recurrent forward/backward body 已独立机械迁移，完整 strategy/workspace
+acceptance 仍需继续验证。
+
+## Build
+
+使用仓库自己的 `./.venv`。当前迁移 slice 的 native build 要求 SM120 或更高：
 
 ```bash
-git clone https://github.com/rwkv-rs/FlashRWKV.git
-cd FlashRWKV
-python -m pip install -v --no-build-isolation .
+uv sync
+TORCH_CUDA_ARCH_LIST=12.0 \
+  ./.venv/bin/python -m pip install -v --no-build-isolation -e .
 ```
 
-The Helicopter product checkout installs FlashRWKV and FLA through their
-dedicated dependency groups.
+不要把 `build/`、`artifacts/`、`.egg-info` 或缓存生成物加入 worktree。构建源列表
+和 architecture gate 位于 [`setup.py`](/home/caizus/Projects/MachineLearning/rwkv/flash-rwkv/setup.py)。
 
-## Correctness and benchmark
+## Verification
 
-Run the regression suite:
+当前 focused native regression：
 
 ```bash
-pytest -q
+CUDA_LAUNCH_BLOCKING=1 ./.venv/bin/python -m pytest -q \
+  tests/tmix/wkv7/test.py \
+  tests/tmix/wkv7/chunk/test.py \
+  tests/tmix/wkv7/pretrain/test.py \
+  tests/tmix/wkv7/statetune/test.py \
+  tests/tmix/a_gate/test.py tests/tmix/vres_gate/test.py \
+  tests/tmix/mix6/test.py tests/tmix/kk_pre/test.py \
+  tests/tmix/lnx_rkvres_xg/test.py tests/tmix/kk_a_gate/test.py \
+  tests/tmix/linear/test.py tests/tmix/normalization/test.py \
+  tests/cmix/mix/test.py tests/cmix/sparse/test.py \
+  tests/embedding/test.py tests/head/linear/test.py \
+  tests/head/l2wrap_ce/test.py tests/loss/l2wrap_ce/test.py \
+  tests/rl_infctx/wkv7/test.py
 ```
 
-Run all nine provider/name identities:
+WKV operator correctness matrix：
 
 ```bash
-python benchmarks/benchmark_rwkv7.py
+./.venv/bin/python -m benchmarks.tmix.wkv7.bench \
+  --shapes h32d64 h40d64 h64d64 --dtype bfloat16 --correctness-only \
+  --stress --decay-bias \
+  --output /tmp/flash-rwkv-wkv7-operator-shapes-correctness.json
 ```
 
-The canonical runner uses the 21-case Albatross B/T matrix:
+benchmark JSON 应记录 source revision、compiled extension hash、GPU/SM、Torch/CUDA/
+Python、selected kernel family、raw latency samples、p10/p50/p90、throughput、
+correctness tolerance 和 failure reason。benchmark 只测单个 operator，不定义或组合 model，
+也不把任何 model-level layer count 乘进 latency。
 
-```text
-1x1 1x2 1x4 1x8 1x16 1x32 1x64 1x128 1x256
-2x1 4x1 8x1 16x1 32x1 64x1 128x1 256x1
-2x2 4x4 8x8 16x16
-```
+完整 Albatross fixed-vs-uniform-varlen-vs-ragged-vs-vllm operator diagnostic、
+各 stateful operator 的 ragged correctness、目标 GPU 全量 operator benchmark、
+compute-sanitizer/racecheck 和完整 `rwkv7_v3a_ops` tuned dispatch 证据不是当前
+smoke 结果可以替代的验收项；FlashRWKV 不负责完整 model 定义或 model-level
+benchmark。
 
-Every per-kernel CSV has exactly:
+## Worktree boundary
 
-```text
-label,B,T,iters,p10_ms,p50_ms,p90_ms,tok_s_p50
-```
-
-and:
-
-```text
-tok_s_p50 = B * T * 1000 / p50_ms
-```
-
-Each shape passes output/final-state correctness first; backward entries also
-pass all-input gradient correctness. Invalid cases are retained in JSON but
-do not produce a performance row.
-
-CUDA events enclose one named logical operator. Input generation,
-compilation/autotune, correctness, packed metadata construction, state
-clone/reset, logging, and serialization are outside the interval. The
-KDA-derived interval deliberately includes consecutive K1 and K2 launches.
-Raw samples, errors, precision, workspace, configuration, source revision,
-runtime, and hardware are retained in JSON; a Markdown report and one exact
-eight-field CSV per identity are written alongside it.
-
-The default benchmark uses hidden size 4096, BF16 token I/O for `fp32io16`,
-five warmups, and 30 retained samples. Numerical modes are reported
-separately and are not presented as like-for-like performance rankings.
-
-Additional development tools remain available:
-
-- `benchmarks/benchmark_training.py`: the same canonical runner restricted to
-  the four pretraining identities;
-- `benchmarks/autotune_chunk.py`: legacy materialized-chunk configuration
-  exploration;
-- `benchmarks/compare_chunk_strategies.py`: legacy development comparison;
-- `benchmarks/benchmark_recurrent.py`: detailed recurrent/stateful
-  characterization.
-
-## Provenance and licenses
-
-The RWKV-LM pretraining forward/backward pair is adapted from
-[BlinkDL/RWKV-LM](https://github.com/BlinkDL/RWKV-LM) at
-`952102498e9ed367ea0a59ee64106916d474d30f`.
-
-The stable inference kernels are adapted from
-[rwkv-rs/vllm-rwkv](https://github.com/rwkv-rs/vllm-rwkv) at
-`6d683f9e49a2997e405c47edc147872c8609513b`; its FP16 lineage includes
-[BlinkDL/Albatross](https://github.com/BlinkDL/Albatross)
-`faster3a_2607` at `63c53f4abf2cd891dd3a18c8f44f5b2cccc8c64b`.
-
-The explicit K1/K2 separation follows
-[MoonshotAI/FlashKDA](https://github.com/MoonshotAI/FlashKDA) at
-`1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`, while the implemented algebra is
-the canonical RWKV-7 recurrence.
-
-[FLA](https://github.com/fla-org/flash-linear-attention) at
-`3adcb3c50a9e78c6ef6d173543305b1d5ef8fa4c` remains an external dependency.
-
-See [NOTICE](NOTICE), [LICENSE](LICENSE), and
-[LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt) for file-level boundaries.
+当前树是有意保留的 dirty migration tree。`_old` 目录、已有删除、用户修改和本地
+验证生成的 native `.so` 不因文档或测试更新被自动清理。本项目当前不会自动
+commit、push、reset 或 checkout 无关路径。
