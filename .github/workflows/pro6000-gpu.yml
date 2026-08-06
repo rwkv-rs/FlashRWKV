@@ -43,6 +43,7 @@ jobs:
       head_sha: ${{ steps.revision.outputs.head_sha }}
       pr_number: ${{ steps.revision.outputs.pr_number }}
       trusted: ${{ steps.revision.outputs.trusted }}
+      publish_baseline: ${{ steps.revision.outputs.publish_baseline }}
       affected_modules: ${{ steps.targets.outputs.affected_modules }}
       benchmark_matrix: ${{ steps.targets.outputs.benchmark_matrix }}
       run_gpu: ${{ steps.targets.outputs.run_gpu }}
@@ -68,6 +69,7 @@ jobs:
             let headSha;
             let prNumber = '';
             let trusted = true;
+            let publishBaseline = false;
             if (context.eventName === 'pull_request') {
               const pull = context.payload.pull_request;
               baseSha = pull.base.sha;
@@ -77,6 +79,7 @@ jobs:
                 pull.head.repo.full_name === `${context.repo.owner}/${context.repo.repo}` &&
                 ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pull.author_association);
             } else if (context.eventName === 'push') {
+              publishBaseline = true;
               baseSha = context.payload.before;
               headSha = context.sha;
               if (/^0+$/.test(baseSha)) {
@@ -97,6 +100,7 @@ jobs:
                 return;
               }
               if (process.env.ACCEPT_BASELINE === 'true') {
+                publishBaseline = true;
                 if (context.ref !== 'refs/heads/main') {
                   core.setFailed('accepted baseline dispatches must run from the main ref');
                   return;
@@ -132,25 +136,45 @@ jobs:
                 baseSha = commit.parents[0].sha;
                 prNumber = '';
               } else {
-                if (!prNumber) {
-                  core.setFailed('pr_number is required for a normal manual validation');
-                  return;
+                if (prNumber) {
+                  const {data: pull} = await github.rest.pulls.get({
+                    ...context.repo, pull_number: Number(prNumber),
+                  });
+                  if (pull.state !== 'open' || pull.head.sha !== headSha ||
+                      pull.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+                    core.setFailed('dispatch target is not the current head of an open in-repository PR');
+                    return;
+                  }
+                  baseSha = pull.base.sha;
+                } else {
+                  if (context.ref !== 'refs/heads/main') {
+                    core.setFailed('a main retry must be dispatched from the main ref');
+                    return;
+                  }
+                  const {data: main} = await github.rest.repos.getBranch({
+                    ...context.repo, branch: 'main',
+                  });
+                  if (main.commit.sha !== headSha) {
+                    core.setFailed('a main retry must target the current main revision');
+                    return;
+                  }
+                  const {data: commit} = await github.rest.repos.getCommit({
+                    ...context.repo, ref: headSha,
+                  });
+                  if (!commit.parents.length) {
+                    core.setFailed('current main revision has no comparison parent');
+                    return;
+                  }
+                  baseSha = commit.parents[0].sha;
+                  publishBaseline = true;
                 }
-                const {data: pull} = await github.rest.pulls.get({
-                  ...context.repo, pull_number: Number(prNumber),
-                });
-                if (pull.state !== 'open' || pull.head.sha !== headSha ||
-                    pull.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
-                  core.setFailed('dispatch target is not the current head of an open in-repository PR');
-                  return;
-                }
-                baseSha = pull.base.sha;
               }
             }
             core.setOutput('base_sha', baseSha);
             core.setOutput('head_sha', headSha);
             core.setOutput('pr_number', prNumber);
             core.setOutput('trusted', String(trusted));
+            core.setOutput('publish_baseline', String(publishBaseline));
       - name: Select affected modules
         id: targets
         run: |
@@ -426,10 +450,11 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Publish approved main baseline
-        if: success() && (github.event_name == 'push' || inputs.accept_baseline == true)
+        if: success() && needs.impact.outputs.publish_baseline == 'true'
         env:
           SAFE_MODULE: ${{ matrix.target.safe }}
           ACCEPT_BASELINE: ${{ inputs.accept_baseline }}
+          APPROVAL_REASON: ${{ inputs.approval_reason }}
         run: |
           args=()
           reason="validated main quality gate"
@@ -444,7 +469,7 @@ jobs:
             --reason "$reason" \
             "${args[@]}"
       - name: Upload approved main baseline
-        if: success() && (github.event_name == 'push' || inputs.accept_baseline == true)
+        if: success() && needs.impact.outputs.publish_baseline == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: flash-rwkv-baseline-sm120-${{ matrix.target.safe }}

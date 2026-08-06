@@ -4,6 +4,12 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Exact current main revision to retry
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -16,6 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_revision || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
@@ -29,10 +36,22 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PUSH_BASE: ${{ github.event.before }}
           PUSH_HEAD: ${{ github.sha }}
+          DISPATCH_HEAD: ${{ inputs.source_revision }}
         run: |
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             base="$PR_BASE"
             head="$PR_HEAD"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            head="$DISPATCH_HEAD"
+            if [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "source_revision must be a full lowercase Git OID: $head" >&2
+              exit 1
+            fi
+            if [[ "$(git rev-parse origin/main)" != "$head" ]]; then
+              echo "source_revision must be the current main revision" >&2
+              exit 1
+            fi
+            base="$(git rev-parse "$head^")"
           else
             base="$PUSH_BASE"
             head="$PUSH_HEAD"
