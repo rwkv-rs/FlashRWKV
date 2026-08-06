@@ -47,6 +47,20 @@ PUBLIC_INFERENCE_MODULES = (
     "flash_rwkv.cmix.sparse",
     "flash_rwkv.head.linear",
 )
+PUBLIC_TRAINING_MODULES = (
+    "flash_rwkv.tmix.wkv7",
+    "flash_rwkv.tmix.wkv7.statetune",
+    "flash_rwkv.tmix.a_gate",
+    "flash_rwkv.tmix.vres_gate",
+    "flash_rwkv.tmix.mix6",
+    "flash_rwkv.tmix.kk_pre",
+    "flash_rwkv.tmix.lnx_rkvres_xg",
+    "flash_rwkv.cmix.mix",
+    "flash_rwkv.loss.l2wrap_ce",
+    "flash_rwkv.head.l2wrap_ce",
+    "flash_rwkv.rl_infctx.wkv7",
+)
+PUBLIC_TRAINING_PREFIXES = ("pretrain_", "statetune_", "rl_infctx_")
 
 
 def _active_native_files() -> set[Path]:
@@ -171,6 +185,32 @@ def test_root_exports_all_public_inference_operators() -> None:
         name for name in flash_rwkv.__all__ if name.startswith("infer_")
     }
     assert root_inference_names == set(expected)
+    for name, operator in expected.items():
+        assert getattr(flash_rwkv, name) is operator
+
+
+def test_root_exports_all_public_training_operators() -> None:
+    import flash_rwkv
+
+    expected = {}
+    for module_name in PUBLIC_TRAINING_MODULES:
+        module = importlib.import_module(module_name)
+        for name in module.__all__:
+            if not name.startswith(PUBLIC_TRAINING_PREFIXES):
+                continue
+            assert name not in expected, (
+                f"public training operator {name} is exported by both "
+                f"{expected[name].__module__} and {module_name}"
+            )
+            expected[name] = getattr(module, name)
+
+    assert len(expected) == 12
+    root_training_names = {
+        name
+        for name in flash_rwkv.__all__
+        if name.startswith(PUBLIC_TRAINING_PREFIXES)
+    }
+    assert root_training_names == set(expected)
     for name, operator in expected.items():
         assert getattr(flash_rwkv, name) is operator
 

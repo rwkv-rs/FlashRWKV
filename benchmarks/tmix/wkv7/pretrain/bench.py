@@ -3,42 +3,63 @@
 from __future__ import annotations
 
 import json
-import time
-from pathlib import Path
 
 import torch
 
-from flash_rwkv.tmix.wkv7 import pretrain_recurrent_fp32io16
+from flash_rwkv import pretrain_recurrent_bf16
 
 
-ROOT = Path(__file__).resolve().parents[4]
 SOURCE_REVISION = "952102498e9ed367ea0a59ee64106916d474d30f"
+NATIVE_NAMESPACE = "rwkv7_clampw_v3"
 
 
-def run(*, iterations: int = 50) -> dict[str, object]:
-    device = torch.device("cuda")
-    B, H, D, total = 2, 2, 64, 32
-    state = torch.zeros((B, H, D, D), device=device, dtype=torch.float32)
-    values = [torch.randn((total, H, D), device=device, dtype=torch.float16).mul_(0.01) for _ in range(6)]
-    sequence = torch.tensor([0, 1, 2], device=device, dtype=torch.int32)
-    starts = torch.tensor([0, 16], device=device, dtype=torch.int32)
-    ends = torch.tensor([16, total], device=device, dtype=torch.int32)
-    for _ in range(5):
-        pretrain_recurrent_fp32io16(state, sequence, starts, ends, *values)
+def run(*, warmup: int = 5, iterations: int = 50) -> dict[str, object]:
+    batch, tokens, heads, head_size = 2, 512, 12, 64
+    shape = (batch, tokens, heads * head_size)
+    torch.manual_seed(20260806)
+    values = tuple(
+        (torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.05)
+        .contiguous()
+        .requires_grad_()
+        for _ in range(6)
+    )
+    grad_output = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    def step() -> None:
+        output = pretrain_recurrent_bf16(*values)
+        torch.autograd.grad(output, values, grad_output, retain_graph=False)
+
+    for _ in range(warmup):
+        step()
     torch.cuda.synchronize()
-    start = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
     for _ in range(iterations):
-        pretrain_recurrent_fp32io16(state, sequence, starts, ends, *values)
-    torch.cuda.synchronize()
-    latency_us = (time.perf_counter() - start) * 1.0e6 / iterations
+        step()
+    end.record()
+    end.synchronize()
+    latency_ms = start.elapsed_time(end) / iterations
+    device = torch.cuda.current_device()
     return {
         "source_revision": SOURCE_REVISION,
-        "operator": "tmix/wkv7/pretrain_recurrent_fp32io16",
-        "gpu": torch.cuda.get_device_name(),
-        "shape": {"B": B, "H": H, "D": D, "total_tokens": total},
-        "latency_us": latency_us,
+        "operator": "tmix/wkv7/pretrain_recurrent_bf16",
+        "native_namespace": NATIVE_NAMESPACE,
+        "native_namespace_loaded": hasattr(torch.ops.rwkv7_clampw_v3, "forward"),
+        "gpu": torch.cuda.get_device_name(device),
+        "compute_capability": list(torch.cuda.get_device_capability(device)),
+        "cuda": torch.version.cuda,
+        "shape": {
+            "B": batch,
+            "T": tokens,
+            "H": heads,
+            "N": head_size,
+        },
+        "workload": "forward+backward",
+        "latency_ms": latency_ms,
+        "tokens_per_second": batch * tokens / (latency_ms / 1000.0),
+        "warmup": warmup,
         "iterations": iterations,
-        "git_status": "dirty-worktree-preserved",
     }
 
 

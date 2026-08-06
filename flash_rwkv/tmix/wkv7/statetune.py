@@ -7,7 +7,73 @@ import math
 import torch
 
 from . import _extension
-from .pretrain import _check_metadata, _check_token_inputs
+
+
+def _check_cuda_contiguous(tensor: torch.Tensor, name: str) -> None:
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor")
+    if not tensor.is_cuda or not tensor.is_contiguous():
+        raise ValueError(f"{name} must be contiguous CUDA")
+
+
+def _check_metadata(
+    sequence_chunk_offsets: torch.Tensor,
+    chunk_token_starts: torch.Tensor,
+    chunk_token_ends: torch.Tensor,
+    state: torch.Tensor,
+) -> None:
+    for name, tensor in (
+        ("sequence_chunk_offsets", sequence_chunk_offsets),
+        ("chunk_token_starts", chunk_token_starts),
+        ("chunk_token_ends", chunk_token_ends),
+    ):
+        _check_cuda_contiguous(tensor, name)
+        if tensor.dtype != torch.int32:
+            raise TypeError(f"{name} must be int32")
+        if tensor.device != state.device:
+            raise ValueError(f"{name} must share the state device")
+    if sequence_chunk_offsets.ndim != 1:
+        raise ValueError("sequence_chunk_offsets must be one-dimensional")
+    if chunk_token_starts.ndim != 1 or chunk_token_ends.shape != chunk_token_starts.shape:
+        raise ValueError("chunk token metadata must have matching shape [C]")
+    if chunk_token_starts.numel() == 0:
+        raise ValueError("at least one training chunk is required")
+
+
+def _check_token_inputs(
+    state: torch.Tensor,
+    r: torch.Tensor,
+    decay_logits: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> None:
+    _check_cuda_contiguous(state, "state")
+    if state.dtype != torch.float32:
+        raise TypeError("state must be float32")
+    if state.ndim != 4 or state.shape[0] <= 0 or state.shape[1] <= 0:
+        raise ValueError("state must have shape [B,H,D,D]")
+    if state.shape[2] != state.shape[3] or state.shape[2] not in (64, 128, 256):
+        raise ValueError("state head size must be 64, 128, or 256")
+    tensors = {
+        "r": r,
+        "decay_logits": decay_logits,
+        "k": k,
+        "v": v,
+        "a": a,
+        "b": b,
+    }
+    for name, tensor in tensors.items():
+        _check_cuda_contiguous(tensor, name)
+        if tensor.device != state.device:
+            raise ValueError(f"{name} must share the state device")
+        if tensor.dtype not in (torch.float16, torch.bfloat16):
+            raise TypeError(f"{name} must be float16 or bfloat16")
+        if tensor.shape != r.shape:
+            raise ValueError(f"{name} must match r shape")
+    if r.ndim != 3 or r.shape[0] <= 0 or r.shape[1:] != state.shape[1:3]:
+        raise ValueError("token tensors must have shape [total_tokens,H,D]")
 
 
 class _StateTune(torch.autograd.Function):

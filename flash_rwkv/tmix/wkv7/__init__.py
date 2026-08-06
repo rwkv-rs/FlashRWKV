@@ -348,7 +348,7 @@ __all__ = [
     "prepare_recurrent_metadata",
 ]
 
-from .pretrain import pretrain_recurrent_fp32io16
+from .pretrain import pretrain_recurrent_bf16
 from .chunk import infer_chunk_bf16_forward_varlen
 
-__all__.extend(["pretrain_recurrent_fp32io16", "infer_chunk_bf16_forward_varlen"])
+__all__.extend(["pretrain_recurrent_bf16", "infer_chunk_bf16_forward_varlen"])

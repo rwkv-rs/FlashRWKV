@@ -20,7 +20,6 @@ void register_head_linear_bindings(py::module_&);
 void register_cmix_sparse_bindings(py::module_&);
 void register_pretrain_l2wrap_ce_forward_bindings(py::module_&);
 void register_pretrain_l2wrap_ce_backward_bindings(py::module_&);
-void register_pretrain_recurrent_bindings(py::module_&);
 void register_infer_chunk_bindings(py::module_&);
 void register_pretrain_tmix_a_gate_forward_bindings(py::module_&);
 void register_pretrain_tmix_a_gate_backward_bindings(py::module_&);

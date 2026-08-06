@@ -18,7 +18,6 @@ void register_flash_rwkv_bindings(py::module_& module) {
   register_cmix_sparse_bindings(module);
   register_pretrain_l2wrap_ce_forward_bindings(module);
   register_pretrain_l2wrap_ce_backward_bindings(module);
-  register_pretrain_recurrent_bindings(module);
   register_infer_chunk_bindings(module);
   register_pretrain_tmix_a_gate_forward_bindings(module);
   register_pretrain_tmix_a_gate_backward_bindings(module);

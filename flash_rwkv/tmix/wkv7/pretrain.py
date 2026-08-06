@@ -1,257 +1,123 @@
 # SPDX-License-Identifier: MIT
 
-"""RWKV-LM ``train_temp`` recurrent training contract.
-
-Training recurrence is deliberately separate from the inference state-pool
-API.  It consumes per-sequence initial states, checkpoints each declared
-chunk boundary, and exposes both final-state and initial-state gradients.
-Only raw ``decay_logits`` are accepted at the Python boundary.
-"""
+"""Canonical RWKV-LM ``train_temp`` clampw v3 H100 training operator."""
 
 from __future__ import annotations
 
-import math
-
 import torch
 
-from . import _extension
+
+HEAD_SIZE = 64
+CHUNK_LEN = 16
 
 
-def _check_cuda_contiguous(tensor: torch.Tensor, name: str) -> None:
-    if not isinstance(tensor, torch.Tensor):
-        raise TypeError(f"{name} must be a torch.Tensor")
-    if not tensor.is_cuda or not tensor.is_contiguous():
-        raise ValueError(f"{name} must be contiguous CUDA")
+def _validate_inputs(tensors: tuple[torch.Tensor, ...]) -> tuple[int, int, int]:
+    if len(tensors) != 6:
+        raise ValueError("clampw requires r, w, k, v, a, and b")
+    r = tensors[0]
+    if not isinstance(r, torch.Tensor):
+        raise TypeError("r must be a torch.Tensor")
+    if r.ndim != 3 or min(r.shape) <= 0:
+        raise ValueError("r must have shape [B,T,C] with nonzero dimensions")
+    if r.dtype != torch.bfloat16:
+        raise TypeError("r must be bfloat16")
+    if not r.is_cuda or not r.is_contiguous():
+        raise ValueError("r must be contiguous CUDA")
 
-
-def _check_metadata(
-    sequence_chunk_offsets: torch.Tensor,
-    chunk_token_starts: torch.Tensor,
-    chunk_token_ends: torch.Tensor,
-    state: torch.Tensor,
-) -> None:
-    for name, tensor in (
-        ("sequence_chunk_offsets", sequence_chunk_offsets),
-        ("chunk_token_starts", chunk_token_starts),
-        ("chunk_token_ends", chunk_token_ends),
-    ):
-        _check_cuda_contiguous(tensor, name)
-        if tensor.dtype != torch.int32:
-            raise TypeError(f"{name} must be int32")
-        if tensor.device != state.device:
-            raise ValueError(f"{name} must share the state device")
-    if sequence_chunk_offsets.ndim != 1:
-        raise ValueError("sequence_chunk_offsets must be one-dimensional")
-    if chunk_token_starts.ndim != 1 or chunk_token_ends.shape != chunk_token_starts.shape:
-        raise ValueError("chunk token metadata must have matching shape [C]")
-    if chunk_token_starts.numel() == 0:
-        raise ValueError("at least one training chunk is required")
-
-
-def _check_token_inputs(
-    state: torch.Tensor,
-    r: torch.Tensor,
-    decay_logits: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-) -> None:
-    _check_cuda_contiguous(state, "state")
-    if state.dtype != torch.float32:
-        raise TypeError("state must be float32")
-    if state.ndim != 4 or state.shape[0] <= 0 or state.shape[1] <= 0:
-        raise ValueError("state must have shape [B,H,D,D]")
-    if state.shape[2] != state.shape[3] or state.shape[2] not in (64, 128, 256):
-        raise ValueError("state head size must be 64, 128, or 256")
-    tensors = {
-        "r": r,
-        "decay_logits": decay_logits,
-        "k": k,
-        "v": v,
-        "a": a,
-        "b": b,
-    }
-    for name, tensor in tensors.items():
-        _check_cuda_contiguous(tensor, name)
-        if tensor.device != state.device:
-            raise ValueError(f"{name} must share the state device")
-        if tensor.dtype not in (torch.float16, torch.bfloat16):
-            raise TypeError(f"{name} must be float16 or bfloat16")
+    for name, tensor in zip(("w", "k", "v", "a", "b"), tensors[1:]):
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor")
+        if tensor.dtype != torch.bfloat16:
+            raise TypeError(f"{name} must be bfloat16")
+        if not tensor.is_cuda or not tensor.is_contiguous():
+            raise ValueError(f"{name} must be contiguous CUDA")
         if tensor.shape != r.shape:
             raise ValueError(f"{name} must match r shape")
-    if r.ndim != 3 or r.shape[0] <= 0 or r.shape[1:] != state.shape[1:3]:
-        raise ValueError("token tensors must have shape [total_tokens,H,D]")
+        if tensor.device != r.device:
+            raise ValueError(f"{name} must share the r device")
+
+    batch, tokens, channels = r.shape
+    if channels % HEAD_SIZE != 0:
+        raise ValueError("C must be divisible by the canonical head size 64")
+    if tokens % CHUNK_LEN != 0:
+        raise ValueError("T must be divisible by the canonical chunk length 16")
+    return batch, tokens, channels
 
 
 class _PretrainRecurrent(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
-        initial_state: torch.Tensor,
-        sequence_chunk_offsets: torch.Tensor,
-        chunk_token_starts: torch.Tensor,
-        chunk_token_ends: torch.Tensor,
         r: torch.Tensor,
-        decay_logits: torch.Tensor,
+        w: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         a: torch.Tensor,
         b: torch.Tensor,
-        scale: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        state = initial_state.detach().contiguous().clone()
-        output = torch.empty_like(v)
+    ) -> torch.Tensor:
+        batch, tokens, channels = _validate_inputs((r, w, k, v, a, b))
+        heads = channels // HEAD_SIZE
+        values = tuple(
+            tensor.view(batch, tokens, heads, HEAD_SIZE)
+            for tensor in (r, w, k, v, a, b)
+        )
+        output = torch.empty_like(values[3])
         boundary = torch.empty(
-            (chunk_token_starts.numel(), state.shape[1], state.shape[2], state.shape[3]),
-            device=state.device,
+            (batch, heads, tokens // CHUNK_LEN, HEAD_SIZE, HEAD_SIZE),
+            device=r.device,
             dtype=torch.float32,
         )
-        state_dot_a = torch.empty_like(r, dtype=torch.float32)
-        _extension().pretrain_recurrent_fp32io16_forward(
-            sequence_chunk_offsets,
-            chunk_token_starts,
-            chunk_token_ends,
-            state,
-            r,
-            decay_logits,
-            k,
-            v,
-            a,
-            b,
-            output,
-            boundary,
-            state_dot_a,
-            float(scale),
+        state_dot_a = torch.empty(
+            (batch, tokens, heads, HEAD_SIZE),
+            device=r.device,
+            dtype=torch.float32,
         )
-        ctx.save_for_backward(
-            sequence_chunk_offsets,
-            chunk_token_starts,
-            chunk_token_ends,
-            state,
-            r,
-            decay_logits,
-            k,
-            v,
-            a,
-            b,
-            state_dot_a,
-            boundary,
+        torch.ops.rwkv7_clampw_v3.forward(
+            *values, output, boundary, state_dot_a
         )
-        ctx.scale = float(scale)
-        ctx.mark_non_differentiable(boundary, state_dot_a)
-        return output, state, boundary, state_dot_a
+        ctx.save_for_backward(*values, boundary, state_dot_a)
+        ctx.input_shape = (batch, tokens, channels)
+        return output.view(batch, tokens, channels)
 
     @staticmethod
     def backward(
         ctx: torch.autograd.function.FunctionCtx,
-        grad_output: torch.Tensor | None,
-        grad_final_state: torch.Tensor | None,
-        _grad_boundary: torch.Tensor | None,
-        _grad_state_dot_a: torch.Tensor | None,
-    ) -> tuple[torch.Tensor | None, ...]:
-        (
-            sequence_chunk_offsets,
-            chunk_token_starts,
-            chunk_token_ends,
-            final_state,
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        r, w, k, v, a, b, boundary, state_dot_a = ctx.saved_tensors
+        batch, tokens, channels = ctx.input_shape
+        heads = channels // HEAD_SIZE
+        grad_output_4d = grad_output.contiguous().view(
+            batch, tokens, heads, HEAD_SIZE
+        )
+        gradients = tuple(torch.empty_like(tensor) for tensor in (r, w, k, v, a, b))
+        torch.ops.rwkv7_clampw_v3.backward(
             r,
-            decay_logits,
+            w,
             k,
             v,
             a,
             b,
-            state_dot_a,
+            grad_output_4d,
             boundary,
-        ) = ctx.saved_tensors
-        grad_initial_state = torch.empty_like(final_state)
-        grad_r = torch.empty_like(r)
-        grad_decay_logits = torch.empty_like(decay_logits)
-        grad_k = torch.empty_like(k)
-        grad_v = torch.empty_like(v)
-        grad_a = torch.empty_like(a)
-        grad_b = torch.empty_like(b)
-        _extension().pretrain_recurrent_fp32io16_backward(
-            sequence_chunk_offsets,
-            chunk_token_starts,
-            chunk_token_ends,
-            final_state,
-            r,
-            decay_logits,
-            k,
-            v,
-            a,
-            b,
             state_dot_a,
-            grad_output,
-            grad_final_state,
-            boundary,
-            grad_r,
-            grad_decay_logits,
-            grad_k,
-            grad_v,
-            grad_a,
-            grad_b,
-            grad_initial_state,
-            ctx.scale,
+            *gradients,
         )
-        return (
-            grad_initial_state,
-            None,
-            None,
-            None,
-            grad_r,
-            grad_decay_logits,
-            grad_k,
-            grad_v,
-            grad_a,
-            grad_b,
-            None,
-        )
+        return tuple(gradient.view(batch, tokens, channels) for gradient in gradients)
 
 
-def pretrain_recurrent_fp32io16(
-    initial_state: torch.Tensor,
-    sequence_chunk_offsets: torch.Tensor,
-    chunk_token_starts: torch.Tensor,
-    chunk_token_ends: torch.Tensor,
+def pretrain_recurrent_bf16(
     r: torch.Tensor,
-    decay_logits: torch.Tensor,
+    w: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
-    *,
-    scale: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Run train_temp recurrent forward with direct CUDA backward support.
+) -> torch.Tensor:
+    """Run the canonical train_temp clampw v3 H100 forward/backward family."""
 
-    Returns ``(output, final_state, boundary, state_dot_a)``.  ``boundary``
-    and ``state_dot_a`` are checkpoint workspaces and are intentionally
-    non-differentiable outputs; they are replay inputs owned by this operator.
-    """
-
-    _check_token_inputs(initial_state, r, decay_logits, k, v, a, b)
-    _check_metadata(
-        sequence_chunk_offsets, chunk_token_starts, chunk_token_ends, initial_state
-    )
-    if sequence_chunk_offsets.numel() != initial_state.shape[0] + 1:
-        raise ValueError("sequence_chunk_offsets must have shape [B+1]")
-    if not isinstance(scale, (float, int)) or not math.isfinite(float(scale)):
-        raise ValueError("scale must be finite")
-    return _PretrainRecurrent.apply(
-        initial_state,
-        sequence_chunk_offsets,
-        chunk_token_starts,
-        chunk_token_ends,
-        r,
-        decay_logits,
-        k,
-        v,
-        a,
-        b,
-        float(scale),
-    )
+    _validate_inputs((r, w, k, v, a, b))
+    return _PretrainRecurrent.apply(r, w, k, v, a, b)
 
 
-__all__ = ["pretrain_recurrent_fp32io16"]
+__all__ = ["pretrain_recurrent_bf16"]

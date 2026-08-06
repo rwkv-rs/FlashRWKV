@@ -17,7 +17,7 @@ from .tmix.wkv7 import (
     infer_recurrent_fp16_advance_i32_varlen,
     infer_recurrent_fp16_forward_varlen,
     infer_recurrent_fp32io16_forward_varlen,
-    pretrain_recurrent_fp32io16,
+    pretrain_recurrent_bf16,
     prepare_recurrent_metadata,
 )
 from .embedding import infer_embedding_ln0_forward_varlen
@@ -133,7 +133,7 @@ __all__ = [
     "infer_head_linear_all_forward_varlen",
     "infer_head_linear_forward_varlen",
     "infer_head_linear_last_forward_varlen",
-    "pretrain_recurrent_fp32io16",
+    "pretrain_recurrent_bf16",
     "statetune_recurrent_fp32io16",
     "prepare_recurrent_metadata",
     "pretrain_tmix_a_gate_bf16",

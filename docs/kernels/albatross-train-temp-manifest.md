@@ -76,7 +76,7 @@ canonical source root：`RWKV-v7/train_temp/cuda`，revision
 
 | source | FlashRWKV module | 当前 body |
 | --- | --- | --- |
-| `wkv7_cuda.cu`, `wkv7_cuda_fp32.cu` | `tmix/wkv7` | adapted training recurrent body；final/initial-state gradient、checkpoint/tail metadata 已覆盖 |
+| `rwkv7_clampw_v3.cpp`, `rwkv7_clampw_v3_for_h100.cu` | `tmix/wkv7` | canonical BF16、N=64、chunk-16 forward/backward body 原样迁移；soft-clamp、零初始 state、内部 `s`/`sa` workspace 和 H100 launch 保持上游 contract |
 | `rwkv7_tmix_a_gate_bf16.cu` | `tmix/a_gate` | canonical body 已切分为 forward/backward pair |
 | `rwkv7_tmix_vres_gate_bf16_v3.cu` | `tmix/vres_gate` | canonical body 已切分为 forward/backward pair |
 | `rwkv7_tmix_mix6_bf16_v5.cu` | `tmix/mix6` | canonical body 已切分为 forward/backward pair |
@@ -86,8 +86,9 @@ canonical source root：`RWKV-v7/train_temp/cuda`，revision
 | `rwkv7_l2wrap_ce_bf16_v2.cu` | `loss/l2wrap_ce` | canonical body 已切分；vocab 为 binding-local shape parameter |
 | `rwkv7_head_l2wrap_ce_bf16_v4.cu` | `head/l2wrap_ce` | canonical row-chunk/reduction body 已接入 module-local wrapper |
 
-training API 不复用 inference state pool contract；保留 training 的 chunk、workspace、
-recompute、loss scaling 和 initial-state gradient 语义。
+pretrain recurrent API 不复用 inference state pool contract，也不暴露 initial/final
+state、packed metadata 或兼容旧 `wkv7_cuda` 的入口；公开 wrapper 直接保持 clampw v3
+的 BF16 `[B,T,C]`、`T % 16 == 0` 和内部 workspace contract。
 
 ## RL/Infctx 与 StateTune body
 

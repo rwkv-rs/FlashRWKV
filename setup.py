@@ -173,13 +173,9 @@ ext_modules = (
                 "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_backward.cpp",
                 "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_backward.cu",
                 "csrc/sm90/tmix/wkv7/"
-                "pretrain_recurrent_fp32io16_forward.cpp",
+                "pretrain_recurrent_bf16_forward.cpp",
                 "csrc/sm90/tmix/wkv7/"
-                "pretrain_recurrent_fp32io16_forward.cu",
-                "csrc/sm90/tmix/wkv7/"
-                "pretrain_recurrent_fp32io16_backward.cpp",
-                "csrc/sm90/tmix/wkv7/"
-                "pretrain_recurrent_fp32io16_backward.cu",
+                "pretrain_recurrent_bf16_forward.cu",
                 "csrc/sm90/tmix/a_gate/pretrain_bf16_forward.cpp",
                 "csrc/sm90/tmix/a_gate/pretrain_bf16_forward.cu",
                 "csrc/sm90/tmix/a_gate/pretrain_bf16_backward.cpp",
@@ -222,6 +218,8 @@ ext_modules = (
                     "--expt-relaxed-constexpr",
                     "--expt-extended-lambda",
                     "-lineinfo",
+                    "-D_N_=64",
+                    "-D_CHUNK_LEN_=16",
                     # CUDA 13 nvcc ICEs on the unmodified canonical Albatross
                     # v3a body under C++20.  The exact upstream translation
                     # unit compiles under C++17; keep the body unchanged.

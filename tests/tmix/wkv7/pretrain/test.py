@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from pathlib import Path
 
@@ -9,137 +10,144 @@ import pytest
 import torch
 
 import flash_rwkv
-from flash_rwkv.tmix.wkv7 import pretrain_recurrent_fp32io16
+from flash_rwkv.tmix.wkv7 import pretrain_recurrent_bf16
 
 
 ROOT = Path(__file__).resolve().parents[4]
+W_SCALE = -0.6065306597
+UPSTREAM_BODY_HASHES = {
+    "pretrain_recurrent_bf16_forward.cpp": "a3def05547be8bf79d81d76c4d4795958c712e42ef94fb5d4161a66b00b0cb74",
+    "pretrain_recurrent_bf16_forward.cu": "2f36786a261582198f3ec2deca7b2af241a364f2fae3045b19731a0149109083",
+}
 AVAILABLE = (
     torch.cuda.is_available()
     and flash_rwkv._C is not None
-    and hasattr(flash_rwkv._C, "pretrain_recurrent_fp32io16_forward")
-    and hasattr(flash_rwkv._C, "pretrain_recurrent_fp32io16_backward")
+    and hasattr(torch.ops.rwkv7_clampw_v3, "forward")
+    and hasattr(torch.ops.rwkv7_clampw_v3, "backward")
 )
 
 
 def _require_cuda() -> None:
     if not AVAILABLE:
-        pytest.skip("CUDA extension with train_temp recurrent bindings is required")
+        pytest.skip("CUDA extension with canonical clampw v3 bindings is required")
 
 
-def _case(requires_grad: bool = False) -> tuple[torch.Tensor, ...]:
-    torch.manual_seed(20260805)
-    device = torch.device("cuda")
-    B, H, D, total = 2, 1, 64, 5
-    state = torch.randn(B, H, D, D, device=device).mul_(0.01)
-    values = [torch.randn(total, H, D, device=device, dtype=torch.float16).mul_(0.01) for _ in range(6)]
-    if requires_grad:
-        state.requires_grad_()
-        values = [value.requires_grad_() for value in values]
-    sequence_chunk_offsets = torch.tensor([0, 2, 3], device=device, dtype=torch.int32)
-    chunk_token_starts = torch.tensor([0, 1, 3], device=device, dtype=torch.int32)
-    chunk_token_ends = torch.tensor([1, 3, 5], device=device, dtype=torch.int32)
-    return (state, sequence_chunk_offsets, chunk_token_starts, chunk_token_ends, *values)
-
-
-def _reference(case: tuple[torch.Tensor, ...], scale: float) -> tuple[torch.Tensor, ...]:
-    state, sequence, starts, ends, r, decay_logits, k, v, a, b = case
-    B, H, D, _ = state.shape
-    device = state.device
-    retention = lambda logits: torch.exp2(
-        torch.tensor(-0.8750387749145276, device=device)
-        / (1.0 + torch.exp2(torch.tensor(-1.4426950408889634, device=device) * logits))
+def _case(
+    batch: int,
+    tokens: int,
+    heads: int,
+    *,
+    requires_grad: bool = False,
+) -> tuple[torch.Tensor, ...]:
+    torch.manual_seed(20260806 + batch + tokens + heads)
+    shape = (batch, tokens, heads * 64)
+    values = tuple(
+        (torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.05)
+        .contiguous()
+        .requires_grad_(requires_grad)
+        for _ in range(6)
     )
-    states: list[torch.Tensor] = []
-    rows: list[torch.Tensor] = []
-    boundaries: list[torch.Tensor] = []
-    state_dot_a: list[torch.Tensor] = []
-    for sequence_index in range(B):
-        current = state[sequence_index, 0].float()
-        for chunk_index in range(int(sequence[sequence_index]), int(sequence[sequence_index + 1])):
-            boundaries.append(current.clone())
-            for token_index in range(int(starts[chunk_index]), int(ends[chunk_index])):
-                rr = r[token_index, 0].float()
-                dd = retention(decay_logits[token_index, 0].float())
-                kk = k[token_index, 0].float()
-                vv = v[token_index, 0].float()
-                aa = a[token_index, 0].float()
-                bb = b[token_index, 0].float()
-                dot = (aa[:, None] * current).sum(dim=0)
-                state_dot_a.append(dot)
-                current = dd[:, None] * current + bb[:, None] * dot[None, :] + kk[:, None] * vv[None, :]
-                rows.append((float(scale) * (rr[:, None] * current).sum(dim=0)).to(v.dtype))
-        states.append(current)
-    return (
-        torch.stack(rows).view(total := r.shape[0], H, D),
-        torch.stack(states).view(B, H, D, D),
-        torch.stack(boundaries).view(len(boundaries), H, D, D),
-        torch.stack(state_dot_a).view(r.shape[0], H, D),
+    return values
+
+
+def _reference(values: tuple[torch.Tensor, ...]) -> torch.Tensor:
+    r, w, k, v, a, b = values
+    batch, tokens, channels = r.shape
+    heads = channels // 64
+    r4, w4, k4, v4, a4, b4 = (
+        tensor.view(batch, tokens, heads, 64).float()
+        for tensor in (r, w, k, v, a, b)
     )
-
-
-def test_training_public_contract_is_raw_decay_logits_only() -> None:
-    signature = inspect.signature(pretrain_recurrent_fp32io16)
-    assert "decay_logits" in signature.parameters
-    assert "initial_state" in signature.parameters
-    assert "log_decay" not in signature.parameters
-    assert "state_pool" not in signature.parameters
-    source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (
-            ROOT / "csrc/sm90/tmix/wkv7/pretrain_recurrent_fp32io16_forward.cpp",
-            ROOT / "csrc/sm90/tmix/wkv7/pretrain_recurrent_fp32io16_forward.cu",
-            ROOT / "csrc/sm90/tmix/wkv7/pretrain_recurrent_fp32io16_backward.cpp",
-            ROOT / "csrc/sm90/tmix/wkv7/pretrain_recurrent_fp32io16_backward.cu",
+    state = torch.zeros((batch, heads, 64, 64), device=r.device)
+    outputs = []
+    for token in range(tokens):
+        retention = torch.exp(W_SCALE / (1.0 + torch.exp(-w4[:, token])))
+        state_dot_a = torch.einsum("bhkv,bhk->bhv", state, a4[:, token])
+        state = (
+            state * retention.unsqueeze(-1)
+            + b4[:, token].unsqueeze(-1) * state_dot_a.unsqueeze(-2)
+            + k4[:, token].unsqueeze(-1) * v4[:, token].unsqueeze(-2)
         )
-    )
-    assert "log_decay" not in source
-    assert "pretrain_common" not in source
+        outputs.append(
+            torch.einsum("bhkv,bhk->bhv", state, r4[:, token])
+        )
+    return torch.stack(outputs, dim=1).reshape(batch, tokens, channels)
 
 
-def test_forward_matches_train_temp_recurrence_and_checkpoints() -> None:
+def test_native_bodies_match_pinned_train_temp_sources() -> None:
+    native_root = ROOT / "csrc/sm90/tmix/wkv7"
+    for filename, expected_hash in UPSTREAM_BODY_HASHES.items():
+        lines = (native_root / filename).read_bytes().splitlines(keepends=True)
+        body = b"".join(lines[6:])
+        assert hashlib.sha256(body).hexdigest() == expected_hash
+
+
+def test_public_contract_matches_clampw_v3() -> None:
+    signature = inspect.signature(pretrain_recurrent_bf16)
+    assert tuple(signature.parameters) == ("r", "w", "k", "v", "a", "b")
+    assert flash_rwkv.pretrain_recurrent_bf16 is pretrain_recurrent_bf16
+    assert "pretrain_recurrent_bf16" in flash_rwkv.__all__
+    assert "pretrain_recurrent_fp32io16" not in flash_rwkv.__all__
+    assert not hasattr(flash_rwkv, "pretrain_recurrent_fp32io16")
+
+
+@pytest.mark.parametrize("batch,tokens,heads", [(1, 16, 1), (2, 32, 2)])
+def test_forward_matches_clampw_recurrence(
+    batch: int, tokens: int, heads: int
+) -> None:
     _require_cuda()
-    case = _case()
-    state, sequence, starts, ends, r, decay_logits, k, v, a, b = case
-    actual = pretrain_recurrent_fp32io16(
-        state, sequence, starts, ends, r, decay_logits, k, v, a, b, scale=0.75
-    )
-    expected = _reference(case, 0.75)
-    assert torch.allclose(actual[0], expected[0], atol=3e-4, rtol=3e-4)
-    assert torch.allclose(actual[1], expected[1], atol=3e-4, rtol=3e-4)
-    assert torch.allclose(actual[2], expected[2], atol=3e-4, rtol=3e-4)
-    assert torch.allclose(actual[3], expected[3], atol=3e-4, rtol=3e-4)
+    values = _case(batch, tokens, heads)
+    actual = pretrain_recurrent_bf16(*values)
+    expected = _reference(values)
+    assert actual.shape == values[0].shape
+    assert actual.dtype == torch.bfloat16
+    assert torch.isfinite(actual).all()
+    assert torch.allclose(actual.float(), expected, atol=0.02, rtol=0.02)
+    assert torch.equal(actual, pretrain_recurrent_bf16(*values))
 
 
-def test_backward_matches_reference_and_returns_initial_state_gradient() -> None:
+def test_backward_matches_clampw_recurrence() -> None:
     _require_cuda()
-    case = _case(requires_grad=True)
-    actual = pretrain_recurrent_fp32io16(*case, scale=0.75)
-    (actual[0].float().square().sum() + actual[1].square().sum()).backward()
-    actual_gradients = [case[0].grad.detach().clone(), *[value.grad.detach().clone() for value in case[4:]]]
+    values = _case(1, 16, 1, requires_grad=True)
+    actual = pretrain_recurrent_bf16(*values)
+    grad_output = torch.randn_like(actual)
+    actual.backward(grad_output)
+    actual_gradients = [value.grad.detach().float() for value in values]
 
-    reference_case = tuple(
-        value.detach().clone().requires_grad_()
-        if value.is_floating_point()
-        else value.detach().clone()
-        for value in case
+    reference_values = tuple(
+        value.detach().clone().requires_grad_() for value in values
     )
-    expected = _reference(reference_case, 0.75)
-    (expected[0].float().square().sum() + expected[1].square().sum()).backward()
-    expected_gradients = [reference_case[0].grad, *[value.grad for value in reference_case[4:]]]
-    for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients):
-        assert torch.allclose(actual_gradient, expected_gradient, atol=3e-4, rtol=3e-3)
+    expected = _reference(reference_values)
+    expected.backward(grad_output.float())
+    expected_gradients = [value.grad.detach().float() for value in reference_values]
+    for actual_gradient, expected_gradient in zip(
+        actual_gradients, expected_gradients
+    ):
         assert torch.isfinite(actual_gradient).all()
+        assert torch.allclose(
+            actual_gradient, expected_gradient, atol=0.03, rtol=0.05
+        )
 
 
-@pytest.mark.parametrize("bad_index", [0, 1, 2])
-def test_invalid_chunk_metadata_is_rejected(bad_index: int) -> None:
+def test_invalid_input_contract_is_rejected() -> None:
     _require_cuda()
-    case = list(_case())
-    if bad_index == 0:
-        case[1] = torch.tensor([0, 2, 2], device="cuda", dtype=torch.int32)
-    elif bad_index == 1:
-        case[2] = torch.tensor([0, 2, 3], device="cuda", dtype=torch.int32)
-    else:
-        case[3] = torch.tensor([1, 1, 5], device="cuda", dtype=torch.int32)
-    with pytest.raises((ValueError, RuntimeError)):
-        pretrain_recurrent_fp32io16(*case)
+    valid = list(_case(1, 16, 1))
+
+    with pytest.raises(TypeError, match="bfloat16"):
+        pretrain_recurrent_bf16(valid[0].float(), *valid[1:])
+    with pytest.raises(ValueError, match="T must be divisible"):
+        short = [tensor[:, :15].contiguous() for tensor in valid]
+        pretrain_recurrent_bf16(*short)
+    with pytest.raises(ValueError, match="C must be divisible"):
+        narrow = [tensor[:, :, :63].contiguous() for tensor in valid]
+        pretrain_recurrent_bf16(*narrow)
+    with pytest.raises(ValueError, match="must match r shape"):
+        pretrain_recurrent_bf16(
+            valid[0], valid[1][:, :, :32].contiguous(), *valid[2:]
+        )
+    with pytest.raises(ValueError, match="contiguous CUDA"):
+        noncontiguous = valid[0].transpose(1, 2)
+        pretrain_recurrent_bf16(noncontiguous, *valid[1:])
+    with pytest.raises(ValueError, match="contiguous CUDA"):
+        cpu = tuple(tensor.cpu() for tensor in valid)
+        pretrain_recurrent_bf16(*cpu)

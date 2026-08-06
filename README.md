@@ -113,14 +113,15 @@ operator acceptance。
 
 `train_temp` canonical body 已接入：
 
-- recurrent forward/backward：final state、final-state gradient、initial-state
-  gradient、state-dot-a、checkpoint/chunk metadata 和 tail chunk；
+- recurrent forward/backward：`rwkv7_clampw_v3` +
+  `rwkv7_clampw_v3_for_h100` 的 BF16、N=64、chunk-16 canonical path；soft-clamp、
+  零初始 state 和内部 `s`/`sa` workspace 保持上游实现；
 - TMix a-gate、v-res gate、mix6、KK-pre、LN/RKV/residual/XG；
 - CMix forward/backward；
 - L2Wrap CE loss 和 head L2Wrap CE。
 
-训练 operator 保留 training 自己的 tensor layout、workspace、autograd、recompute、
-loss scaling 和 gradient 语义，不套用 inference state pool API。RL/Infctx 和
+训练 operator 保留 training 自己的 tensor layout、workspace、autograd 和 gradient
+语义，不套用 inference state pool、packed metadata、initial/final state API。RL/Infctx 和
 StateTune 保留独立 public entry；RL 的 materialized/recompute/replay 与 StateTune
 的 recurrent forward/backward body 已独立机械迁移，完整 strategy/workspace
 acceptance 仍需继续验证。
