@@ -1,17 +1,28 @@
-name: PRO 6000 GPU test, racecheck, and benchmark
+name: SM120 quality gate
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       pr_number:
-        description: Existing FlashRWKV pull request number to update
-        required: true
+        description: Open in-repository pull request number
+        required: false
         type: number
       source_revision:
         description: Exact approved pull request head revision
         required: true
+        type: string
+      accept_baseline:
+        description: Publish a reviewed regression as the new approved baseline
+        required: false
+        default: false
+        type: boolean
+      approval_reason:
+        description: Required audit reason when accepting a baseline
+        required: false
         type: string
 
 permissions:
@@ -20,809 +31,517 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: flash-rwkv-pro6000-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
+  group: flash-rwkv-quality-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  trusted-source:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (!github.event.pull_request.draft &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
-    runs-on: [self-hosted, linux, x64, rwkv-sha-pro6000x8]
-    timeout-minutes: 90
-    env:
-      TORCH_CUDA_ARCH_LIST: "12.0"
+  impact:
+    name: Select validation impact
+    runs-on: ubuntu-latest
+    outputs:
+      base_sha: ${{ steps.revision.outputs.base_sha }}
+      head_sha: ${{ steps.revision.outputs.head_sha }}
+      pr_number: ${{ steps.revision.outputs.pr_number }}
+      trusted: ${{ steps.revision.outputs.trusted }}
+      affected_modules: ${{ steps.targets.outputs.affected_modules }}
+      benchmark_matrix: ${{ steps.targets.outputs.benchmark_matrix }}
+      run_gpu: ${{ steps.targets.outputs.run_gpu }}
+      run_benchmark: ${{ steps.targets.outputs.run_benchmark }}
+      run_sanitizer: ${{ steps.targets.outputs.run_sanitizer }}
+      run_all: ${{ steps.targets.outputs.run_all }}
     steps:
-      - name: Resolve target PR and exact revision
-        id: target
-        uses: actions/github-script@v7
-        env:
-          DISPATCH_PR_NUMBER: ${{ inputs.pr_number }}
-          DISPATCH_SOURCE_REVISION: ${{ inputs.source_revision }}
-        with:
-          script: |
-            let prNumber;
-            let sourceRevision;
-            if (context.eventName === 'pull_request') {
-              prNumber = context.payload.pull_request.number;
-              sourceRevision = context.payload.pull_request.head.sha;
-            } else {
-              prNumber = Number(process.env.DISPATCH_PR_NUMBER);
-              sourceRevision = process.env.DISPATCH_SOURCE_REVISION;
-              if (!Number.isInteger(prNumber) || prNumber <= 0) {
-                core.setFailed(`invalid pull request number: ${process.env.DISPATCH_PR_NUMBER}`);
-                return;
-              }
-              if (!/^[0-9a-f]{40}$/.test(sourceRevision)) {
-                core.setFailed(`source_revision must be a full lowercase Git OID: ${sourceRevision}`);
-                return;
-              }
-              if (context.sha !== sourceRevision) {
-                core.setFailed(`dispatch ref resolved to ${context.sha}, not ${sourceRevision}`);
-                return;
-              }
-            }
-            const {data: pull} = await github.rest.pulls.get({
-              ...context.repo,
-              pull_number: prNumber,
-            });
-            if (pull.state !== 'open') {
-              core.setFailed(`pull request #${prNumber} is not open`);
-              return;
-            }
-            if (pull.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
-              core.setFailed(`pull request #${prNumber} is not an in-repository branch`);
-              return;
-            }
-            if (pull.head.sha !== sourceRevision) {
-              core.setFailed(`pull request head is ${pull.head.sha}, not ${sourceRevision}`);
-              return;
-            }
-            core.setOutput('pr_number', String(prNumber));
-            core.setOutput('head_sha', sourceRevision);
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.target.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify clean tracked source checkout
+      - name: Resolve target and trust boundary
+        id: revision
+        uses: actions/github-script@v7
         env:
-          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
-          PREBUILD_PROVENANCE: ${{ runner.temp }}/flash-rwkv-prebuild-provenance.json
+          DISPATCH_PR: ${{ inputs.pr_number }}
+          DISPATCH_SHA: ${{ inputs.source_revision }}
+          ACCEPT_BASELINE: ${{ inputs.accept_baseline }}
+          APPROVAL_REASON: ${{ inputs.approval_reason }}
+        with:
+          script: |
+            let baseSha;
+            let headSha;
+            let prNumber = '';
+            let trusted = true;
+            if (context.eventName === 'pull_request') {
+              const pull = context.payload.pull_request;
+              baseSha = pull.base.sha;
+              headSha = pull.head.sha;
+              prNumber = String(pull.number);
+              trusted = !pull.draft &&
+                pull.head.repo.full_name === `${context.repo.owner}/${context.repo.repo}` &&
+                ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pull.author_association);
+            } else if (context.eventName === 'push') {
+              baseSha = context.payload.before;
+              headSha = context.sha;
+              if (/^0+$/.test(baseSha)) {
+                const {data: commit} = await github.rest.repos.getCommit({
+                  ...context.repo, ref: headSha,
+                });
+                if (!commit.parents.length) {
+                  core.setFailed('initial main push has no comparison parent');
+                  return;
+                }
+                baseSha = commit.parents[0].sha;
+              }
+            } else {
+              prNumber = process.env.DISPATCH_PR;
+              headSha = process.env.DISPATCH_SHA;
+              if (!/^[0-9a-f]{40}$/.test(headSha)) {
+                core.setFailed(`source_revision must be a full lowercase Git OID: ${headSha}`);
+                return;
+              }
+              if (process.env.ACCEPT_BASELINE === 'true') {
+                if (context.ref !== 'refs/heads/main') {
+                  core.setFailed('accepted baseline dispatches must run from the main ref');
+                  return;
+                }
+                if (!process.env.APPROVAL_REASON.trim()) {
+                  core.setFailed('approval_reason is required when accepting a baseline');
+                  return;
+                }
+                const {data: permission} = await github.rest.repos.getCollaboratorPermissionLevel({
+                  ...context.repo, username: context.actor,
+                });
+                if (permission.permission !== 'admin') {
+                  core.setFailed('only repository administrators may accept a regressed baseline');
+                  return;
+                }
+                const {data: main} = await github.rest.repos.getBranch({
+                  ...context.repo, branch: 'main',
+                });
+                const {data: comparison} = await github.rest.repos.compareCommits({
+                  ...context.repo, base: headSha, head: main.commit.sha,
+                });
+                if (!['ahead', 'identical'].includes(comparison.status)) {
+                  core.setFailed(`${headSha} is not an ancestor of main`);
+                  return;
+                }
+                const {data: commit} = await github.rest.repos.getCommit({
+                  ...context.repo, ref: headSha,
+                });
+                if (!commit.parents.length) {
+                  core.setFailed('accepted baseline revision has no comparison parent');
+                  return;
+                }
+                baseSha = commit.parents[0].sha;
+                prNumber = '';
+              } else {
+                if (!prNumber) {
+                  core.setFailed('pr_number is required for a normal manual validation');
+                  return;
+                }
+                const {data: pull} = await github.rest.pulls.get({
+                  ...context.repo, pull_number: Number(prNumber),
+                });
+                if (pull.state !== 'open' || pull.head.sha !== headSha ||
+                    pull.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+                  core.setFailed('dispatch target is not the current head of an open in-repository PR');
+                  return;
+                }
+                baseSha = pull.base.sha;
+              }
+            }
+            core.setOutput('base_sha', baseSha);
+            core.setOutput('head_sha', headSha);
+            core.setOutput('pr_number', prNumber);
+            core.setOutput('trusted', String(trusted));
+      - name: Select affected modules
+        id: targets
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import subprocess
-          from pathlib import Path
+          python3 ci/select_targets.py \
+            --base '${{ steps.revision.outputs.base_sha }}' \
+            --head '${{ steps.revision.outputs.head_sha }}' \
+            --output artifacts/impact.json \
+            --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flash-rwkv-impact-${{ steps.revision.outputs.head_sha }}
+          path: artifacts/impact.json
+          if-no-files-found: error
+          retention-days: 90
 
-          def git(*arguments):
-              return subprocess.run(
-                  ("git", *arguments),
-                  check=True,
-                  capture_output=True,
-                  text=True,
-              ).stdout.strip()
+  untrusted:
+    name: Untrusted GPU revision
+    needs: impact
+    if: needs.impact.outputs.run_gpu == 'true' && needs.impact.outputs.trusted != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "This revision requires native GPU validation but cannot execute on the self-hosted runner."
+          echo "A maintainer must review it and move the exact revision to an in-repository branch."
 
-          head_sha = git("rev-parse", "HEAD")
-          runtime_semantic_revision = git(
-              "log",
-              "-1",
-              "--format=%H",
-              "--",
-              "csrc",
-              "flash_rwkv",
-              "setup.py",
-          )
-          tracked_status = git("status", "--short", "--untracked-files=no")
-          worktree_diff_paths = git("diff", "--name-only").splitlines()
-          index_diff_paths = git("diff", "--cached", "--name-only").splitlines()
-          payload = {
-              "head_sha": head_sha,
-              "expected_head_sha": os.environ["HEAD_SHA"],
-              "runtime_semantic_revision": runtime_semantic_revision,
-              "tracked_source_dirty": bool(tracked_status),
-              "index_dirty": bool(index_diff_paths),
-              "tracked_status_entries": tracked_status.splitlines(),
-              "worktree_diff_paths": worktree_diff_paths,
-              "index_diff_paths": index_diff_paths,
-              "controlled_generated_path_patterns": [
-                  ".venv/**",
-                  "artifacts/**",
-                  "build/**",
-                  "*.egg-info/**",
-                  "*.so",
-                  ".cache/**",
-                  ".pytest_cache/**",
-                  ".ruff_cache/**",
-                  "__pycache__/**",
-                  "**/__pycache__/**",
-              ],
-          }
-          if (
-              head_sha != payload["expected_head_sha"]
-              or payload["tracked_source_dirty"]
-              or payload["index_dirty"]
-              or worktree_diff_paths
-          ):
-              raise SystemExit(f"unclean or mismatched source checkout: {payload}")
-          Path(os.environ["PREBUILD_PROVENANCE"]).write_text(
-              json.dumps(payload, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
+  gpu-test:
+    name: GPU test / sm120
+    needs: impact
+    if: needs.impact.outputs.run_gpu == 'true' && needs.impact.outputs.trusted == 'true'
+    runs-on: [self-hosted, linux, x64, rwkv-sha-pro6000x8]
+    timeout-minutes: 120
+    concurrency:
+      group: flash-rwkv-pro6000-exclusive
+      cancel-in-progress: false
+    env:
+      TORCH_CUDA_ARCH_LIST: "12.0"
+      CUDA_VISIBLE_DEVICES: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.impact.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - name: Prepare isolated CUDA build
+      - name: Verify clean exact source
+        env:
+          EXPECTED_SHA: ${{ needs.impact.outputs.head_sha }}
         run: |
-          uv venv --python 3.12
-          uv pip install --python .venv/bin/python \
-            'torch>=2.4' 'pytest==9.1.1' 'einops' 'transformers>=4.45.0'
-          uv pip install --python .venv/bin/python --no-deps --no-build-isolation -e .
-      - name: Cross-compile architecture matrix
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --short --untracked-files=no)"
+      - name: Build SM120 wheel from locked build contract
         run: |
-          set -o pipefail
-          mkdir -p artifacts build/architecture-matrix
-          if TORCH_CUDA_ARCH_LIST=8.0 .venv/bin/python setup.py build_ext \
-            --force \
-            --build-temp build/architecture-matrix/sm80-temp \
-            --build-lib build/architecture-matrix/sm80-lib \
-            > artifacts/architecture-sm80.log 2>&1; then
-            echo "SM80 build unexpectedly succeeded" >&2
-            exit 1
-          fi
-          grep -F \
-            "requires compute capability >= 9.0" \
-            artifacts/architecture-sm80.log
-          for target in 9.0 12.0; do
-            label="sm${target/./}"
-            TORCH_CUDA_ARCH_LIST="$target" .venv/bin/python setup.py build_ext \
-              --force \
-              --build-temp "build/architecture-matrix/${label}-temp" \
-              --build-lib "build/architecture-matrix/${label}-lib" \
-              2>&1 | tee "artifacts/architecture-${label}.log"
-          done
-          .venv/bin/python - <<'PY'
-          import json
-          from pathlib import Path
-
-          payload = {
-              "schema_version": 1,
-              "wheel_minimum_architecture": "sm90",
-              "targets": [
-                  {"architecture": "sm80", "status": "fail_closed"},
-                  {"architecture": "sm90", "status": "compile_only"},
-                  {"architecture": "sm120", "status": "compile_only"},
-              ],
-              "runtime_validated_architectures": ["sm120"],
-          }
-          Path("artifacts/architecture-matrix.json").write_text(
-              json.dumps(payload, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
-      - name: Verify controlled GPU target
+          mkdir -p artifacts/wheels artifacts/test-results
+          uv sync --frozen --no-install-project --group dev
+          uv export --frozen --group dev --no-emit-project \
+            --output-file artifacts/locked-requirements.txt
+          uv build --wheel --out-dir artifacts/wheels 2>&1 | tee artifacts/wheel-build.log
+          test "$(find artifacts/wheels -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+      - name: Install the wheel into a fresh runtime environment
         run: |
-          command -v compute-sanitizer
-          compute-sanitizer --version
-          .venv/bin/python - <<'PY'
+          uv venv --python 3.12 .runtime-venv
+          uv pip install --python .runtime-venv/bin/python \
+            -r artifacts/locked-requirements.txt
+          uv pip install --python .runtime-venv/bin/python --no-deps \
+            artifacts/wheels/*.whl
+          .runtime-venv/bin/python - <<'PY'
+          import flash_rwkv
           import torch
           expected = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
-          actual = torch.cuda.get_device_name(0)
-          if actual != expected:
-              raise SystemExit(f"expected {expected!r}, got {actual!r}")
-          capability = torch.cuda.get_device_capability(0)
-          if capability != (12, 0):
-              raise SystemExit(f"expected compute capability (12, 0), got {capability}")
-          print(actual)
-          print(f"compute_capability={capability[0]}.{capability[1]}")
+          if flash_rwkv._C is None:
+              raise SystemExit("flash_rwkv._C did not load from the wheel")
+          if torch.cuda.get_device_name(0) != expected:
+              raise SystemExit(f"unexpected GPU: {torch.cuda.get_device_name(0)!r}")
+          if torch.cuda.get_device_capability(0) != (12, 0):
+              raise SystemExit(f"unexpected capability: {torch.cuda.get_device_capability(0)}")
+          print(flash_rwkv._C.__file__)
           PY
-      - name: Run complete CUDA test suite
-        run: |
-          mkdir -p artifacts
-          set -o pipefail
-          .venv/bin/python -m pytest -q | tee artifacts/pytest.log
-      - name: Run Compute Sanitizer racecheck
-        run: |
-          set -o pipefail
-          tests/racecheck/run.sh | tee artifacts/racecheck.log
-      - name: Run correctness-gated benchmarks
-        run: |
-          .venv/bin/python benchmarks/infer/benchmark_infer_fp16_forward.py \
-            --output artifacts/operator-benchmark.json
-          .venv/bin/python benchmarks/pretrain/wkv7/benchmark_pretrain_operators_bf16_forward_backward.py \
-            --output artifacts/training-operator-benchmark.json
-          .venv/bin/python benchmarks/statetune/wkv7/benchmark_statetune_recurrent_fp32io16_backward.py \
-            --output artifacts/statetune-benchmark.json
-          .venv/bin/python benchmarks/rl_infctx/wkv7/benchmark_rl_infctx_chunk_fp32io16_forward.py \
-            --output artifacts/rl-infctx-benchmark.json
-          .venv/bin/python benchmarks/infer/wkv7/benchmark_infer_recurrent_fp16_fp32io16_forward_varlen.py \
-            --profiles decode_b320 equal_chunk16_b320 ragged_chunk16_b320 \
-            decode_b2048 \
-            --modes fp32io16 fp16 \
-            --warmup-iters 3 \
-            --samples 10 \
-            --stateful-sample-iters 10 \
-            --output artifacts/packed-recurrent-benchmark.json
-          .venv/bin/python benchmarks/infer/wkv7/benchmark_fused_decay_recurrent.py \
-            --num-heads 32 \
-            --modes fp32io16 fp16 \
-            --warmup-iters 3 \
-            --samples 10 \
-            --output artifacts/fused-decay-recurrent-benchmark.json
-          .venv/bin/python benchmarks/kernel_benchmark.py \
-            --identities \
-            vllm-rwkv/infer_recurrent_fp32io16_forward_varlen \
-            vllm-rwkv/infer_recurrent_fp16_forward_varlen \
-            flashkda-derived/infer_chunk_bf16_forward \
-            flashkda-derived/infer_chunk_bf16_forward_varlen \
-            --warmup-iters 3 \
-            --iters 10 \
-            --output artifacts/kernel-benchmark.json
-      - name: Record immutable run identity
+      - name: Run affected GPU correctness tests
         env:
-          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
-          PREBUILD_PROVENANCE: ${{ runner.temp }}/flash-rwkv-prebuild-provenance.json
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
+          MODULES_JSON: ${{ needs.impact.outputs.affected_modules }}
         run: |
-          .venv/bin/python - <<'PY'
-          import fnmatch
-          import hashlib
-          import json
-          import os
-          import subprocess
+          set -o pipefail
+          for module in $(python3 -c 'import json,os; print(" ".join(json.loads(os.environ["MODULES_JSON"])))'); do
+            safe="${module//\//-}"
+            .runtime-venv/bin/python -m pytest -q "tests/$module" \
+              --junitxml="artifacts/test-results/$safe.xml" \
+              2>&1 | tee "artifacts/test-results/$safe.log"
+          done
+          .runtime-venv/bin/python - <<'PY'
           from pathlib import Path
-
-          from flash_rwkv.registry import get_kernel_spec
-
-          def metric(value):
-              return str(round(float(value), 6))
-
-          generated_path_allowlist = (
-              ".venv/**",
-              "artifacts/**",
-              "build/**",
-              "*.egg-info/**",
-              "*.so",
-              ".cache/**",
-              ".pytest_cache/**",
-              ".ruff_cache/**",
-              "__pycache__/**",
-              "**/__pycache__/**",
-          )
-
-          def git_status_entries(*arguments):
-              output = subprocess.run(
-                  ("git", "status", "--porcelain=v1", "-z", *arguments),
-                  check=True,
-                  capture_output=True,
-              ).stdout.decode("utf-8")
-              return [entry for entry in output.split("\0") if entry]
-
-          def entry_path(entry):
-              if len(entry) < 4 or entry[2] != " ":
-                  raise SystemExit(f"unexpected porcelain entry: {entry!r}")
-              return entry[3:]
-
-          report = [
-              "### Correctness-gated benchmark results",
-              "",
-          ]
-          architecture_path = Path("artifacts/architecture-matrix.json")
-          architecture = json.loads(architecture_path.read_text())
-          expected_architecture_targets = [
-              {"architecture": "sm80", "status": "fail_closed"},
-              {"architecture": "sm90", "status": "compile_only"},
-              {"architecture": "sm120", "status": "compile_only"},
-          ]
-          if (
-              architecture["wheel_minimum_architecture"] != "sm90"
-              or architecture["targets"] != expected_architecture_targets
-              or architecture["runtime_validated_architectures"] != ["sm120"]
-          ):
-              raise SystemExit(f"invalid architecture matrix: {architecture}")
-          report.extend(
-              (
-                  f"#### `{architecture_path.name}`",
-                  "",
-                  "```text",
-                  "BUILD target=sm80 status=fail_closed wheel_minimum=sm90",
-                  "BUILD target=sm90 status=compile_only wheel_minimum=sm90",
-                  "BUILD target=sm120 status=compile_only wheel_minimum=sm90",
-                  "RUNTIME architecture=sm120 status=validated",
-                  "```",
-                  "",
-              )
-          )
-          benchmark_paths = (
-              Path("artifacts/operator-benchmark.json"),
-              Path("artifacts/training-operator-benchmark.json"),
-              Path("artifacts/statetune-benchmark.json"),
-              Path("artifacts/rl-infctx-benchmark.json"),
-          )
-          for path in benchmark_paths:
-              payload = json.loads(path.read_text())
-              required_identity_fields = {
-                  "provider", "name", "source_revision"
-              }
-              if path.name in {
-                  "statetune-benchmark.json",
-                  "rl-infctx-benchmark.json",
-              }:
-                  required_identity_fields.add("mode")
-              report.extend((f"#### `{path.name}`", "", "```text"))
-              for row in payload["rows"]:
-                  missing = sorted(required_identity_fields - row.keys())
-                  if missing:
-                      raise SystemExit(
-                          f"{path.name} RESULT row lacks fields: {missing}"
-                      )
-                  if path.name in {
-                      "statetune-benchmark.json",
-                      "rl-infctx-benchmark.json",
-                  }:
-                      try:
-                          get_kernel_spec(row["name"], provider=row["provider"])
-                      except (KeyError, ValueError) as error:
-                          raise SystemExit(
-                              f"unregistered workload RESULT identity: {row}"
-                          ) from error
-                  if (
-                      path.name == "statetune-benchmark.json"
-                      and (
-                          row["source_revision"] != os.environ["HEAD_SHA"]
-                          or row["mode"] != "fp32io16"
-                          or row["provider"] != "flash_rwkv"
-                      )
-                  ):
-                      raise SystemExit(f"invalid StateTune RESULT identity: {row}")
-                  if path.name == "statetune-benchmark.json":
-                      training_ab = row.get("training_ab", {})
-                      unfused_trace = training_ab.get("launch_trace", {}).get(
-                          "unfused", {}
-                      )
-                      fused_trace = training_ab.get("launch_trace", {}).get(
-                          "fused", {}
-                      )
-                      if (
-                          training_ab.get("A") != "unfused_correct_product"
-                          or training_ab.get("B")
-                          != "public_raw_fused_recurrent"
-                          or not training_ab.get(
-                              "same_inputs_initial_state_loss_upstream_gradients"
-                          )
-                          or training_ab.get(
-                              "timed_transform_materialization_bytes", {}
-                          ).get("fused") != 0
-                          or unfused_trace.get(
-                              "forward_recurrent_kernel_count"
-                          ) != 1
-                          or unfused_trace.get(
-                              "backward_recurrent_kernel_count"
-                          ) != 1
-                          or fused_trace.get(
-                              "forward_recurrent_kernel_count"
-                          ) != 1
-                          or fused_trace.get(
-                              "backward_recurrent_kernel_count"
-                          ) != 1
-                          or unfused_trace.get("cuda_kernel_count", 0)
-                          <= fused_trace.get("cuda_kernel_count", 0)
-                      ):
-                          raise SystemExit(
-                              f"invalid StateTune A/B evidence: {row}"
-                          )
-                  if (
-                      path.name == "rl-infctx-benchmark.json"
-                      and (
-                          row["source_revision"] != os.environ["HEAD_SHA"]
-                          or row["mode"] != "fp32io16"
-                          or row["provider"] != "flash_rwkv"
-                          or not row["correctness"]["passed"]
-                      )
-                  ):
-                      raise SystemExit(f"invalid RL-infctx RESULT identity: {row}")
-                  result = (
-                      f"RESULT B={row['B']} T={row['T']} iters={row['iters']} "
-                      f"p10_ms={metric(row['p10_ms'])} "
-                      f"p50_ms={metric(row['p50_ms'])} "
-                      f"p90_ms={metric(row['p90_ms'])} "
-                      f"tok_s_p50={metric(row['tok_s_p50'])} "
-                      f"label={row['label']}"
-                  )
-                  identity = " ".join(
-                      f"{field}={row[field]}"
-                      for field in ("provider", "name", "source_revision", "mode")
-                      if field in row
-                  )
-                  report.append(f"{result} {identity}".rstrip())
-              report.extend(("```", ""))
-              if (
-                  path.name == "rl-infctx-benchmark.json"
-                  and payload["source"]["tracked_source_dirty"] is not False
-              ):
-                  raise SystemExit("RL-infctx benchmark source checkout is dirty")
-
-          packed_path = Path("artifacts/packed-recurrent-benchmark.json")
-          packed = json.loads(packed_path.read_text())
-          if packed["source"]["tracked_source_dirty"] is not False:
-              raise SystemExit("packed benchmark source checkout is dirty")
-          if not packed["all_cases_correct"]:
-              raise SystemExit("packed recurrent correctness gate failed")
-          if packed["source"]["leaf_revision"] != os.environ["HEAD_SHA"]:
-              raise SystemExit("packed benchmark source revision is mismatched")
-          b2048 = [
-              row for row in packed["results"]
-              if row["profile"] == "decode_b2048"
-          ]
-          if (
-              len(b2048) != 2
-              or {row["mode"] for row in b2048} != {"fp32io16", "fp16"}
-              or any(row["sequence_count"] != 2048 for row in b2048)
-              or any(row["elapsed_t_dither"] != (row["mode"] == "fp16") for row in b2048)
-              or any(
-                  row["metadata_validation_complexity"]
-                  != "O(sequence_count^2) once per ticket"
-                  for row in b2048
-              )
-          ):
-              raise SystemExit("B=2048 packed validator evidence is incomplete")
-          graph_evidence = [
-              row["device_metadata"]["cuda_graph_evidence"]
-              for row in packed["results"]
-              if row["device_metadata"]["cuda_graph_evidence"] is not None
-          ]
-          if len(graph_evidence) != 2 or not all(
-              evidence["cuda_graph_capture_succeeded"]
-              and evidence["cu_seqlens_identity_preserved"]
-              and evidence["state_indices_identity_preserved"]
-              for evidence in graph_evidence
-          ):
-              raise SystemExit("packed device metadata evidence is incomplete")
-          report.extend((f"#### `{packed_path.name}`", "", "```text"))
-          for row in packed["results"]:
-              measurement = row["measurements"]
-              if measurement is None:
-                  raise SystemExit("packed recurrent measurement is missing")
-              latency = measurement["stateful_steady_state"]["latency_ms"]
-              report.append(
-                  f"RESULT B={row['sequence_count']} T={row['total_tokens']} "
-                  f"iters={packed['samples'] * packed['stateful_sample_iters']} "
-                  f"p10_ms={metric(latency['p10'])} "
-                  f"p50_ms={metric(latency['p50'])} "
-                  f"p90_ms={metric(latency['p90'])} "
-                  f"tok_s_p50={metric(latency['useful_tokens_per_s_p50'])} "
-                  f"label=packed-{row['profile']}-{row['mode']} "
-                  f"provider={row['provider']} mode={row['mode']} "
-                  f"source_revision={packed['source']['leaf_revision']}"
-              )
-          report.extend(("```", ""))
-
-          fused_path = Path("artifacts/fused-decay-recurrent-benchmark.json")
-          fused = json.loads(fused_path.read_text())
-          required_fused_cases = {
-              "b1_t1",
-              "b320_t1",
-              "b1_t128",
-              "packed_b320_t16",
-              "ragged_b320_t1_to_t16",
-          }
-          if (
-              fused["git_revision"] != os.environ["HEAD_SHA"]
-              or {row["case"] for row in fused["results"]}
-              != required_fused_cases
-              or fused["main_comparison"]["A"] != "unfused_correct_product"
-              or fused["main_comparison"]["B"] != "fused_raw_product"
-              or not fused["main_comparison"][
-                  "same_inputs_state_mode_ticket_stream_events_and_sync"
-              ]
-              or not fused["main_comparison"][
-                  "precomputed_log_decay_is_diagnostic_only"
-              ]
-          ):
-              raise SystemExit("fused decay A/B identity is incomplete")
-          fused_identities = {
-              (row["case"], row["mode"]) for row in fused["results"]
-          }
-          expected_fused_identities = {
-              (case, mode)
-              for case in required_fused_cases
-              for mode in ("fp32io16", "fp16")
-          }
-          if fused_identities != expected_fused_identities:
-              raise SystemExit(
-                  f"fused decay mode coverage is incomplete: {fused_identities}"
-              )
-          report.extend((f"#### `{fused_path.name}`", "", "```text"))
-          for row in fused["results"]:
-              correctness = row["correctness"]
-              if (
-                  correctness["fused_output_relative_rmse"]
-                  > correctness["relative_rmse_limit"]
-                  or correctness["fused_state_relative_rmse"]
-                  > correctness["relative_rmse_limit"]
-              ):
-                  raise SystemExit(f"fused decay correctness failed: {row}")
-              unfused = row["variants"]["unfused_correct_product"]
-              fused_product = row["variants"]["fused_raw_product"]
-              diagnostic = row["variants"][
-                  "precomputed_log_decay_wkv_only_diagnostic"
-              ]
-              unfused_trace = unfused["launch_trace"]
-              fused_trace = fused_product["launch_trace"]
-              diagnostic_trace = diagnostic["launch_trace"]
-              if (
-                  unfused_trace["recurrent_kernel_count"] != 1
-                  or unfused_trace["metadata_validator_kernel_count"] != 0
-                  or unfused_trace["non_recurrent_kernel_count"] < 3
-                  or fused_trace["cuda_kernel_count"] != 1
-                  or fused_trace["recurrent_kernel_count"] != 1
-                  or fused_trace["metadata_validator_kernel_count"] != 0
-                  or fused_trace["non_recurrent_kernel_count"] != 0
-                  or diagnostic_trace["cuda_kernel_count"] != 1
-                  or diagnostic_trace["recurrent_kernel_count"] != 1
-                  or diagnostic_trace["metadata_validator_kernel_count"] != 0
-              ):
-                  raise SystemExit(f"fused decay launch gate failed: {row}")
-              report.append(
-                  f"A_B case={row['case']} B={row['batch_size']} "
-                  f"T={row['total_tokens']} mode={row['mode']} "
-                  f"unfused_p50_ms={metric(unfused['p50_ms'])} "
-                  f"fused_p50_ms={metric(fused_product['p50_ms'])} "
-                  f"speedup={metric(row['fused_speedup_over_unfused'])} "
-                  f"unfused_launches={unfused_trace['cuda_kernel_count']} "
-                  f"fused_launches={fused_trace['cuda_kernel_count']}"
-              )
-          report.extend(("```", ""))
-
-          kernel_path = Path("artifacts/kernel-benchmark.json")
-          kernel_payload = json.loads(kernel_path.read_text())
-          expected_kernel_identities = {
-              "vllm-rwkv/infer_recurrent_fp32io16_forward_varlen",
-              "vllm-rwkv/infer_recurrent_fp16_forward_varlen",
-              "flashkda-derived/infer_chunk_bf16_forward",
-              "flashkda-derived/infer_chunk_bf16_forward_varlen",
-          }
-          actual_kernel_identities = {
-              kernel["identity"] for kernel in kernel_payload["kernels"]
-          }
-          flash_source = kernel_payload["source"]["flash_rwkv"]
-          if (
-              actual_kernel_identities != expected_kernel_identities
-              or kernel_payload["kernel_count"] != 4
-              or kernel_payload["case_count"] != 84
-              or not kernel_payload["matrix_complete"]
-              or not kernel_payload["all_cases_valid"]
-              or not kernel_payload["all_cases_measured"]
-              or flash_source["revision"] != os.environ["HEAD_SHA"]
-              or flash_source["dirty"] is not False
-          ):
-              raise SystemExit(
-                  f"invalid non-FLA kernel benchmark evidence: {kernel_payload}"
-              )
-          report.extend((f"#### `{kernel_path.name}`", "", "```text"))
-          for kernel in kernel_payload["kernels"]:
-              if (
-                  kernel["case_count"] != 21
-                  or kernel["valid_measurement_count"] != 21
-                  or kernel["measured_row_count"] != 21
-                  or not kernel["matrix_complete"]
-              ):
-                  raise SystemExit(
-                      f"incomplete kernel benchmark matrix: {kernel}"
-                  )
-              expected_dither = kernel["identity"] == (
-                  "vllm-rwkv/infer_recurrent_fp16_forward_varlen"
-              )
-              for case in kernel["cases"]:
-                  measurement = case["measurement"]
-                  row = measurement["row"]
-                  if (
-                      not measurement["valid"]
-                      or row is None
-                      or case["operator_configuration"]["elapsed_t_dither"]
-                      != expected_dither
-                  ):
-                      raise SystemExit(
-                          f"invalid kernel benchmark row: {kernel['identity']} {case}"
-                      )
-                  report.append(
-                      f"RESULT B={row['B']} T={row['T']} iters={row['iters']} "
-                      f"p10_ms={metric(row['p10_ms'])} "
-                      f"p50_ms={metric(row['p50_ms'])} "
-                      f"p90_ms={metric(row['p90_ms'])} "
-                      f"tok_s_p50={metric(row['tok_s_p50'])} "
-                      f"identity={kernel['identity']}"
-                  )
-          report.extend(("```", ""))
-          Path("artifacts/benchmark-report.md").write_text(
-              "\n".join(report), encoding="utf-8"
-          )
-
-          prebuild = json.loads(
-              Path(os.environ["PREBUILD_PROVENANCE"]).read_text(encoding="utf-8")
-          )
-          if (
-              prebuild["head_sha"] != os.environ["HEAD_SHA"]
-              or len(prebuild["runtime_semantic_revision"]) != 40
-              or prebuild["tracked_source_dirty"]
-              or prebuild["index_dirty"]
-              or prebuild["worktree_diff_paths"]
-          ):
-              raise SystemExit(f"invalid prebuild provenance: {prebuild}")
-          Path("artifacts/prebuild-provenance.json").write_text(
-              json.dumps(prebuild, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-
-          postbuild_entries = git_status_entries("--untracked-files=all")
-          non_ignored_untracked_paths = [
-              entry_path(entry)
-              for entry in postbuild_entries
-              if entry.startswith("?? ")
-          ]
-          tracked_status_entries = [
-              entry
-              for entry in postbuild_entries
-              if not entry.startswith("?? ")
-          ]
-          ignored_entries = git_status_entries(
-              "--ignored=matching",
-              "--untracked-files=normal",
-          )
-          ignored_generated_paths = [
-              entry_path(entry)
-              for entry in ignored_entries
-              if entry.startswith("!! ")
-          ]
-          unexpected_ignored_paths = [
-              path
-              for path in ignored_generated_paths
-              if not any(
-                  fnmatch.fnmatchcase(path, pattern)
-                  for pattern in generated_path_allowlist
-              )
-          ]
-          postbuild = {
-              "head_sha": os.environ["HEAD_SHA"],
-              "tracked_source_dirty": bool(tracked_status_entries),
-              "tracked_status_entries": tracked_status_entries,
-              "non_ignored_untracked_paths": non_ignored_untracked_paths,
-              "controlled_generated_path_patterns": generated_path_allowlist,
-              "ignored_generated_paths": ignored_generated_paths,
-              "unexpected_ignored_paths": unexpected_ignored_paths,
-          }
-          if (
-              postbuild["tracked_source_dirty"]
-              or non_ignored_untracked_paths
-              or unexpected_ignored_paths
-          ):
-              raise SystemExit(f"uncontrolled postbuild checkout paths: {postbuild}")
-          Path("artifacts/postbuild-provenance.json").write_text(
-              json.dumps(postbuild, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-
-          artifact_root = Path("artifacts")
-          files = sorted(
-              path for path in artifact_root.rglob("*") if path.is_file()
-          )
-          inventory = []
-          for path in files:
-              inventory.append({
-                  "path": path.relative_to(artifact_root).as_posix(),
-                  "size_bytes": path.stat().st_size,
-                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-              })
-          Path("artifacts/run-identity.json").write_text(json.dumps({
-              "head_sha": os.environ["HEAD_SHA"],
-              "runtime_semantic_revision": prebuild["runtime_semantic_revision"],
-              "run_id": os.environ["RUN_ID"],
-              "run_attempt": os.environ["RUN_ATTEMPT"],
-              "files": inventory,
-          }, indent=2, sort_keys=True) + "\n")
+          import xml.etree.ElementTree as ET
+          paths = sorted(Path("artifacts/test-results").glob("*.xml"))
+          if not paths:
+              raise SystemExit("no module GPU test reports were produced")
+          for path in paths:
+              root = ET.parse(path).getroot()
+              suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+              tests = sum(int(suite.attrib.get("tests", 0)) for suite in suites)
+              skipped = sum(int(suite.attrib.get("skipped", 0)) for suite in suites)
+              if tests - skipped < 1:
+                  raise SystemExit(f"{path} executed no non-skipped GPU tests")
           PY
-      - name: Upload revision-bound evidence
+      - name: Run affected Compute Sanitizer checks
+        if: needs.impact.outputs.run_sanitizer == 'true'
+        env:
+          MODULES_JSON: ${{ needs.impact.outputs.affected_modules }}
+        run: |
+          command -v compute-sanitizer
+          mkdir -p artifacts/sanitizer
+          for module in $(python3 -c 'import json,os; print(" ".join(json.loads(os.environ["MODULES_JSON"])))'); do
+            safe="${module//\//-}"
+            compute-sanitizer --tool memcheck --target-processes all \
+              --error-exitcode 97 \
+              .runtime-venv/bin/python -m pytest -q "tests/$module" -x \
+              2>&1 | tee "artifacts/sanitizer/$safe-memcheck.log"
+            case "$module" in
+              cmix/mix|cmix/sparse|rl_infctx/wkv7|tmix/mix6|tmix/wkv7)
+                compute-sanitizer --tool racecheck --target-processes all \
+                  --error-exitcode 98 \
+                  .runtime-venv/bin/python -m pytest -q "tests/$module" -x \
+                  2>&1 | tee "artifacts/sanitizer/$safe-racecheck.log"
+                ;;
+            esac
+          done
+      - name: Record wheel and source identity
+        env:
+          HEAD_SHA: ${{ needs.impact.outputs.head_sha }}
+        run: |
+          .runtime-venv/bin/python - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          wheel = next(Path("artifacts/wheels").glob("*.whl"))
+          payload = {
+              "head_sha": os.environ["HEAD_SHA"],
+              "runtime_semantic_revision": subprocess.run(
+                  ("git", "log", "-1", "--format=%H", "--", "csrc", "flash_rwkv", "setup.py"),
+                  check=True, capture_output=True, text=True,
+              ).stdout.strip(),
+              "wheel": wheel.name,
+              "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+          }
+          Path("artifacts/build-identity.json").write_text(json.dumps(payload, indent=2) + "\n")
+          PY
+          test -z "$(git status --short --untracked-files=no)"
+      - name: Upload tested SM120 wheel and correctness evidence
         if: always()
-        id: evidence
         uses: actions/upload-artifact@v4
         with:
-          name: flash-rwkv-pro6000-${{ steps.target.outputs.head_sha }}
+          name: flash-rwkv-sm120-test-${{ needs.impact.outputs.head_sha }}
           path: artifacts/
           if-no-files-found: error
-          retention-days: 30
-      - name: Update pull request report
+          retention-days: 90
+
+  benchmark:
+    name: Benchmark / ${{ matrix.target.module }}
+    needs: [impact, gpu-test]
+    if: needs.impact.outputs.run_benchmark == 'true' && needs.impact.outputs.trusted == 'true' && needs.gpu-test.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.impact.outputs.benchmark_matrix) }}
+    runs-on: [self-hosted, linux, x64, rwkv-sha-pro6000x8]
+    timeout-minutes: 90
+    concurrency:
+      group: flash-rwkv-pro6000-benchmark
+      cancel-in-progress: false
+    env:
+      TORCH_CUDA_ARCH_LIST: "12.0"
+      CUDA_VISIBLE_DEVICES: "0"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.impact.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: flash-rwkv-sm120-test-${{ needs.impact.outputs.head_sha }}
+          path: tested-artifact
+      - name: Prepare benchmark runtime from the tested wheel
+        run: |
+          uv venv --python 3.12 .benchmark-venv
+          uv pip install --python .benchmark-venv/bin/python \
+            -r tested-artifact/locked-requirements.txt
+          uv pip install --python .benchmark-venv/bin/python --no-deps \
+            tested-artifact/wheels/*.whl
+          echo "FLASH_RWKV_WHEEL_SHA256=$(sha256sum tested-artifact/wheels/*.whl | cut -d' ' -f1)" \
+            >> "$GITHUB_ENV"
+          mkdir -p artifacts/benchmark
+      - name: Run Head three times and resolve approved baseline
+        id: baseline
+        env:
+          MODULE: ${{ matrix.target.module }}
+          SAFE_MODULE: ${{ matrix.target.safe }}
+          HEAD_SHA: ${{ needs.impact.outputs.head_sha }}
+          BASE_SHA: ${{ needs.impact.outputs.base_sha }}
+        run: |
+          python3 ci/benchmark_gate.py run \
+            --module "$MODULE" \
+            --python .benchmark-venv/bin/python \
+            --revision "$HEAD_SHA" \
+            --output "artifacts/benchmark/$SAFE_MODULE-head.json"
+          set +e
+          python3 ci/benchmark_gate.py fetch-baseline \
+            --repository "$GITHUB_REPOSITORY" \
+            --module "$MODULE" \
+            --head "artifacts/benchmark/$SAFE_MODULE-head.json" \
+            --output "artifacts/benchmark/$SAFE_MODULE-baseline.json"
+          status=$?
+          set -e
+          if [[ "$status" -eq 0 ]]; then
+            echo "source=approved-artifact" >> "$GITHUB_OUTPUT"
+          elif [[ "$status" -eq 2 ]]; then
+            echo "No compatible approved artifact was found; measuring the PR base."
+            base_root="$RUNNER_TEMP/flash-rwkv-base-$SAFE_MODULE"
+            git worktree add --detach "$base_root" "$BASE_SHA"
+            (
+              cd "$base_root"
+              uv sync --frozen --no-install-project --group dev
+              uv export --frozen --group dev --no-emit-project \
+                --output-file "$RUNNER_TEMP/base-requirements-$SAFE_MODULE.txt"
+              uv build --wheel --out-dir "$RUNNER_TEMP/base-wheels-$SAFE_MODULE"
+              uv venv --python 3.12 "$RUNNER_TEMP/base-venv-$SAFE_MODULE"
+              uv pip install --python "$RUNNER_TEMP/base-venv-$SAFE_MODULE/bin/python" \
+                -r "$RUNNER_TEMP/base-requirements-$SAFE_MODULE.txt"
+              uv pip install --python "$RUNNER_TEMP/base-venv-$SAFE_MODULE/bin/python" \
+                --no-deps "$RUNNER_TEMP/base-wheels-$SAFE_MODULE"/*.whl
+            )
+            FLASH_RWKV_SOURCE_ROOT="$base_root" \
+              FLASH_RWKV_WHEEL_SHA256="$(sha256sum "$RUNNER_TEMP/base-wheels-$SAFE_MODULE"/*.whl | cut -d' ' -f1)" \
+              python3 ci/benchmark_gate.py run \
+              --module "$MODULE" \
+              --python "$RUNNER_TEMP/base-venv-$SAFE_MODULE/bin/python" \
+              --revision "$BASE_SHA" \
+              --output "artifacts/benchmark/$SAFE_MODULE-baseline.json"
+            git worktree remove "$base_root"
+            echo "source=measured-base" >> "$GITHUB_OUTPUT"
+          else
+            exit "$status"
+          fi
+      - name: Enforce the 0.2 percent regression gate
+        id: comparison
+        env:
+          SAFE_MODULE: ${{ matrix.target.safe }}
+          ACCEPT_BASELINE: ${{ inputs.accept_baseline }}
+          APPROVAL_REASON: ${{ inputs.approval_reason }}
+        run: |
+          set +e
+          python3 ci/benchmark_gate.py compare \
+            --baseline "artifacts/benchmark/$SAFE_MODULE-baseline.json" \
+            --head "artifacts/benchmark/$SAFE_MODULE-head.json" \
+            --output "artifacts/benchmark/$SAFE_MODULE-comparison.json"
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 && "$ACCEPT_BASELINE" != "true" ]]; then
+            exit "$status"
+          fi
+          if [[ "$status" -ne 0 ]]; then
+            echo "Administrator accepted this measured regression: ${{ inputs.approval_reason }}"
+          fi
+      - name: Upload revision-bound benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flash-rwkv-benchmark-${{ matrix.target.safe }}-${{ needs.impact.outputs.head_sha }}
+          path: artifacts/benchmark/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish approved main baseline
+        if: success() && (github.event_name == 'push' || inputs.accept_baseline == true)
+        env:
+          SAFE_MODULE: ${{ matrix.target.safe }}
+          ACCEPT_BASELINE: ${{ inputs.accept_baseline }}
+        run: |
+          args=()
+          reason="validated main quality gate"
+          if [[ "$ACCEPT_BASELINE" == "true" ]]; then
+            args+=(--admin)
+            reason="$APPROVAL_REASON"
+          fi
+          python3 ci/benchmark_gate.py approve \
+            --candidate "artifacts/benchmark/$SAFE_MODULE-head.json" \
+            --output "artifacts/benchmark/$SAFE_MODULE-approved.json" \
+            --actor "$GITHUB_ACTOR" \
+            --reason "$reason" \
+            "${args[@]}"
+      - name: Upload approved main baseline
+        if: success() && (github.event_name == 'push' || inputs.accept_baseline == true)
+        uses: actions/upload-artifact@v4
+        with:
+          name: flash-rwkv-baseline-sm120-${{ matrix.target.safe }}
+          path: artifacts/benchmark/${{ matrix.target.safe }}-approved.json
+          if-no-files-found: error
+          retention-days: 90
+
+  aggregate:
+    name: Quality Gate / aggregate
+    needs: [impact, untrusted, gpu-test, benchmark]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce complete required evidence
+        env:
+          RUN_GPU: ${{ needs.impact.outputs.run_gpu }}
+          RUN_BENCHMARK: ${{ needs.impact.outputs.run_benchmark }}
+          TRUSTED: ${{ needs.impact.outputs.trusted }}
+          IMPACT_RESULT: ${{ needs.impact.result }}
+          GPU_RESULT: ${{ needs.gpu-test.result }}
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+        run: |
+          test "$IMPACT_RESULT" = "success"
+          if [[ "$RUN_GPU" != "true" ]]; then
+            echo "GPU not required for this change."
+            exit 0
+          fi
+          if [[ "$TRUSTED" != "true" ]]; then
+            echo "Required GPU validation was not executed for this untrusted revision." >&2
+            exit 1
+          fi
+          test "$GPU_RESULT" = "success"
+          if [[ "$RUN_BENCHMARK" == "true" ]]; then
+            test "$BENCHMARK_RESULT" = "success"
+          fi
+      - name: Download benchmark reports for the pull request summary
+        if: always() && github.event_name == 'pull_request' && needs.impact.outputs.run_benchmark == 'true' && needs.impact.outputs.trusted == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: flash-rwkv-benchmark-*-${{ needs.impact.outputs.head_sha }}
+          path: benchmark-reports
+          merge-multiple: true
+      - name: Update sticky pull request report
+        if: always() && github.event_name == 'pull_request' && needs.impact.outputs.trusted == 'true'
         uses: actions/github-script@v7
         env:
-          PR_NUMBER: ${{ steps.target.outputs.pr_number }}
-          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
-          ARTIFACT_ID: ${{ steps.evidence.outputs.artifact-id }}
-          ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
-          ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}
+          PR_NUMBER: ${{ needs.impact.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.impact.outputs.head_sha }}
+          MODULES: ${{ needs.impact.outputs.affected_modules }}
+          GPU_RESULT: ${{ needs.gpu-test.result }}
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
         with:
           script: |
             const fs = require('fs');
-            const marker = '<!-- flash-rwkv-pro6000-report -->';
-            const prNumber = Number(process.env.PR_NUMBER);
-            const benchmarkReport = fs.readFileSync(
-              'artifacts/benchmark-report.md', 'utf8').trim();
-            const runIdentity = JSON.parse(
-              fs.readFileSync('artifacts/run-identity.json', 'utf8'));
-            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRunAttempt({
-              ...context.repo,
-              run_id: context.runId,
-              attempt_number: Number(process.env.GITHUB_RUN_ATTEMPT),
-            });
-            const currentJob = jobs.jobs.find(job => job.name === 'trusted-source');
-            if (!currentJob) {
-              core.setFailed('trusted-source job identity is unavailable');
-              return;
+            const path = require('path');
+            const marker = '<!-- flash-rwkv-quality-gate -->';
+            const details = [];
+            const root = 'benchmark-reports';
+            if (fs.existsSync(root)) {
+              for (const name of fs.readdirSync(root).sort()) {
+                if (!name.endsWith('-comparison.json')) continue;
+                const report = JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'));
+                for (const row of report.results) {
+                  details.push(
+                    `- \`${report.module}/${row.profile}\`: ` +
+                    `base=${row.baseline_mean.toFixed(6)}, ` +
+                    `head=${row.head_mean.toFixed(6)}, ` +
+                    `regression=${(row.regression * 100).toFixed(4)}%, ` +
+                    `passed=${row.passed}`);
+                }
+              }
             }
-            const {data: pull} = await github.rest.pulls.get({
-              ...context.repo,
-              pull_number: prNumber,
-            });
-            if (pull.head.sha !== process.env.HEAD_SHA) {
-              core.setFailed(
-                `pull request head changed to ${pull.head.sha}; ` +
-                `refusing to write evidence for ${process.env.HEAD_SHA}`);
-              return;
-            }
-            const body = [
+            const lines = [
               marker,
-              '### FlashRWKV PRO 6000 GPU report',
+              '### FlashRWKV SM120 quality gate',
               '',
               `- Head: \`${process.env.HEAD_SHA}\``,
-              `- Runtime semantic revision: \`${runIdentity.runtime_semantic_revision}\``,
-              `- Run: \`${context.runId}\` (attempt \`${process.env.GITHUB_RUN_ATTEMPT}\`)`,
-              `- Job: \`${currentJob.id}\` (${currentJob.html_url})`,
-              `- Artifact: \`${process.env.ARTIFACT_ID}\` (${process.env.ARTIFACT_URL})`,
-              `- Artifact SHA-256: \`${process.env.ARTIFACT_DIGEST}\``,
-              '- Runner contract: `rwkv-sha-pro6000x8`, single NVIDIA RTX PRO 6000 Blackwell Workstation Edition',
-              '',
-              benchmarkReport,
-            ].join('\n');
+              `- Modules: \`${process.env.MODULES}\``,
+              `- GPU correctness / sanitizer: \`${process.env.GPU_RESULT}\``,
+              `- Three-run performance gate: \`${process.env.BENCHMARK_RESULT}\``,
+              `- Regression limit: \`0.2%\``,
+              `- Evidence: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            ];
+            if (details.length) lines.push('', '#### Performance', '', ...details);
+            const body = lines.join('\n');
             const {data: comments} = await github.rest.issues.listComments({
-              ...context.repo,
-              issue_number: prNumber,
+              ...context.repo, issue_number: Number(process.env.PR_NUMBER),
             });
             const previous = comments.find(comment =>
               comment.user.type === 'Bot' && comment.body.includes(marker));
             if (previous) {
               await github.rest.issues.updateComment({
-                ...context.repo,
-                comment_id: previous.id,
-                body,
+                ...context.repo, comment_id: previous.id, body,
               });
             } else {
               await github.rest.issues.createComment({
-                ...context.repo,
-                issue_number: prNumber,
-                body,
+                ...context.repo, issue_number: Number(process.env.PR_NUMBER), body,
               });
             }
-            const currentBody = pull.body || '';
-            const markerIndex = currentBody.indexOf(marker);
-            const prefix = (
-              markerIndex === -1 ? currentBody : currentBody.slice(0, markerIndex)
-            ).trimEnd();
-            await github.rest.pulls.update({
-              ...context.repo,
-              pull_number: prNumber,
-              body: `${prefix}${prefix ? '\n\n' : ''}${body}`,
-            });
-
-  untrusted-fork-notice:
-    if: >-
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.head.repo.full_name != github.repository ||
-       !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          echo "Native CUDA from untrusted pull requests is not executed on the self-hosted GPU runner."
-          echo "A maintainer must review the revision and dispatch this workflow explicitly."

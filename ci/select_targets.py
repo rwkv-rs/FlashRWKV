@@ -1,0 +1,289 @@
+"""Select the smallest fail-closed FlashRWKV CI validation set."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+MODULES = (
+    "cmix/mix",
+    "cmix/sparse",
+    "embedding",
+    "head/l2wrap_ce",
+    "head/linear",
+    "loss/l2wrap_ce",
+    "rl_infctx/wkv7",
+    "tmix/a_gate",
+    "tmix/kk_a_gate",
+    "tmix/kk_pre",
+    "tmix/linear",
+    "tmix/lnx_rkvres_xg",
+    "tmix/mix6",
+    "tmix/normalization",
+    "tmix/vres_gate",
+    "tmix/wkv7",
+)
+SHARED_FILES = {
+    "setup.py",
+    "pyproject.toml",
+    "uv.lock",
+    "flash_rwkv/__init__.py",
+    "tests/fixtures/tolerances-v1.json",
+}
+SHARED_PREFIXES = (
+    ".github/workflows/",
+    "ci/",
+    "csrc/bindings.cpp",
+    "csrc/registration.cpp",
+    "csrc/validation.cpp",
+    "csrc/validation/",
+    "tests/source_contract/",
+)
+DOC_PREFIXES = ("docs/",)
+DOC_FILES = {
+    "AGENTS.md",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "RTK.md",
+}
+EXECUTABLE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cu",
+    ".cuh",
+    ".h",
+    ".hpp",
+    ".lock",
+    ".py",
+    ".sh",
+    ".toml",
+    ".yaml",
+    ".yml",
+}
+
+
+@dataclass(frozen=True)
+class Impact:
+    base_sha: str
+    head_sha: str
+    change_class: str
+    affected_modules: tuple[str, ...]
+    run_gpu: bool
+    run_benchmark: bool
+    run_sanitizer: bool
+    run_all: bool
+    changed_files: tuple[str, ...]
+    reasons: tuple[str, ...]
+
+
+def _module_from_path(path: str, prefix: str) -> str | None:
+    if not path.startswith(prefix):
+        return None
+    relative = path.removeprefix(prefix)
+    for module in sorted(MODULES, key=len, reverse=True):
+        if relative == module or relative.startswith(f"{module}/"):
+            return module
+    return None
+
+
+def validate_layout(root: Path = ROOT) -> None:
+    missing: list[str] = []
+    for module in MODULES:
+        for owner in ("flash_rwkv", "tests", "benchmarks"):
+            candidate = root / owner / module
+            if not candidate.exists():
+                missing.append(str(candidate.relative_to(root)))
+        if not any(
+            (root / "csrc" / architecture / module).exists()
+            for architecture in ("sm90", "sm120")
+        ):
+            missing.append(f"csrc/sm{{90,120}}/{module}")
+    if missing:
+        raise SystemExit("active module layout is incomplete: " + ", ".join(missing))
+
+
+def classify(paths: list[str], *, base_sha: str = "", head_sha: str = "") -> Impact:
+    changed = tuple(
+        sorted({path.strip().removeprefix("./") for path in paths if path.strip()})
+    )
+    modules: set[str] = set()
+    reasons: list[str] = []
+    run_gpu = False
+    run_benchmark = False
+    run_sanitizer = False
+    run_all = False
+    only_docs = bool(changed)
+
+    for path in changed:
+        suffix = Path(path).suffix.lower()
+        if path in DOC_FILES or path.startswith(DOC_PREFIXES):
+            continue
+        only_docs = False
+        if path in SHARED_FILES or path.startswith(SHARED_PREFIXES):
+            run_all = run_gpu = run_benchmark = True
+            if path.startswith(("csrc/", "ci/", ".github/workflows/")):
+                run_sanitizer = True
+            reasons.append(f"shared:{path}")
+            continue
+
+        module = None
+        owner = None
+        for candidate_owner in ("flash_rwkv", "tests", "benchmarks"):
+            module = _module_from_path(path, f"{candidate_owner}/")
+            if module:
+                owner = candidate_owner
+                break
+        if module is None and path.startswith("csrc/sm"):
+            parts = path.split("/", 2)
+            if len(parts) == 3:
+                module = _module_from_path(parts[2], "")
+                owner = "csrc"
+
+        if module:
+            modules.add(module)
+            run_gpu = True
+            if owner in {"flash_rwkv", "benchmarks", "csrc"}:
+                run_benchmark = True
+            if owner == "csrc" and suffix in {".cpp", ".cu", ".cuh", ".h", ".hpp"}:
+                run_sanitizer = True
+            reasons.append(f"{owner}:{module}")
+            continue
+
+        if suffix in EXECUTABLE_SUFFIXES or path.startswith(
+            ("flash_rwkv/", "tests/", "benchmarks/", "csrc/")
+        ):
+            run_all = run_gpu = run_benchmark = run_sanitizer = True
+            reasons.append(f"unknown-executable:{path}")
+        else:
+            reasons.append(f"metadata:{path}")
+
+    if run_all:
+        modules = set(MODULES)
+    if not changed:
+        change_class = "empty"
+    elif only_docs and not run_gpu:
+        change_class = "documentation"
+    elif run_all:
+        change_class = "shared_or_unknown"
+    elif run_sanitizer:
+        change_class = "native"
+    elif run_benchmark:
+        change_class = "runtime_or_benchmark"
+    elif run_gpu:
+        change_class = "tests"
+    else:
+        change_class = "metadata"
+
+    return Impact(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        change_class=change_class,
+        affected_modules=tuple(sorted(modules)),
+        run_gpu=run_gpu,
+        run_benchmark=run_benchmark,
+        run_sanitizer=run_sanitizer,
+        run_all=run_all,
+        changed_files=changed,
+        reasons=tuple(sorted(set(reasons))),
+    )
+
+
+def _git_changed_files(base_sha: str, head_sha: str) -> list[str]:
+    result = subprocess.run(
+        ("git", "diff", "--name-only", "--find-renames", base_sha, head_sha, "--"),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.splitlines()
+
+
+def _write_github_outputs(path: Path, impact: Impact, artifact_path: Path) -> None:
+    values = {
+        "base_sha": impact.base_sha,
+        "head_sha": impact.head_sha,
+        "change_class": impact.change_class,
+        "affected_modules": json.dumps(impact.affected_modules, separators=(",", ":")),
+        "benchmark_matrix": json.dumps(
+            [
+                {"module": module, "safe": module.replace("/", "-")}
+                for module in impact.affected_modules
+            ],
+            separators=(",", ":"),
+        ),
+        "run_gpu": str(impact.run_gpu).lower(),
+        "run_benchmark": str(impact.run_benchmark).lower(),
+        "run_sanitizer": str(impact.run_sanitizer).lower(),
+        "run_all": str(impact.run_all).lower(),
+        "impact_artifact": str(artifact_path),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        for key, value in values.items():
+            handle.write(f"{key}={value}\n")
+
+
+def _self_test() -> None:
+    doc = classify(["README.md"])
+    assert doc.change_class == "documentation" and not doc.run_gpu
+    test = classify(["tests/tmix/linear/test.py"])
+    assert (
+        test.affected_modules == ("tmix/linear",)
+        and test.run_gpu
+        and not test.run_benchmark
+    )
+    native = classify(["csrc/sm120/tmix/wkv7/infer_recurrent_fp16_forward_varlen.cu"])
+    assert (
+        native.affected_modules == ("tmix/wkv7",)
+        and native.run_sanitizer
+        and native.run_benchmark
+    )
+    benchmark = classify(["benchmarks/cmix/sparse/bench.py"])
+    assert benchmark.affected_modules == ("cmix/sparse",) and benchmark.run_benchmark
+    shared = classify(["setup.py"])
+    assert shared.run_all and shared.affected_modules == tuple(sorted(MODULES))
+    unknown = classify(["flash_rwkv/new_family.py"])
+    assert unknown.run_all and unknown.run_sanitizer
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base", default="")
+    parser.add_argument("--head", default="")
+    parser.add_argument("--files", nargs="*")
+    parser.add_argument("--output", type=Path, default=Path("artifacts/impact.json"))
+    parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        _self_test()
+        validate_layout()
+        print("select_targets self-test passed")
+        return 0
+    if args.files is None and not (args.base and args.head):
+        parser.error("provide --files or both --base and --head")
+    validate_layout()
+    paths = (
+        args.files
+        if args.files is not None
+        else _git_changed_files(args.base, args.head)
+    )
+    impact = classify(paths, base_sha=args.base, head_sha=args.head)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(asdict(impact), indent=2) + "\n", encoding="utf-8"
+    )
+    if args.github_output:
+        _write_github_outputs(args.github_output, impact, args.output)
+    print(json.dumps(asdict(impact), separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

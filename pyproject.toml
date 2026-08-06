@@ -21,6 +21,8 @@ license = "MIT"
 [dependency-groups]
 dev = [
   "pytest>=8",
+  "ruff>=0.12",
+  "torch==2.11.0",
 ]
 
 [project.urls]
