@@ -6,12 +6,12 @@ import torch
 
 
 def _extension():
-    import flash_rwkv
+    import flashrwkv2
 
-    extension = getattr(flash_rwkv, "_C", None)
+    extension = getattr(flashrwkv2, "_C", None)
     if extension is None:
         raise RuntimeError(
-            "FlashRWKV CUDA extension is not built; build flash_rwkv._C before "
+            "FlashRWKV2 CUDA extension is not built; build flashrwkv2._C before "
             "using the accelerated recurrent operator"
         )
     return extension

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
-// Source revision: FlashRWKV pre-refactor retained RL/Infctx local snapshot
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
+// Source revision: FlashRWKV2 pre-refactor retained RL/Infctx local snapshot
 // Original path: retained RL/Infctx materialized/recompute CUDA family
 // Mechanically migrated from the retained RL/Infctx materialized affine
 // implementation; raw decay-logit contract and module-local naming only.
@@ -22,7 +22,7 @@ namespace rl_infctx_recompute_detail {
 
 constexpr int kHeadSize = 64;
 
-using flash_rwkv::wkv7::recurrent_retention;
+using flashrwkv2::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -217,7 +217,7 @@ namespace rl_infctx_materialized_detail {
 
 constexpr int kHeadSize = 64;
 
-using flash_rwkv::wkv7::recurrent_retention;
+using flashrwkv2::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -801,7 +801,7 @@ void recompute_chunk_fp32_from_decay_logits_cuda(
       at::ScalarType::Half,
       at::ScalarType::BFloat16,
       r.scalar_type(),
-      "flash_rwkv_rl_infctx_recompute_chunk_fp32",
+      "flashrwkv2_rl_infctx_recompute_chunk_fp32",
       [&] {
         rl_infctx_recompute_detail::launch_recompute_chunk<scalar_t>(
             num_sequences, num_chunks, num_heads,
@@ -846,7 +846,7 @@ void materialized_chunk_fp32_from_decay_logits_cuda(
       at::ScalarType::Half,
       at::ScalarType::BFloat16,
       r.scalar_type(),
-      "flash_rwkv_rl_infctx_materialized_chunk_fp32",
+      "flashrwkv2_rl_infctx_materialized_chunk_fp32",
       [&] {
         rl_infctx_materialized_detail::launch_materialized_chunk<scalar_t>(
             num_sequences, num_chunks, num_heads,

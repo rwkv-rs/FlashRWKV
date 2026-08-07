@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from flash_rwkv.tmix.normalization import infer_tmix_layer_norm_forward_varlen
+from flashrwkv2.tmix.normalization import infer_tmix_layer_norm_forward_varlen
 
 
 def main() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from flash_rwkv.tmix.wkv7 import infer_chunk_bf16_forward_varlen
+from flashrwkv2.tmix.wkv7 import infer_chunk_bf16_forward_varlen
 
 
 def _retention(logits: torch.Tensor) -> torch.Tensor:

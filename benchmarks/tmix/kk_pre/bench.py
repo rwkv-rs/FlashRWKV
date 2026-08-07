@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from flash_rwkv.tmix.kk_pre import pretrain_tmix_kk_pre_bf16
+from flashrwkv2.tmix.kk_pre import pretrain_tmix_kk_pre_bf16
 
 
 def main() -> None:
@@ -18,7 +18,7 @@ def main() -> None:
     parser.add_argument("--channels", type=int, default=4096)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--samples", type=int, default=30)
-    parser.add_argument("--output", type=str, default="/tmp/flash-rwkv-kk-pre.json")
+    parser.add_argument("--output", type=str, default="/tmp/flashrwkv2-kk-pre.json")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")

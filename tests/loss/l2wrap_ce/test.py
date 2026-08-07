@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch.nn import functional
 
-from flash_rwkv.loss.l2wrap_ce import pretrain_l2wrap_ce_bf16
+from flashrwkv2.loss.l2wrap_ce import pretrain_l2wrap_ce_bf16
 
 
 def _inputs(

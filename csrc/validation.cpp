@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 
 #include "validation.h"
 
@@ -7,7 +7,7 @@
 #include <limits>
 #include <utility>
 
-namespace flash_rwkv::validation {
+namespace flashrwkv2::validation {
 
 void check_cuda_contiguous(const torch::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.is_cuda(), name, " must be CUDA");
@@ -128,4 +128,4 @@ RecurrentDimensions check_recurrent_layout(
   return RecurrentDimensions{num_sequences, num_heads, head_size};
 }
 
-}  // namespace flash_rwkv::validation
+}  // namespace flashrwkv2::validation

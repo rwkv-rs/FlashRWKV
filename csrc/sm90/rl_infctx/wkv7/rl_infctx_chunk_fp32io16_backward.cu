@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
-// Source revision: FlashRWKV pre-refactor retained RL/Infctx local snapshot
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
+// Source revision: FlashRWKV2 pre-refactor retained RL/Infctx local snapshot
 // Original path: retained RL/Infctx materialized/recompute CUDA family
 // Mechanically migrated from the retained RL/Infctx materialized affine
 // implementation; raw decay-logit contract and module-local naming only.
@@ -22,7 +22,7 @@ namespace rl_infctx_replay_detail {
 
 constexpr int kHeadSize = 64;
 
-using flash_rwkv::wkv7::recurrent_retention;
+using flashrwkv2::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -188,7 +188,7 @@ void launch_rl_infctx_chunk_replay_fp32_from_decay_logits(
       at::ScalarType::Half,
       at::ScalarType::BFloat16,
       r.scalar_type(),
-      "flash_rwkv_rl_infctx_chunk_replay_fp32",
+      "flashrwkv2_rl_infctx_chunk_replay_fp32",
       [&] {
         rl_infctx_replay_detail::launch_replay<scalar_t>(
             num_chunks, num_heads, chunk_token_starts, chunk_token_ends,

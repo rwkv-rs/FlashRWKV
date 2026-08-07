@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 // Mechanically migrated from the RL/Infctx chunk replay source retained in
 // the pre-refactor tree; raw-decay-only adaptation for this public contract.
 

@@ -1,4 +1,4 @@
-FlashRWKV
+FlashRWKV2
 
 This repository began from MoonshotAI/FlashKDA, distributed under the MIT
 License. The original KDA attention operator, Python package, tests, and
@@ -78,5 +78,5 @@ The FLA chunk_rwkv7 and fused_recurrent_rwkv7 implementations are used only
 through an external correctness and benchmark dependency. No FLA
 implementation source is bundled here.
 
-All other original FlashRWKV work is licensed under the repository's MIT
+All other original FlashRWKV2 work is licensed under the repository's MIT
 license unless a file states otherwise.

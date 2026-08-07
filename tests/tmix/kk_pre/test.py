@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from flash_rwkv.tmix.kk_pre import pretrain_tmix_kk_pre_bf16
+from flashrwkv2.tmix.kk_pre import pretrain_tmix_kk_pre_bf16
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

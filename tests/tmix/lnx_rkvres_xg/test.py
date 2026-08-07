@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from flash_rwkv.tmix.lnx_rkvres_xg import (
+from flashrwkv2.tmix.lnx_rkvres_xg import (
     infer_tmix_lnx_rkvres_xg_forward_varlen,
     pretrain_tmix_lnx_rkvres_xg_bf16,
 )

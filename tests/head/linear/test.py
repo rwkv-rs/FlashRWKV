@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from flash_rwkv.head.linear import (
+from flashrwkv2.head.linear import (
     infer_head_last_norm_forward_varlen,
     infer_head_linear_all_forward_varlen,
     infer_head_linear_forward_varlen,

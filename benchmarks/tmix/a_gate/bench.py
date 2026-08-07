@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from flash_rwkv.tmix.a_gate import pretrain_tmix_a_gate_bf16
+from flashrwkv2.tmix.a_gate import pretrain_tmix_a_gate_bf16
 
 
 def main() -> None:

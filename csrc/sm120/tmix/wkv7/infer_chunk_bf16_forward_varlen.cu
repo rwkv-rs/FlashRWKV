@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 // FlashKDA source revision: 1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b.
 // K1 prepares RWKV-7 chunk transforms and K2 applies them to the request
 // state.  The packed boundary is supplied by cu_seqlens; no padding is used.
@@ -16,7 +16,7 @@ namespace {
 
 constexpr int kHeadSize = 64;
 
-using flash_rwkv::wkv7::recurrent_retention;
+using flashrwkv2::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {

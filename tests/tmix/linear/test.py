@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from flash_rwkv.tmix.linear import (
+from flashrwkv2.tmix.linear import (
     infer_tmix_linear_act_sigmoid_forward_varlen,
     infer_tmix_linear_act_tanh_forward_varlen,
     infer_tmix_linear_attention_c2c_forward_varlen,

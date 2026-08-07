@@ -1,16 +1,16 @@
-# FlashRWKV Kernel API
+# FlashRWKV2 Kernel API
 
 This document describes the public Python operator surface exported by
-`flash_rwkv.__all__`. Every operator documented below is available from the
+`flashrwkv2.__all__`. Every operator documented below is available from the
 package root:
 
 ```python
-from flash_rwkv import <operator>
+from flashrwkv2 import <operator>
 ```
 
 The owner shown for each entry identifies its implementation module; importing
 from a submodule is not required. Native `_C` symbols, private helpers, internal
-autograd classes, and names absent from `flash_rwkv.__all__` are not public API.
+autograd classes, and names absent from `flashrwkv2.__all__` are not public API.
 The current pretraining recurrent entry is `pretrain_recurrent_bf16`; the
 removed `pretrain_recurrent_fp32io16` interface is not supported.
 
@@ -18,7 +18,7 @@ removed `pretrain_recurrent_fp32io16` interface is not supported.
 
 ### Native extension and tensors
 
-Accelerated calls require a built `flash_rwkv._C` extension. Unless an entry
+Accelerated calls require a built `flashrwkv2._C` extension. Unless an entry
 says otherwise, tensors accepted by native wrappers must be CUDA, contiguous,
 on one device, and have exactly the dtype and shape described by that entry.
 Wrappers reject incompatible inputs instead of copying, casting, padding, or
@@ -76,56 +76,56 @@ chunk metadata and returns a new final pool rather than mutating the input pool.
 
 ### `infer_recurrent_fp32io16_forward_varlen`
 
-- Import: `from flash_rwkv import infer_recurrent_fp32io16_forward_varlen`
-- Owner: `flash_rwkv.tmix.wkv7`
+- Import: `from flashrwkv2 import infer_recurrent_fp32io16_forward_varlen`
+- Owner: `flashrwkv2.tmix.wkv7`
 - Signature: `infer_recurrent_fp32io16_forward_varlen(r, decay_logits, k, v, a, b, *, state_pool, cu_seqlens, state_indices, scale=1.0, decay_bias=None, max_seqlen=None, validated_metadata=None) -> torch.Tensor`
 - Contract: `r`, `decay_logits`, `k`, `v`, `a`, and `b` are matching packed `[N,H,D]` FP16 or BF16 tensors. `state_pool` is contiguous FP32 `[slots,H,D,D]`; supported `D` values are 64, 128, and 256. `decay_bias`, when supplied, is the per-head decay bias accepted by the native binding.
 - Result and mutation: returns output shaped like `v` and updates selected `state_pool` slots in place. No custom autograd.
 
 ### `infer_recurrent_fp16_forward_varlen`
 
-- Import: `from flash_rwkv import infer_recurrent_fp16_forward_varlen`
-- Owner: `flash_rwkv.tmix.wkv7`
+- Import: `from flashrwkv2 import infer_recurrent_fp16_forward_varlen`
+- Owner: `flashrwkv2.tmix.wkv7`
 - Signature: `infer_recurrent_fp16_forward_varlen(r, decay_logits, k, v, a, b, *, state_pool, elapsed_state_pool, cu_seqlens, state_indices, scale=1.0, decay_bias=None, max_seqlen=None, validated_metadata=None) -> torch.Tensor`
 - Contract: matching packed `[N,H,D]` token tensors, FP16 `state_pool [slots,H,D,D]`, and contiguous CUDA `int32 elapsed_state_pool [slots]`. The current canonical FP16 family supports `D=64` and fails closed outside its native specialization.
 - Result and mutation: returns output shaped like `v` and updates selected state slots. Elapsed-state advancement remains explicit. No custom autograd.
 
 ### `infer_chunk_bf16_forward_varlen`
 
-- Import: `from flash_rwkv import infer_chunk_bf16_forward_varlen`
-- Owner: `flash_rwkv.tmix.wkv7.chunk`
+- Import: `from flashrwkv2 import infer_chunk_bf16_forward_varlen`
+- Owner: `flashrwkv2.tmix.wkv7.chunk`
 - Signature: `infer_chunk_bf16_forward_varlen(r, decay_logits, k, v, a, b, *, state_pool, cu_seqlens, state_indices, chunk_size=16, max_seqlen=None, scale=1.0, decay_bias=None, validated_metadata=None) -> torch.Tensor`
 - Contract: all six token tensors are matching contiguous BF16 `[N,H,64]`; `state_pool` is BF16 `[slots,H,64,64]`. `chunk_size` is positive. Optional `decay_bias` is BF16 `[H,64]` or `[H*64]`.
 - Result and mutation: returns `[N,H,64]` BF16 output and updates selected state slots in place. No custom autograd.
 
 ### `prepare_recurrent_metadata`
 
-- Import: `from flash_rwkv import prepare_recurrent_metadata`
-- Owner: `flash_rwkv.tmix.wkv7`
+- Import: `from flashrwkv2 import prepare_recurrent_metadata`
+- Owner: `flashrwkv2.tmix.wkv7`
 - Signature: `prepare_recurrent_metadata(cu_seqlens, state_indices, *, total_tokens, state_pool_size, max_seqlen=None) -> object`
 - Contract: validates the packed metadata against positive launch sizes and the optional maximum sequence length.
 - Result and mutation: returns an opaque reusable native ticket; it does not mutate the metadata tensors.
 
 ### `infer_recurrent_fp16_advance_i32`
 
-- Import: `from flash_rwkv import infer_recurrent_fp16_advance_i32`
-- Owner: `flash_rwkv.tmix.wkv7`
+- Import: `from flashrwkv2 import infer_recurrent_fp16_advance_i32`
+- Owner: `flashrwkv2.tmix.wkv7`
 - Signature: `infer_recurrent_fp16_advance_i32(elapsed_state, amount) -> None`
 - Contract: `elapsed_state` is a non-empty contiguous CUDA `int32` tensor and `amount` is an integer.
 - Result and mutation: increments every elapsed-state element in place and returns `None`.
 
 ### `infer_recurrent_fp16_advance_i32_varlen`
 
-- Import: `from flash_rwkv import infer_recurrent_fp16_advance_i32_varlen`
-- Owner: `flash_rwkv.tmix.wkv7`
+- Import: `from flashrwkv2 import infer_recurrent_fp16_advance_i32_varlen`
+- Owner: `flashrwkv2.tmix.wkv7`
 - Signature: `infer_recurrent_fp16_advance_i32_varlen(elapsed_state_pool, cu_seqlens, state_indices, *, total_tokens, validated_metadata=None) -> None`
 - Contract: `elapsed_state_pool` is non-empty contiguous CUDA `int32 [slots]`; packed metadata selects the slots, and `total_tokens` is positive.
 - Result and mutation: advances each selected slot by its packed sequence length and returns `None`.
 
 ### `infer_recurrent_add_vec_forward_varlen`
 
-- Import: `from flash_rwkv import infer_recurrent_add_vec_forward_varlen`
-- Owner: `flash_rwkv.tmix.wkv7`
+- Import: `from flashrwkv2 import infer_recurrent_add_vec_forward_varlen`
+- Owner: `flashrwkv2.tmix.wkv7`
 - Signature: `infer_recurrent_add_vec_forward_varlen(x, vec) -> torch.Tensor`
 - Contract: FP16 `x [N,C]` with positive dimensions and even `C`; FP16 `vec [C]` on the same device.
 - Result and mutation: returns `x + vec` with shape `[N,C]`; inputs are not mutated.
@@ -134,80 +134,80 @@ chunk metadata and returns a new final pool rather than mutating the input pool.
 
 ### `infer_embedding_ln0_forward_varlen`
 
-- Import: `from flash_rwkv import infer_embedding_ln0_forward_varlen`
-- Owner: `flash_rwkv.embedding`
+- Import: `from flashrwkv2 import infer_embedding_ln0_forward_varlen`
+- Owner: `flashrwkv2.embedding`
 - Signature: `infer_embedding_ln0_forward_varlen(embedding, weight, bias, *, eps=1e-5) -> torch.Tensor`
 - Contract: BF16 `embedding [N,C]`, `weight [C]`, and `bias [C]`.
 - Result and mutation: returns normalized packed rows with shape `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_mix6_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_mix6_forward_varlen`
-- Owner: `flash_rwkv.tmix.mix6`
+- Import: `from flashrwkv2 import infer_tmix_mix6_forward_varlen`
+- Owner: `flashrwkv2.tmix.mix6`
 - Signature: `infer_tmix_mix6_forward_varlen(x, x_r, x_w, x_k, x_v, x_a, x_g, *, shift_state_pool, cu_seqlens, state_indices, max_seqlen=None, validated_metadata=None) -> tuple[torch.Tensor, ...]`
 - Contract: FP16 `x [N,C]`, six FP16 coefficient vectors `[C]`, and FP16 shift state `[slots,C]` with packed metadata.
 - Result and mutation: returns six `[N,C]` mixed tensors and updates selected shift-state slots to each sequence's last input row.
 
 ### `infer_tmix_mix6_add_layer_norm_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_mix6_add_layer_norm_forward_varlen`
-- Owner: `flash_rwkv.tmix.mix6`
+- Import: `from flashrwkv2 import infer_tmix_mix6_add_layer_norm_forward_varlen`
+- Owner: `flashrwkv2.tmix.mix6`
 - Signature: `infer_tmix_mix6_add_layer_norm_forward_varlen(x, residual, weight, bias, x_r, x_w, x_k, x_v, x_a, x_g, *, shift_state_pool, cu_seqlens, state_indices, max_seqlen=None, eps=1e-5, validated_metadata=None) -> tuple[torch.Tensor, ...]`
 - Contract: canonical fused FP16 path for `x` and `residual [1,4096]`, parameter vectors `[4096]`, one state index, and sequence length one. `eps` is finite and positive.
 - Result and mutation: returns the summed row followed by six mixed `[1,4096]` tensors; updates the selected shift-state slot.
 
 ### `infer_tmix_kk_a_gate_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_kk_a_gate_forward_varlen`
-- Owner: `flash_rwkv.tmix.kk_a_gate`
+- Import: `from flashrwkv2 import infer_tmix_kk_a_gate_forward_varlen`
+- Owner: `flashrwkv2.tmix.kk_a_gate`
 - Signature: `infer_tmix_kk_a_gate_forward_varlen(k, k_k, a0, a12, k_a, *, batch_size=1, max_seqlen=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
 - Contract: FP16 `k` and `a12 [N,C]`, vectors `k_k`, `a0`, and `k_a [C]`, with `C` divisible by 64. Batch and maximum sequence lengths are positive.
 - Result and mutation: returns the gated key, negative normalized key, and gated normalized key, each `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_lnx_rkvres_xg_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_lnx_rkvres_xg_forward_varlen`
-- Owner: `flash_rwkv.tmix.lnx_rkvres_xg`
+- Import: `from flashrwkv2 import infer_tmix_lnx_rkvres_xg_forward_varlen`
+- Owner: `flashrwkv2.tmix.lnx_rkvres_xg`
 - Signature: `infer_tmix_lnx_rkvres_xg_forward_varlen(x, r, k, v, r_k, weight, bias, g, *, batch_size=1, max_seqlen=None) -> torch.Tensor`
 - Contract: FP16 packed `x`, `r`, `k`, `v`, and `g [N,C]`; vectors `r_k`, `weight`, and `bias [C]`; `C` is divisible by 64.
 - Result and mutation: returns fused head-wise normalization/residual/gate output `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_vres_gate_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_vres_gate_forward_varlen`
-- Owner: `flash_rwkv.tmix.vres_gate`
+- Import: `from flashrwkv2 import infer_tmix_vres_gate_forward_varlen`
+- Owner: `flashrwkv2.tmix.vres_gate`
 - Signature: `infer_tmix_vres_gate_forward_varlen(v, v_first, v0, v12) -> torch.Tensor`
 - Contract: FP16 `v`, `v_first`, and `v12 [N,C]`, plus FP16 `v0 [C]`.
 - Result and mutation: returns the value-residual gated tensor `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_layer_norm_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_layer_norm_forward_varlen`
-- Owner: `flash_rwkv.tmix.normalization`
+- Import: `from flashrwkv2 import infer_tmix_layer_norm_forward_varlen`
+- Owner: `flashrwkv2.tmix.normalization`
 - Signature: `infer_tmix_layer_norm_forward_varlen(x, weight, bias, *, eps=1e-5) -> torch.Tensor`
 - Contract: FP16 `x [N,C]`, `weight [C]`, and `bias [C]`; `eps` is positive.
 - Result and mutation: returns normalized `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_add_layer_norm_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_add_layer_norm_forward_varlen`
-- Owner: `flash_rwkv.tmix.normalization`
+- Import: `from flashrwkv2 import infer_tmix_add_layer_norm_forward_varlen`
+- Owner: `flashrwkv2.tmix.normalization`
 - Signature: `infer_tmix_add_layer_norm_forward_varlen(x, residual, weight, bias, *, eps=1e-5, batch_size=None) -> tuple[torch.Tensor, torch.Tensor]`
 - Contract: matching FP16 `x` and `residual [N,C]`, affine vectors `[C]`; optional `batch_size` is positive and no larger than `N`.
 - Result and mutation: returns `(sum, normalized_sum)`, both `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_add_last_layer_norm_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_add_last_layer_norm_forward_varlen`
-- Owner: `flash_rwkv.tmix.normalization`
+- Import: `from flashrwkv2 import infer_tmix_add_last_layer_norm_forward_varlen`
+- Owner: `flashrwkv2.tmix.normalization`
 - Signature: `infer_tmix_add_last_layer_norm_forward_varlen(x, residual, weight, bias, *, eps=1e-5) -> torch.Tensor`
 - Contract: matching FP16 `x` and `residual [N,C]`, with FP16 `weight` and `bias [C]`.
 - Result and mutation: returns the fused last-layer add/norm output `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_add_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_add_forward_varlen`
-- Owner: `flash_rwkv.tmix.normalization`
+- Import: `from flashrwkv2 import infer_tmix_add_forward_varlen`
+- Owner: `flashrwkv2.tmix.normalization`
 - Signature: `infer_tmix_add_forward_varlen(x, residual) -> torch.Tensor`
 - Contract: matching FP16 packed tensors `[N,C]`.
 - Result and mutation: returns their elementwise sum; inputs are not mutated.
@@ -220,127 +220,127 @@ outputs. `M` denotes packed rows, `K` input features, `N` output features, and
 
 ### `infer_tmix_linear_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_forward_varlen(x, weight, *, weight_is_transposed=False) -> torch.Tensor`
 - Contract: `x [M,K]`; weight is `[N,K]` by default or runtime-transposed `[K,N]` when requested.
 - Result: returns `[M,N]`; inputs are not mutated.
 
 ### `infer_tmix_linear_attention_c2c_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_attention_c2c_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_attention_c2c_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_attention_c2c_forward_varlen(x, weight) -> torch.Tensor`
 - Contract and result: attention-specific dispatch for `x [M,K]` and original-layout `weight [N,K]`, returning `[M,N]` without mutation.
 
 ### `infer_tmix_linear_ffn_key_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_ffn_key_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_ffn_key_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_ffn_key_forward_varlen(x, weight) -> torch.Tensor`
 - Contract and result: FFN-key dispatch for `x [M,K]` and `weight [N,K]`, returning `[M,N]` without mutation.
 
 ### `infer_tmix_linear_t_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_t_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_t_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_t_forward_varlen(x, weight_t) -> torch.Tensor`
 - Contract and result: `x [M,K]`, `weight_t [N,K]`; returns `x @ weight_t.T` with shape `[M,N]`.
 
 ### `infer_tmix_linear_t_tanh_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_t_tanh_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_t_tanh_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_t_tanh_forward_varlen(x, weight_t) -> torch.Tensor`
 - Contract and result: applies tanh to `x [M,K]` before the `[N,K]` projection and returns `[M,N]`.
 
 ### `infer_tmix_linear_t_sigmoid_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_t_sigmoid_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_t_sigmoid_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_t_sigmoid_forward_varlen(x, weight_t) -> torch.Tensor`
 - Contract and result: applies sigmoid to `x [M,K]` before the `[N,K]` projection and returns `[M,N]`.
 
 ### `infer_tmix_linear_act_tanh_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_act_tanh_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_act_tanh_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_act_tanh_forward_varlen(x) -> torch.Tensor`
 - Contract and result: `x [M,K]` has an even element count; returns elementwise tanh with the same shape.
 
 ### `infer_tmix_linear_act_sigmoid_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_act_sigmoid_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_act_sigmoid_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_act_sigmoid_forward_varlen(x) -> torch.Tensor`
 - Contract and result: `x [M,K]` has an even element count; returns elementwise sigmoid with the same shape.
 
 ### `infer_tmix_linear_t_vres_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_t_vres_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_t_vres_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_t_vres_forward_varlen(x, weight_t, v, v_first, v0) -> torch.Tensor`
 - Contract: `x [M,K]`, `weight_t [N,K]`, `v` and `v_first [M,N]`, and `v0 [N]`.
 - Result: returns gated value-residual output `[M,N]`; inputs are not mutated.
 
 ### `infer_tmix_linear_rank_in_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_rank_in_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_rank_in_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_rank_in_forward_varlen(x, weight=None, weight_t=None) -> torch.Tensor`
 - Contract: `x [M,K]`; at least one runtime `[K,R]` weight or original-layout `[R,K]` `weight_t` is required. If both are present they must describe the same projection.
 - Result: returns rank features `[M,R]` using the shape-specific native dispatch.
 
 ### `infer_tmix_linear_rank_out_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_rank_out_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_rank_out_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_rank_out_forward_varlen(x, weight=None, weight_t=None) -> torch.Tensor`
 - Contract: rank input `x [M,R]`; provide runtime `[R,N]` weight or original-layout `[N,R]` `weight_t`.
 - Result: returns `[M,N]` using the shape-specific native dispatch.
 
 ### `infer_tmix_linear_rank_out_tanh_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_rank_out_tanh_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_rank_out_tanh_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_rank_out_tanh_forward_varlen(x, weight=None, weight_t=None) -> torch.Tensor`
 - Contract and result: rank-out projection with tanh applied to `x`, returning `[M,N]` under the same weight rules as rank-out.
 
 ### `infer_tmix_linear_rank_out_sigmoid_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_linear_rank_out_sigmoid_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_linear_rank_out_sigmoid_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_rank_out_sigmoid_forward_varlen(x, weight=None, weight_t=None) -> torch.Tensor`
 - Contract and result: rank-out projection with sigmoid applied to `x`, returning `[M,N]` under the same weight rules as rank-out.
 
 ### `infer_tmix_lowrank_in_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_lowrank_in_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_lowrank_in_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_lowrank_in_forward_varlen(x_w, x_a, x_g, w1, a1, g1, *, w1_runtime=None, a1_runtime=None, g1_runtime=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
 - Contract: three packed sources `[M,C]`; each projection requires an original-layout `[R,C]` positional weight, a runtime-layout `[C,R]` keyword weight, or both. `R<=512`.
 - Dispatch and result: `M<=7` uses the fused original-layout W/A/G family when all original weights are present. Other cases use the canonical Albatross large-row dispatcher and its available-layout policy. Returns three `[M,R]` tensors without mutating or converting inputs.
 
 ### `infer_tmix_lowrank_wagv_in_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_lowrank_wagv_in_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_lowrank_wagv_in_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_lowrank_wagv_in_forward_varlen(x_w, x_a, x_g, x_v, w1, a1, g1, v1, *, w1_runtime=None, a1_runtime=None, g1_runtime=None, v1_runtime=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
 - Contract: four packed sources `[M,C]`; each projection accepts original `[R,C]`, runtime `[C,R]`, or both layouts. `R<=512`.
 - Dispatch and result: the fused original-layout W/A/G/V family is selected only for `M<=7` with every original weight available. Larger or runtime-only inputs use canonical large-row dispatch and return four `[M,R]` tensors.
 
 ### `infer_tmix_lowrank_out_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_lowrank_out_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_lowrank_out_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_lowrank_out_forward_varlen(w1, a1, g1, w2, a2, g2, *, w2_runtime=None, a2_runtime=None, g2_runtime=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
 - Contract: rank features `[M,R]`; each projection accepts original `[C,R]`, runtime `[R,C]`, or both layouts. `R<=512`.
 - Dispatch and result: `M<=4` with all original weights uses fused rank-out. Otherwise native composition applies tanh to W and sigmoid to G before canonical large-row dispatch. Returns W/A/G `[M,C]` without timed layout conversion.
 
 ### `infer_tmix_lowrank_vres_forward_varlen`
 
-- Import: `from flash_rwkv import infer_tmix_lowrank_vres_forward_varlen`
-- Owner: `flash_rwkv.tmix.linear`
+- Import: `from flashrwkv2 import infer_tmix_lowrank_vres_forward_varlen`
+- Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_lowrank_vres_forward_varlen(w1, a1, g1, v1, w2, a2, g2, v2, v, v_first, v0, *, w2_runtime=None, a2_runtime=None, g2_runtime=None, v2_runtime=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
 - Contract: W/A/G/V rank features `[M,R]`; each second-stage projection accepts original `[C,R]`, runtime `[R,C]`, or both layouts. Value tensors are `[M,C]`, `v0 [C]`, and `R<=512`.
 - Dispatch and result: `M<=4` with every original weight uses fused W/A/G/V plus value residual. Other cases use canonical rank-out dispatch for W/A/G/V followed by `infer_tmix_vres_gate_forward_varlen`; no Torch/ATen fallback or layout conversion is performed.
@@ -355,54 +355,54 @@ must be rebuilt after weight, device, or dtype changes.
 
 ### `infer_cmix_mix_forward_varlen`
 
-- Import: `from flash_rwkv import infer_cmix_mix_forward_varlen`
-- Owner: `flash_rwkv.cmix.mix`
+- Import: `from flashrwkv2 import infer_cmix_mix_forward_varlen`
+- Owner: `flashrwkv2.cmix.mix`
 - Signature: `infer_cmix_mix_forward_varlen(x, x_k, *, shift_state_pool, cu_seqlens, state_indices, max_seqlen=None, validated_metadata=None) -> torch.Tensor`
 - Contract: FP16 `x [N,C]`, `x_k [C]`, and shift state `[slots,C]` with packed metadata.
 - Result and mutation: returns mixed `[N,C]` and updates selected shift-state slots.
 
 ### `infer_cmix_add_layer_norm_mix_forward_varlen`
 
-- Import: `from flash_rwkv import infer_cmix_add_layer_norm_mix_forward_varlen`
-- Owner: `flash_rwkv.cmix.mix`
+- Import: `from flashrwkv2 import infer_cmix_add_layer_norm_mix_forward_varlen`
+- Owner: `flashrwkv2.cmix.mix`
 - Signature: `infer_cmix_add_layer_norm_mix_forward_varlen(x, residual, weight, bias, x_k, *, shift_state_pool, cu_seqlens, state_indices, max_seqlen=None, eps=1e-5, validated_metadata=None) -> tuple[torch.Tensor, torch.Tensor]`
 - Contract: canonical FP16 sequence-length-one path with `x` and `residual [B,4096]`, vectors `[4096]`, and one state slot per row. `eps` is finite and positive.
 - Result and mutation: returns `(summed, mixed)` `[B,4096]` and updates selected shift-state slots.
 
 ### `infer_cmix_relu_square_forward_varlen`
 
-- Import: `from flash_rwkv import infer_cmix_relu_square_forward_varlen`
-- Owner: `flash_rwkv.cmix.mix`
+- Import: `from flashrwkv2 import infer_cmix_relu_square_forward_varlen`
+- Owner: `flashrwkv2.cmix.mix`
 - Signature: `infer_cmix_relu_square_forward_varlen(x) -> torch.Tensor`
 - Contract and result: FP16 `x [N,F]` with even element count; returns elementwise `relu(x)^2` without mutation.
 
 ### `infer_cmix_linear_ffn_down_forward_varlen`
 
-- Import: `from flash_rwkv import infer_cmix_linear_ffn_down_forward_varlen`
-- Owner: `flash_rwkv.cmix.mix`
+- Import: `from flashrwkv2 import infer_cmix_linear_ffn_down_forward_varlen`
+- Owner: `flashrwkv2.cmix.mix`
 - Signature: `infer_cmix_linear_ffn_down_forward_varlen(x, weight) -> torch.Tensor`
 - Contract and result: FP16 `x [N,K]`, runtime-layout `weight [K,C]`; returns `[N,C]` without mutation.
 
 ### `infer_cmix_sparse_forward_varlen`
 
-- Import: `from flash_rwkv import infer_cmix_sparse_forward_varlen`
-- Owner: `flash_rwkv.cmix.sparse`
+- Import: `from flashrwkv2 import infer_cmix_sparse_forward_varlen`
+- Owner: `flashrwkv2.cmix.sparse`
 - Signature: `infer_cmix_sparse_forward_varlen(x, x_k, key_fc, value_fc, *, shift_state_pool, cu_seqlens, state_indices, max_seqlen=None, validated_metadata=None) -> torch.Tensor`
 - Contract: FP16 `x [N,C]`, `x_k [C]`, `key_fc [F,C]`, `value_fc [F,C]`, and shift state `[slots,C]` with packed metadata.
 - Result and mutation: returns fused sparse CMix output `[N,C]` and updates selected shift-state slots.
 
 ### `infer_cmix_sparse_up_forward_varlen`
 
-- Import: `from flash_rwkv import infer_cmix_sparse_up_forward_varlen`
-- Owner: `flash_rwkv.cmix.sparse`
+- Import: `from flashrwkv2 import infer_cmix_sparse_up_forward_varlen`
+- Owner: `flashrwkv2.cmix.sparse`
 - Signature: `infer_cmix_sparse_up_forward_varlen(x, x_k, key_fc, *, shift_state_pool, cu_seqlens, state_indices, max_seqlen=None, validated_metadata=None) -> torch.Tensor`
 - Contract: FP16 `x [N,C]`, `x_k [C]`, `key_fc [F,C]`, and shift state `[slots,C]` with packed metadata.
 - Result and mutation: returns pre-activation `[N,F]` and updates selected shift-state slots.
 
 ### `infer_cmix_sparse_down_relu_forward_varlen`
 
-- Import: `from flash_rwkv import infer_cmix_sparse_down_relu_forward_varlen`
-- Owner: `flash_rwkv.cmix.sparse`
+- Import: `from flashrwkv2 import infer_cmix_sparse_down_relu_forward_varlen`
+- Owner: `flashrwkv2.cmix.sparse`
 - Signature: `infer_cmix_sparse_down_relu_forward_varlen(preact, value_fc, *, batch_size=None, max_seqlen=None) -> torch.Tensor`
 - Contract: FP16 `preact [N,F]` and `value_fc [F,C]` with even `C`. `batch_size` and `max_seqlen` are either both omitted or both positive and large enough to cover `N` rows.
 - Result: applies sparse ReLU-square/down projection and returns `[N,C]` without mutation.
@@ -411,30 +411,30 @@ must be rebuilt after weight, device, or dtype changes.
 
 ### `infer_head_linear_forward_varlen`
 
-- Import: `from flash_rwkv import infer_head_linear_forward_varlen`
-- Owner: `flash_rwkv.head.linear`
+- Import: `from flashrwkv2 import infer_head_linear_forward_varlen`
+- Owner: `flashrwkv2.head.linear`
 - Signature: `infer_head_linear_forward_varlen(x, weight) -> torch.Tensor`
 - Contract and result: FP16 `x [N,C]` and `weight [vocab,C]`; returns logits `[N,vocab]`.
 
 ### `infer_head_linear_all_forward_varlen`
 
-- Import: `from flash_rwkv import infer_head_linear_all_forward_varlen`
-- Owner: `flash_rwkv.head.linear`
+- Import: `from flashrwkv2 import infer_head_linear_all_forward_varlen`
+- Owner: `flashrwkv2.head.linear`
 - Signature: `infer_head_linear_all_forward_varlen(x, weight) -> torch.Tensor`
 - Contract and result: canonical all-logits dispatch for FP16 `x [N,C]` and `weight [vocab,C]`, returning `[N,vocab]`.
 
 ### `infer_head_linear_last_forward_varlen`
 
-- Import: `from flash_rwkv import infer_head_linear_last_forward_varlen`
-- Owner: `flash_rwkv.head.linear`
+- Import: `from flashrwkv2 import infer_head_linear_last_forward_varlen`
+- Owner: `flashrwkv2.head.linear`
 - Signature: `infer_head_linear_last_forward_varlen(x, weight, *, tokens_count) -> torch.Tensor`
 - Contract: FP16 final rows `x [B,C]`, `weight [vocab,C]`, and positive integer `tokens_count` for caller dispatch.
 - Result: returns final-row logits `[B,vocab]`; inputs are not mutated.
 
 ### `infer_head_last_norm_forward_varlen`
 
-- Import: `from flash_rwkv import infer_head_last_norm_forward_varlen`
-- Owner: `flash_rwkv.head.linear`
+- Import: `from flashrwkv2 import infer_head_last_norm_forward_varlen`
+- Owner: `flashrwkv2.head.linear`
 - Signature: `infer_head_last_norm_forward_varlen(x, residual, last_indices, weight, bias, *, eps=1e-5) -> torch.Tensor`
 - Contract: FP16 `x` and `residual [N,C]` with even `C`; CUDA `int64 last_indices [B]` contains absolute packed-row indices; affine vectors are FP16 `[C]`.
 - Result: returns normalized selected rows `[B,C]`; inputs are not mutated.
@@ -446,71 +446,71 @@ outputs for their floating-point inputs unless an entry states otherwise.
 
 ### `pretrain_recurrent_bf16`
 
-- Import: `from flash_rwkv import pretrain_recurrent_bf16`
-- Owner: `flash_rwkv.tmix.wkv7.pretrain`
+- Import: `from flashrwkv2 import pretrain_recurrent_bf16`
+- Owner: `flashrwkv2.tmix.wkv7.pretrain`
 - Signature: `pretrain_recurrent_bf16(r, w, k, v, a, b) -> torch.Tensor`
 - Contract: six matching contiguous CUDA BF16 tensors `[B,T,C]`; `C` is divisible by the canonical head size 64 and `T` by the canonical chunk length 16. `w` is the clampw-v3 input, not raw `decay_logits`.
 - Result and autograd: returns BF16 `[B,T,C]` and supplies gradients for all six inputs. No caller-owned state is mutated.
 
 ### `pretrain_tmix_a_gate_bf16`
 
-- Import: `from flash_rwkv import pretrain_tmix_a_gate_bf16`
-- Owner: `flash_rwkv.tmix.a_gate`
+- Import: `from flashrwkv2 import pretrain_tmix_a_gate_bf16`
+- Owner: `flashrwkv2.tmix.a_gate`
 - Signature: `pretrain_tmix_a_gate_bf16(a0, a12) -> torch.Tensor`
 - Contract and result: BF16 `a0 [C]` and `a12 [B,T,C]`; returns the sigmoid gate `[B,T,C]` with gradients for both inputs.
 
 ### `pretrain_tmix_vres_gate_bf16`
 
-- Import: `from flash_rwkv import pretrain_tmix_vres_gate_bf16`
-- Owner: `flash_rwkv.tmix.vres_gate`
+- Import: `from flashrwkv2 import pretrain_tmix_vres_gate_bf16`
+- Owner: `flashrwkv2.tmix.vres_gate`
 - Signature: `pretrain_tmix_vres_gate_bf16(value, first_value, v0, v12)`
 - Contract: BF16 `value`, `first_value`, and `v12 [B,T,C]`, plus `v0 [C]`.
 - Result and autograd: returns the value-residual gate output `[B,T,C]` with gradients for all four inputs.
 
 ### `pretrain_tmix_mix6_bf16`
 
-- Import: `from flash_rwkv import pretrain_tmix_mix6_bf16`
-- Owner: `flash_rwkv.tmix.mix6`
+- Import: `from flashrwkv2 import pretrain_tmix_mix6_bf16`
+- Owner: `flashrwkv2.tmix.mix6`
 - Signature: `pretrain_tmix_mix6_bf16(x, x_r, x_w, x_k, x_v, x_a, x_g) -> tuple[torch.Tensor, ...]`
 - Contract: BF16 `x [B,T,C]` and six BF16 vectors `[C]`.
 - Result and autograd: returns six mixed `[B,T,C]` tensors and supplies gradients for all inputs.
 
 ### `pretrain_tmix_kk_pre_bf16`
 
-- Import: `from flash_rwkv import pretrain_tmix_kk_pre_bf16`
-- Owner: `flash_rwkv.tmix.kk_pre`
+- Import: `from flashrwkv2 import pretrain_tmix_kk_pre_bf16`
+- Owner: `flashrwkv2.tmix.kk_pre`
 - Signature: `pretrain_tmix_kk_pre_bf16(key, key_scale, learning_rate, learning_rate_scale)`
 - Contract: BF16 `key` and `learning_rate [B,T,C]`; BF16 scale vectors `[C]`; `C` is divisible by 64.
 - Result and autograd: returns `(new_key, negative_direction, scaled_direction)`, each `[B,T,C]`, with gradients for all inputs.
 
 ### `pretrain_tmix_lnx_rkvres_xg_bf16`
 
-- Import: `from flash_rwkv import pretrain_tmix_lnx_rkvres_xg_bf16`
-- Owner: `flash_rwkv.tmix.lnx_rkvres_xg.pretrain`
+- Import: `from flashrwkv2 import pretrain_tmix_lnx_rkvres_xg_bf16`
+- Owner: `flashrwkv2.tmix.lnx_rkvres_xg.pretrain`
 - Signature: `pretrain_tmix_lnx_rkvres_xg_bf16(x, r, k, v, residual_scale, weight, bias, g)`
 - Contract: matching BF16 `x`, `r`, `k`, `v`, and `g [B,T,C]`; `C` divisible by 64; `residual_scale [C/64,64]`; affine vectors `[C]`.
 - Result and autograd: returns fused `[B,T,C]` output with gradients for requested floating inputs.
 
 ### `pretrain_cmix_bf16`
 
-- Import: `from flash_rwkv import pretrain_cmix_bf16`
-- Owner: `flash_rwkv.cmix.mix`
+- Import: `from flashrwkv2 import pretrain_cmix_bf16`
+- Owner: `flashrwkv2.cmix.mix`
 - Signature: `pretrain_cmix_bf16(x, x_k, key_weight, value_weight) -> torch.Tensor`
 - Contract: BF16 `x [B,T,C]`, `x_k [C]`, `key_weight [4C,C]`, and `value_weight [C,4C]`.
 - Result and autograd: returns BF16 CMix output `[B,T,C]` and supplies gradients for all four inputs.
 
 ### `pretrain_head_l2wrap_ce_bf16`
 
-- Import: `from flash_rwkv import pretrain_head_l2wrap_ce_bf16`
-- Owner: `flash_rwkv.head.l2wrap_ce`
+- Import: `from flashrwkv2 import pretrain_head_l2wrap_ce_bf16`
+- Owner: `flashrwkv2.head.l2wrap_ce`
 - Signature: `pretrain_head_l2wrap_ce_bf16(hidden, weight, targets, *, chunk_rows=4096)`
 - Contract: BF16 `hidden [B,T,C]`, BF16 `weight [65536,C]`, CUDA `int64 targets` with one target per hidden row, and positive `chunk_rows`.
 - Result and autograd: returns scalar CE/L2Wrap loss with gradients for `hidden` and `weight`; targets are non-differentiable.
 
 ### `pretrain_l2wrap_ce_bf16`
 
-- Import: `from flash_rwkv import pretrain_l2wrap_ce_bf16`
-- Owner: `flash_rwkv.loss.l2wrap_ce`
+- Import: `from flashrwkv2 import pretrain_l2wrap_ce_bf16`
+- Owner: `flashrwkv2.loss.l2wrap_ce`
 - Signature: `pretrain_l2wrap_ce_bf16(logits, targets) -> torch.Tensor`
 - Contract: BF16 or FP32 `logits [...,vocab]` and CUDA `int64 targets` with one valid target per logits row.
 - Result and autograd: returns scalar CE/L2Wrap loss with gradients for logits; targets are non-differentiable.
@@ -519,8 +519,8 @@ outputs for their floating-point inputs unless an entry states otherwise.
 
 ### `statetune_recurrent_fp32io16`
 
-- Import: `from flash_rwkv import statetune_recurrent_fp32io16`
-- Owner: `flash_rwkv.tmix.wkv7.statetune`
+- Import: `from flashrwkv2 import statetune_recurrent_fp32io16`
+- Owner: `flashrwkv2.tmix.wkv7.statetune`
 - Signature: `statetune_recurrent_fp32io16(initial_state, sequence_chunk_offsets, chunk_token_starts, chunk_token_ends, r, decay_logits, k, v, a, b, *, scale=1.0)`
 - Contract: FP32 `initial_state [B,H,D,D]` with `D` in `{64,128,256}`; matching FP16 or BF16 tokens `[N,H,D]`; CUDA `int32 sequence_chunk_offsets [B+1]` and matching chunk start/end arrays. `scale` is finite.
 - Result and autograd: returns `(output, final_state, boundary, state_dot_a)`. Output matches token shape, final state matches `initial_state`, boundary is `[chunks,H,D,D]`, and `state_dot_a` is `[N,H,D]`. Boundary and `state_dot_a` are non-differentiable; gradients include the initial state and six token inputs. The input initial state is not mutated.
@@ -529,16 +529,16 @@ outputs for their floating-point inputs unless an entry states otherwise.
 
 ### `rl_infctx_chunk_fp32io16`
 
-- Import: `from flash_rwkv import rl_infctx_chunk_fp32io16`
-- Owner: `flash_rwkv.rl_infctx.wkv7`
+- Import: `from flashrwkv2 import rl_infctx_chunk_fp32io16`
+- Owner: `flashrwkv2.rl_infctx.wkv7`
 - Signature: `rl_infctx_chunk_fp32io16(r, decay_logits, k, v, a, b, *, state_pool=None, cu_seqlens, state_indices=None, chunk_size=16, strategy='recompute', scale=1.0, decay_bias=None)`
 - Contract: matching FP16 or BF16 packed tensors `[N,H,D]`, with `D` in `{64,128,256}`; packed offsets; `chunk_size` in `{16,32,64}`; strategy `materialized` or `recompute`; finite scale. Optional decay bias matches token dtype and is `[H,D]` or `[H*D]`. Missing state indices default to `0..B-1`; missing state pool allocates zero FP32 state.
 - Result and mutation: returns `(output, final_pool)`. The output matches token shape; `final_pool` is a cloned FP32 pool with selected slots replaced. The input `state_pool` is not mutated. This forward-only wrapper does not define custom autograd.
 
 ### `rl_infctx_chunk_fp32io16_factor_recompute`
 
-- Import: `from flash_rwkv import rl_infctx_chunk_fp32io16_factor_recompute`
-- Owner: `flash_rwkv.rl_infctx.wkv7`
+- Import: `from flashrwkv2 import rl_infctx_chunk_fp32io16_factor_recompute`
+- Owner: `flashrwkv2.rl_infctx.wkv7`
 - Signature: `rl_infctx_chunk_fp32io16_factor_recompute(*args, **kwargs)`
 - Contract: accepts the same arguments as `rl_infctx_chunk_fp32io16` and forces `strategy='recompute'`, overriding a supplied strategy keyword.
 - Result and mutation: returns the same `(output, final_pool)` pair and preserves the input state pool.

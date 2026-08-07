@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from flash_rwkv.embedding import infer_embedding_ln0_forward_varlen
+from flashrwkv2.embedding import infer_embedding_ln0_forward_varlen
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from flash_rwkv.head.l2wrap_ce import pretrain_head_l2wrap_ce_bf16
+from flashrwkv2.head.l2wrap_ce import pretrain_head_l2wrap_ce_bf16
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

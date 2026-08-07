@@ -19,8 +19,8 @@ namespace {
 
 constexpr int kHeadSize = 64;
 
-using flash_rwkv::wkv7::recurrent_retention;
-using flash_rwkv::wkv7::recurrent_retention_log_derivative;
+using flashrwkv2::wkv7::recurrent_retention;
+using flashrwkv2::wkv7::recurrent_retention_log_derivative;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -630,7 +630,7 @@ void statetune_recurrent_fp32io16_backward_cuda_impl(
       at::ScalarType::Half,
       at::ScalarType::BFloat16,
       r.scalar_type(),
-      "flash_rwkv_statetune_recurrent_fp32io16_backward",
+      "flashrwkv2_statetune_recurrent_fp32io16_backward",
       [&] {
         const auto launch = [&]<int HeadSize>() {
           launch_statetune_recurrent_fp32io16_backward<HeadSize, scalar_t>(

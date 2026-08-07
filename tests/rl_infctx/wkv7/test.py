@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-import flash_rwkv
-from flash_rwkv.rl_infctx.wkv7 import rl_infctx_chunk_fp32io16
+import flashrwkv2
+from flashrwkv2.rl_infctx.wkv7 import rl_infctx_chunk_fp32io16
 
 
 def _reference(
@@ -232,7 +232,7 @@ def test_rl_infctx_replay_stage_matches_reference() -> None:
         boundary_states[slot].copy_(state)
     output = torch.empty_like(v)
     state_dot_a = torch.empty_like(r, dtype=torch.float32)
-    flash_rwkv._C.rl_infctx_chunk_fp32io16_backward_replay(
+    flashrwkv2._C.rl_infctx_chunk_fp32io16_backward_replay(
         starts,
         ends,
         boundary,

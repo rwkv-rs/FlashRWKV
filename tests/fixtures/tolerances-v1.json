@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source": "FLA RWKV-7 relative-RMSE gates, specialized for FlashRWKV",
+  "source": "FLA RWKV-7 relative-RMSE gates, specialized for FlashRWKV2",
   "fp32_reference": {
     "output_atol": 1e-6,
     "state_atol": 1e-6,

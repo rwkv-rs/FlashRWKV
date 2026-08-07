@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 import torch
 
-import flash_rwkv
-from flash_rwkv.tmix.wkv7 import pretrain_recurrent_bf16
+import flashrwkv2
+from flashrwkv2.tmix.wkv7 import pretrain_recurrent_bf16
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -21,7 +21,7 @@ UPSTREAM_BODY_HASHES = {
 }
 AVAILABLE = (
     torch.cuda.is_available()
-    and flash_rwkv._C is not None
+    and flashrwkv2._C is not None
     and hasattr(torch.ops.rwkv7_clampw_v3, "forward")
     and hasattr(torch.ops.rwkv7_clampw_v3, "backward")
 )
@@ -85,10 +85,10 @@ def test_native_bodies_match_pinned_train_temp_sources() -> None:
 def test_public_contract_matches_clampw_v3() -> None:
     signature = inspect.signature(pretrain_recurrent_bf16)
     assert tuple(signature.parameters) == ("r", "w", "k", "v", "a", "b")
-    assert flash_rwkv.pretrain_recurrent_bf16 is pretrain_recurrent_bf16
-    assert "pretrain_recurrent_bf16" in flash_rwkv.__all__
-    assert "pretrain_recurrent_fp32io16" not in flash_rwkv.__all__
-    assert not hasattr(flash_rwkv, "pretrain_recurrent_fp32io16")
+    assert flashrwkv2.pretrain_recurrent_bf16 is pretrain_recurrent_bf16
+    assert "pretrain_recurrent_bf16" in flashrwkv2.__all__
+    assert "pretrain_recurrent_fp32io16" not in flashrwkv2.__all__
+    assert not hasattr(flashrwkv2, "pretrain_recurrent_fp32io16")
 
 
 @pytest.mark.parametrize("batch,tokens,heads", [(1, 16, 1), (2, 32, 2)])

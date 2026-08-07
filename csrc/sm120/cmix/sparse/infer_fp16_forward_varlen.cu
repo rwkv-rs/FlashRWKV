@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the Albatross project
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 //
 // Source: BlinkDL/Albatross/faster3a_2607/cuda/rwkv7_fast_ops_fp16.cu,
 // revision ee3308f6922e59f2166c7fac3c5a192340a2b48e.

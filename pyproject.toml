@@ -8,13 +8,13 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "flash-rwkv"
-version = "0.1.0"
-description = "Source-attributed RWKV-7 recurrent inference CUDA kernel"
+name = "FlashRWKV2"
+version = "0.1.0a1"
+description = "High-performance CUDA operator library for RWKV-7"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "torch>=2.4",
+  "torch==2.11.0",
 ]
 license = "MIT"
 
@@ -26,10 +26,10 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/rwkv-rs/FlashRWKV"
+Repository = "https://github.com/rwkv-rs/FlashRWKV2"
 
 [tool.setuptools.packages.find]
-include = ["flash_rwkv", "flash_rwkv.*"]
+include = ["flashrwkv2", "flashrwkv2.*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

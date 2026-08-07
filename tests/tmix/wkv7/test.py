@@ -11,8 +11,8 @@ import pytest
 import torch
 
 from benchmarks.tmix.wkv7 import bench
-import flash_rwkv
-from flash_rwkv.tmix.wkv7 import (
+import flashrwkv2
+from flashrwkv2.tmix.wkv7 import (
     infer_recurrent_add_vec_forward_varlen,
     infer_recurrent_fp16_advance_i32,
     infer_recurrent_fp16_advance_i32_varlen,
@@ -92,13 +92,13 @@ def test_albatross_add_vec_flat_and_2d_dispatch() -> None:
 ROOT = Path(__file__).resolve().parents[3]
 CUDA_EXTENSION_AVAILABLE = (
     torch.cuda.is_available()
-    and flash_rwkv._C is not None
-    and hasattr(flash_rwkv._C, "recurrent_fp32_from_decay_logits")
+    and flashrwkv2._C is not None
+    and hasattr(flashrwkv2._C, "recurrent_fp32_from_decay_logits")
 )
 FP16_EXTENSION_AVAILABLE = (
     torch.cuda.is_available()
-    and flash_rwkv._C is not None
-    and hasattr(flash_rwkv._C, "recurrent_fp16_from_decay_logits")
+    and flashrwkv2._C is not None
+    and hasattr(flashrwkv2._C, "recurrent_fp16_from_decay_logits")
 )
 TOLERANCES = json.loads(
     (ROOT / "tests/fixtures/tolerances-v1.json").read_text(encoding="utf-8")
@@ -335,7 +335,7 @@ def test_public_signature_is_raw_only_and_old_symbols_are_absent() -> None:
     assert "output_final_state" not in signature.parameters
     assert "log_decay" not in signature.parameters
     assert "elapsed_t" not in signature.parameters
-    assert not hasattr(flash_rwkv, "rwkv7_recurrent_stateful")
+    assert not hasattr(flashrwkv2, "rwkv7_recurrent_stateful")
     with pytest.raises(TypeError, match="log_decay"):
         infer_recurrent_fp32io16_forward_varlen(
             None,
@@ -357,9 +357,9 @@ def test_public_signature_is_raw_only_and_old_symbols_are_absent() -> None:
     assert "RecurrentDecayInput::kLogDecay" not in source
     assert "py::arg(\"log_decay\")" not in source
     assert "elapsed_t" not in source
-    if flash_rwkv._C is not None:
-        assert not hasattr(flash_rwkv._C, "recurrent_fp32")
-        assert not hasattr(flash_rwkv._C, "recurrent_fp16")
+    if flashrwkv2._C is not None:
+        assert not hasattr(flashrwkv2._C, "recurrent_fp32")
+        assert not hasattr(flashrwkv2._C, "recurrent_fp16")
 
 
 @pytest.mark.parametrize(
@@ -740,7 +740,7 @@ def test_packed_low_level_invalid_metadata_fails_closed_without_state_write() ->
     slots = torch.tensor([0], device=state_pool.device, dtype=torch.int32)
     output = torch.zeros_like(flat[3])
     before = state_pool.clone()
-    flash_rwkv._C.recurrent_fp32_from_decay_logits(
+    flashrwkv2._C.recurrent_fp32_from_decay_logits(
         bad_cu,
         slots,
         state_pool,
@@ -839,9 +839,9 @@ def test_fp16_public_signature_is_raw_only_and_has_no_elapsed_alias() -> None:
     assert "max_seqlen" in signature.parameters
     assert "log_decay" not in signature.parameters
     assert "elapsed_t" not in signature.parameters
-    if flash_rwkv._C is not None:
-        assert hasattr(flash_rwkv._C, "recurrent_fp16_from_decay_logits")
-        assert not hasattr(flash_rwkv._C, "recurrent_fp16")
+    if flashrwkv2._C is not None:
+        assert hasattr(flashrwkv2._C, "recurrent_fp16_from_decay_logits")
+        assert not hasattr(flashrwkv2._C, "recurrent_fp16")
 
 
 @pytest.mark.parametrize("head_size", (64, 128, 256))
@@ -1159,11 +1159,11 @@ def test_module_paths_and_setup_source_set_are_minimal() -> None:
     assert TARGET_FP16_CUDA.is_file()
     assert TARGET_FP16_CUDA.with_suffix(".cpp") == TARGET_FP16_CPP
     assert (ROOT / "csrc/sm120/tmix/wkv7/recurrent_decay.cuh").is_file()
-    assert (ROOT / "flash_rwkv/tmix/wkv7/__init__.py").is_file()
+    assert (ROOT / "flashrwkv2/tmix/wkv7/__init__.py").is_file()
     assert (ROOT / "tests/tmix/wkv7/test.py").is_file()
     assert (ROOT / "benchmarks/tmix/wkv7/bench.py").is_file()
     for stale_modules_dir in (
-        ROOT / "flash_rwkv/modules",
+        ROOT / "flashrwkv2/modules",
         ROOT / "tests/modules",
         ROOT / "benchmarks/modules",
     ):
@@ -1175,8 +1175,8 @@ def test_module_paths_and_setup_source_set_are_minimal() -> None:
         "reference.py",
         "validation.py",
     ):
-        assert not (ROOT / "flash_rwkv" / stale_root_file).exists()
-    assert not (ROOT / "flash_rwkv/registry").exists()
+        assert not (ROOT / "flashrwkv2" / stale_root_file).exists()
+    assert not (ROOT / "flashrwkv2/registry").exists()
 
 
 def test_native_source_is_raw_only_and_keeps_provenance() -> None:

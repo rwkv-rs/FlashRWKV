@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 
 #include "bindings.h"
 
-void register_flash_rwkv_bindings(py::module_& module) {
+void register_flashrwkv2_bindings(py::module_& module) {
   register_infer_recurrent_bindings(module);
   register_infer_recurrent_fp16_bindings(module);
   register_tmix_mix6_bindings(module);

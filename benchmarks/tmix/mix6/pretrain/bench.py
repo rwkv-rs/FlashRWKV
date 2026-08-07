@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from flash_rwkv.tmix.mix6 import pretrain_tmix_mix6_bf16
+from flashrwkv2.tmix.mix6 import pretrain_tmix_mix6_bf16
 
 
 def main() -> None:

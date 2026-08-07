@@ -25,7 +25,7 @@ def _parse_torch_cuda_arch_list(value: str) -> tuple[tuple[int, int], ...]:
         match = _ARCHITECTURE_PATTERN.fullmatch(token)
         if match is None:
             raise ValueError(
-                "FlashRWKV requires numeric CUDA architecture tokens such as "
+                "FlashRWKV2 requires numeric CUDA architecture tokens such as "
                 f"12.0; got {token!r}"
             )
         capabilities.append((int(match["major"]), int(match["minor"])))
@@ -43,7 +43,7 @@ def _validate_wheel_architectures(
         capabilities = (detected,)
     else:
         raise ValueError(
-            "FlashRWKV native builds require TORCH_CUDA_ARCH_LIST=12.0 or an "
+            "FlashRWKV2 native builds require TORCH_CUDA_ARCH_LIST=12.0 or an "
             "SM120 CUDA device"
         )
     unsupported = tuple(capability for capability in capabilities if capability < (12, 0))
@@ -130,7 +130,7 @@ if native_build:
 ext_modules = (
     [
         CUDAExtension(
-            name="flash_rwkv._C",
+            name="flashrwkv2._C",
             sources=[
                 "csrc/bindings.cpp",
                 "csrc/registration.cpp",

@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from flash_rwkv.head.l2wrap_ce import pretrain_head_l2wrap_ce_bf16
+from flashrwkv2.head.l2wrap_ce import pretrain_head_l2wrap_ce_bf16
 
 
 def main() -> None:
@@ -18,7 +18,7 @@ def main() -> None:
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--samples", type=int, default=30)
-    parser.add_argument("--output", type=str, default="/tmp/flash-rwkv-head-l2wrap-ce.json")
+    parser.add_argument("--output", type=str, default="/tmp/flashrwkv2-head-l2wrap-ce.json")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")

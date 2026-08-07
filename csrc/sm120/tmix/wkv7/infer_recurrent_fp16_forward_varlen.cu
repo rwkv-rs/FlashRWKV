@@ -12,7 +12,7 @@
 //
 // Local adaptation:
 //   - packed [total_tokens,H,D] token storage and cu_seqlens boundaries;
-//   - state_indices-backed FP16 state pool in FlashRWKV's [K,V] layout;
+//   - state_indices-backed FP16 state pool in FlashRWKV2's [K,V] layout;
 //   - raw decay logits and optional bias fused into the retention transform;
 //   - clone, exact, seq-v2, one-cp and one-direct family symbols retained for
 //     Albatross-shaped dispatch;
@@ -46,8 +46,8 @@ constexpr int kHeadSize = 64;
 constexpr int kHalf2HeadSize = kHeadSize / 2;
 constexpr int kHalfPerInt4 = sizeof(int4) / sizeof(half);
 
-using flash_rwkv::wkv7::recurrent_retention;
-using flash_rwkv::wkv7::recurrent_fp16_delta;
+using flashrwkv2::wkv7::recurrent_retention;
+using flashrwkv2::wkv7::recurrent_fp16_delta;
 
 inline int64_t ceil_div(int64_t n, int64_t d) {
   return (n + d - 1) / d;

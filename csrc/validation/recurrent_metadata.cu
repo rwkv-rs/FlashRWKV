@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 
 #include "../validation.h"
 
@@ -9,7 +9,7 @@
 
 #include <utility>
 
-namespace flash_rwkv::validation {
+namespace flashrwkv2::validation {
 namespace {
 
 enum MetadataError : int {
@@ -139,4 +139,4 @@ PreparedRecurrentMetadata prepare_recurrent_metadata_cuda(
       state_pool_size);
 }
 
-}  // namespace flash_rwkv::validation
+}  // namespace flashrwkv2::validation

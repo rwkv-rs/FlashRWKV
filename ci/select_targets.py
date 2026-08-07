@@ -1,4 +1,4 @@
-"""Select the smallest fail-closed FlashRWKV CI validation set."""
+"""Select the smallest fail-closed FlashRWKV2 CI validation set."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ SHARED_FILES = {
     "setup.py",
     "pyproject.toml",
     "uv.lock",
-    "flash_rwkv/__init__.py",
+    "flashrwkv2/__init__.py",
     "tests/fixtures/tolerances-v1.json",
 }
 SHARED_PREFIXES = (
@@ -95,7 +95,7 @@ def _module_from_path(path: str, prefix: str) -> str | None:
 def validate_layout(root: Path = ROOT) -> None:
     missing: list[str] = []
     for module in MODULES:
-        for owner in ("flash_rwkv", "tests", "benchmarks"):
+        for owner in ("flashrwkv2", "tests", "benchmarks"):
             candidate = root / owner / module
             if not candidate.exists():
                 missing.append(str(candidate.relative_to(root)))
@@ -134,7 +134,7 @@ def classify(paths: list[str], *, base_sha: str = "", head_sha: str = "") -> Imp
 
         module = None
         owner = None
-        for candidate_owner in ("flash_rwkv", "tests", "benchmarks"):
+        for candidate_owner in ("flashrwkv2", "tests", "benchmarks"):
             module = _module_from_path(path, f"{candidate_owner}/")
             if module:
                 owner = candidate_owner
@@ -148,7 +148,7 @@ def classify(paths: list[str], *, base_sha: str = "", head_sha: str = "") -> Imp
         if module:
             modules.add(module)
             run_gpu = True
-            if owner in {"flash_rwkv", "benchmarks", "csrc"}:
+            if owner in {"flashrwkv2", "benchmarks", "csrc"}:
                 run_benchmark = True
             if owner == "csrc" and suffix in {".cpp", ".cu", ".cuh", ".h", ".hpp"}:
                 run_sanitizer = True
@@ -156,7 +156,7 @@ def classify(paths: list[str], *, base_sha: str = "", head_sha: str = "") -> Imp
             continue
 
         if suffix in EXECUTABLE_SUFFIXES or path.startswith(
-            ("flash_rwkv/", "tests/", "benchmarks/", "csrc/")
+            ("flashrwkv2/", "tests/", "benchmarks/", "csrc/")
         ):
             run_all = run_gpu = run_benchmark = run_sanitizer = True
             reasons.append(f"unknown-executable:{path}")
@@ -248,7 +248,7 @@ def _self_test() -> None:
     assert benchmark.affected_modules == ("cmix/sparse",) and benchmark.run_benchmark
     shared = classify(["setup.py"])
     assert shared.run_all and shared.affected_modules == tuple(sorted(MODULES))
-    unknown = classify(["flash_rwkv/new_family.py"])
+    unknown = classify(["flashrwkv2/new_family.py"])
     assert unknown.run_all and unknown.run_sanitizer
 
 

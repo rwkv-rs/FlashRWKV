@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from flash_rwkv.tmix.vres_gate import (
+from flashrwkv2.tmix.vres_gate import (
     infer_tmix_vres_gate_forward_varlen,
     pretrain_tmix_vres_gate_bf16,
 )

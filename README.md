@@ -1,6 +1,6 @@
-# FlashRWKV
+# FlashRWKV2
 
-FlashRWKV is a high-performance CUDA operator library for RWKV-7. It provides
+FlashRWKV2 is a high-performance CUDA operator library for RWKV-7. It provides
 composable inference and training operators; complete models, schedulers, and
 training frameworks remain the responsibility of downstream projects.
 
@@ -11,16 +11,15 @@ training frameworks remain the responsibility of downstream projects.
 - `uv`, using the repository-local `./.venv`
 - SM120 or newer for the current native build
 
-The runtime package declares `torch>=2.4`. Reproducible source builds use the
-build-system environment declared by `pyproject.toml`, which currently pins
-PyTorch 2.11.0. When the build cannot detect a local GPU, set
+The runtime and reproducible source-build contracts currently pin PyTorch
+2.11.0. When the build cannot detect a local GPU, set
 `TORCH_CUDA_ARCH_LIST=12.0` explicitly.
 
 ## Installation
 
 ```bash
-git clone https://github.com/rwkv-rs/FlashRWKV.git
-cd FlashRWKV
+git clone https://github.com/rwkv-rs/FlashRWKV2.git
+cd FlashRWKV2
 uv sync
 TORCH_CUDA_ARCH_LIST=12.0 \
   ./.venv/bin/python -m pip install -v --no-build-isolation -e .
@@ -37,7 +36,7 @@ operator surface and tensor contracts.
 ./.venv/bin/python -m pytest -q
 ```
 
-CUDA tests require a successfully built `flash_rwkv._C` extension and a
+CUDA tests require a successfully built `flashrwkv2._C` extension and a
 supported GPU.
 
 ## Benchmarks
@@ -50,7 +49,7 @@ WKV7 recurrent correctness benchmark with:
   --shapes h32d64 \
   --dtype bfloat16 \
   --correctness-only \
-  --output /tmp/flash-rwkv-wkv7-correctness.json
+  --output /tmp/flashrwkv2-wkv7-correctness.json
 ```
 
 These benchmarks measure individual operators. They do not report or infer
@@ -63,7 +62,7 @@ canonical fused rank-in window at `M<=7`, the fused rank-out/value-residual
 window at `M<=4`, and the canonical large-row linear dispatcher otherwise.
 Callers may provide both the original checkpoint layout and a runtime layout.
 Both layouts must be prepared outside the timed forward region and retained for
-the lifetime of the inference weights; FlashRWKV never transposes or copies a
+the lifetime of the inference weights; FlashRWKV2 never transposes or copies a
 missing layout during dispatch.
 
 The existing low-rank operator benchmark reports correctness and latency as
@@ -76,4 +75,4 @@ JSON without adding a model-level benchmark:
 
 ## License
 
-FlashRWKV is distributed under the [MIT License](LICENSE).
+FlashRWKV2 is distributed under the [MIT License](LICENSE).

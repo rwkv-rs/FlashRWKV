@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from flash_rwkv.rl_infctx.wkv7 import rl_infctx_chunk_fp32io16
+from flashrwkv2.rl_infctx.wkv7 import rl_infctx_chunk_fp32io16
 
 
 def main() -> None:
@@ -18,7 +18,7 @@ def main() -> None:
     parser.add_argument("--heads", type=int, default=2)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--samples", type=int, default=30)
-    parser.add_argument("--output", type=str, default="/tmp/flash-rwkv-rl-infctx.json")
+    parser.add_argument("--output", type=str, default="/tmp/flashrwkv2-rl-infctx.json")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")

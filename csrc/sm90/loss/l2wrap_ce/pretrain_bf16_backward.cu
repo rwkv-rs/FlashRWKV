@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to BlinkDL/RWKV-LM
 // Canonical source: RWKV-LM RWKV-v7/train_temp/cuda/rwkv7_l2wrap_ce_bf16_v2.cu
 // Source revision: 952102498e9ed367ea0a59ee64106916d474d30f.
-// Local adaptation: module-local FlashRWKV binding names only; vocab is passed
+// Local adaptation: module-local FlashRWKV2 binding names only; vocab is passed
 // from the binding while the canonical train_temp row/reduction kernels remain.
 
 #include <torch/extension.h>

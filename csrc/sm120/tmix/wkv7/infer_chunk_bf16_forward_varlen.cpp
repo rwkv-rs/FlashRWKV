@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 // FlashKDA source revision: 1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b.
 // This binding keeps the RWKV-7 K1/K2 chunk algebra and exposes only the raw
 // decay-logit boundary.  It is not a KDA-attention compatibility wrapper.
@@ -34,9 +34,9 @@ void infer_chunk_bf16_forward_varlen_cuda(
     double scale,
     torch::Tensor metadata_status);
 
-using flash_rwkv::validation::check_cuda_contiguous;
-using flash_rwkv::validation::check_same_device;
-using flash_rwkv::validation::prepare_recurrent_metadata_cuda;
+using flashrwkv2::validation::check_cuda_contiguous;
+using flashrwkv2::validation::check_same_device;
+using flashrwkv2::validation::prepare_recurrent_metadata_cuda;
 
 namespace {
 

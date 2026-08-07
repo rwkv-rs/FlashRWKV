@@ -21,7 +21,7 @@ from typing import Iterable
 
 import torch
 
-import flash_rwkv
+import flashrwkv2
 
 
 DECAY_RATE = 0.6065306597126334
@@ -408,14 +408,14 @@ def _run_public_correctness(
         state_indices=state_indices,
         decay_bias=decay_bias,
     )
-    ticket = flash_rwkv.prepare_recurrent_metadata(
+    ticket = flashrwkv2.prepare_recurrent_metadata(
         cu_seqlens,
         state_indices,
         total_tokens=r.shape[0],
         state_pool_size=state_pool.shape[0],
     )
     observed_state = state_pool.clone()
-    observed_output = flash_rwkv.infer_recurrent_fp32io16_forward_varlen(
+    observed_output = flashrwkv2.infer_recurrent_fp32io16_forward_varlen(
         r,
         decay_logits,
         k,
@@ -460,7 +460,7 @@ def _run_public_correctness(
 
     # A second launch with an identical reset state is the deterministic check.
     deterministic_state = state_pool.clone()
-    deterministic_output = flash_rwkv.infer_recurrent_fp32io16_forward_varlen(
+    deterministic_output = flashrwkv2.infer_recurrent_fp32io16_forward_varlen(
         r,
         decay_logits,
         k,
@@ -524,9 +524,9 @@ def _timed_native_launch(
     decay_bias = inputs["decay_bias"]
     assert isinstance(cu_seqlens, torch.Tensor)
     assert isinstance(state_indices, torch.Tensor)
-    extension = flash_rwkv._C
+    extension = flashrwkv2._C
     if extension is None:
-        raise RuntimeError("flash_rwkv._C is not loaded")
+        raise RuntimeError("flashrwkv2._C is not loaded")
     extension.recurrent_fp32_from_decay_logits(
         cu_seqlens,
         state_indices,
@@ -703,13 +703,13 @@ def main(argv: list[str] | None = None) -> int:
     spec = KERNEL_SPEC
     limits = _load_limits(root)
     git = _git_metadata(root)
-    extension = getattr(flash_rwkv, "_C", None)
+    extension = getattr(flashrwkv2, "_C", None)
     if extension is None:
-        raise RuntimeError("flash_rwkv._C is not loaded; build the CUDA extension first")
+        raise RuntimeError("flashrwkv2._C is not loaded; build the CUDA extension first")
     extension_path = Path(getattr(extension, "__file__", ""))
     payload: dict[str, object] = {
         "schema_version": 1,
-        "benchmark": "flash_rwkv_wkv7_recurrent_fp32io16",
+        "benchmark": "flashrwkv2_wkv7_recurrent_fp32io16",
         "revision": git["revision"],
         "git_status": git["status"],
         "benchmark_script_sha256": _sha256_paths((Path(__file__).resolve(),)),
@@ -779,7 +779,7 @@ def main(argv: list[str] | None = None) -> int:
                     r = inputs["r"]
                     assert isinstance(state_pool, torch.Tensor)
                     assert isinstance(r, torch.Tensor)
-                    ticket = flash_rwkv.prepare_recurrent_metadata(
+                    ticket = flashrwkv2.prepare_recurrent_metadata(
                         inputs["cu_seqlens"],
                         inputs["state_indices"],
                         total_tokens=r.shape[0],

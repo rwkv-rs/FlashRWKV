@@ -1,4 +1,4 @@
-"""Run and compare revision-bound FlashRWKV module benchmarks."""
+"""Run and compare revision-bound FlashRWKV2 module benchmarks."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def _environment(python: str) -> dict[str, Any]:
     program = r"""
 import json, platform, torch
 from pathlib import Path
-extension = getattr(__import__('flash_rwkv'), '_C', None)
+extension = getattr(__import__('flashrwkv2'), '_C', None)
 extension_path = Path(getattr(extension, '__file__', ''))
 print(json.dumps({
   'python': platform.python_version(),
@@ -89,7 +89,7 @@ print(json.dumps({
     )
     extension_path = Path(payload["extension_path"])
     if not extension_path.is_file():
-        raise SystemExit("flash_rwkv._C is not loaded from an installed wheel")
+        raise SystemExit("flashrwkv2._C is not loaded from an installed wheel")
     payload["extension_sha256"] = _sha256(extension_path)
     payload["wheel_sha256"] = os.environ.get("FLASH_RWKV_WHEEL_SHA256")
     try:
@@ -188,7 +188,7 @@ def _run_once(
     output_path: Path | None = None
     if sample_flag == "wkv7":
         output_path = (
-            Path(tempfile.gettempdir()) / f"flash-rwkv-{os.getpid()}-{run_index}.json"
+            Path(tempfile.gettempdir()) / f"flashrwkv2-{os.getpid()}-{run_index}.json"
         )
         command += [
             "--shapes",
@@ -262,7 +262,7 @@ def run_benchmark(
         "target": "sm120",
         "revision": revision,
         "runtime_semantic_revision": _git(
-            "log", "-1", "--format=%H", "--", "csrc", "flash_rwkv", "setup.py"
+            "log", "-1", "--format=%H", "--", "csrc", "flashrwkv2", "setup.py"
         ),
         "environment": environment,
         "independent_runs": RUNS,
@@ -352,7 +352,7 @@ def fetch_baseline(
     head: dict[str, Any],
 ) -> bool:
     safe_module = module.replace("/", "-")
-    url = f"https://api.github.com/repos/{repository}/actions/artifacts?name=flash-rwkv-baseline-sm120-{safe_module}&per_page=100"
+    url = f"https://api.github.com/repos/{repository}/actions/artifacts?name=flashrwkv2-baseline-sm120-{safe_module}&per_page=100"
     payload = _api_json(url, token)
     candidates = sorted(
         (

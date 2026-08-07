@@ -43,7 +43,7 @@ __device__ __forceinline__ io_t from_float(float value) {
   return static_cast<io_t>(value);
 }
 
-using flash_rwkv::wkv7::recurrent_retention;
+using flashrwkv2::wkv7::recurrent_retention;
 
 __device__ __forceinline__ float warp_sum(float value) {
 #pragma unroll
@@ -82,7 +82,7 @@ __device__ __forceinline__ void fill_invalid_output(
   }
 }
 
-// Albatross large family, adapted from wkv_fp32_v2_kernel.  FlashRWKV stores
+// Albatross large family, adapted from wkv_fp32_v2_kernel.  FlashRWKV2 stores
 // state as [slot,head,key,value], whereas the upstream row-local state is
 // addressed as [slot,head,value,key]; the cooperative load/store below is the
 // only layout adaptation.
@@ -228,7 +228,7 @@ void wkv_fp32_v2_small_warp_kernel(
   const int token_start = query_start_loc[sequence_index];
   const int token_end = query_start_loc[sequence_index + 1];
   const int state_slot = state_indices[sequence_index];
-  // The canonical FlashRWKV state is [K,V].  This row-parallel family owns
+  // The canonical FlashRWKV2 state is [K,V].  This row-parallel family owns
   // one fixed V coordinate, so the K loop must stride by HeadSize from the
   // state column rather than treating the row as K and transposing state.
   float* state_base = state_ptr +
@@ -466,7 +466,7 @@ void recurrent_fp32_from_decay_logits_cuda(
       at::ScalarType::Half,
       at::ScalarType::BFloat16,
       r.scalar_type(),
-      "flash_rwkv_recurrent_fp32_from_decay_logits",
+      "flashrwkv2_recurrent_fp32_from_decay_logits",
       [&] {
         switch (state.size(2)) {
           case 64:

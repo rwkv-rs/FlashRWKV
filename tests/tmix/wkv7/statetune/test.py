@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from flash_rwkv.tmix.wkv7.statetune import statetune_recurrent_fp32io16
+from flashrwkv2.tmix.wkv7.statetune import statetune_recurrent_fp32io16
 
 
 def _case(requires_grad: bool = False) -> tuple[torch.Tensor, ...]:

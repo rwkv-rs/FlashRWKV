@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 
 #pragma once
 
 #include <cuda_runtime.h>
 
-namespace flash_rwkv::wkv7 {
+namespace flashrwkv2::wkv7 {
 
 constexpr float kNegativeExpHalfLog2E = -0.8750387749145276f;
 constexpr float kNegativeLog2E = -1.4426950408889634f;
@@ -45,4 +45,4 @@ __device__ __forceinline__ float recurrent_fp16_delta(
       recurrent_fp16_dither(phase);
 }
 
-}  // namespace flash_rwkv::wkv7
+}  // namespace flashrwkv2::wkv7

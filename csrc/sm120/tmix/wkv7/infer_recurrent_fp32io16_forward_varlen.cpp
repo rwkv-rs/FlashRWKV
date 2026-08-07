@@ -34,10 +34,10 @@ void recurrent_fp32_from_decay_logits_cuda(
     double scale,
     int64_t max_seqlen);
 
-using flash_rwkv::validation::check_cuda_contiguous;
-using flash_rwkv::validation::check_same_device;
-using flash_rwkv::validation::check_recurrent_layout;
-using flash_rwkv::validation::prepare_recurrent_metadata_cuda;
+using flashrwkv2::validation::check_cuda_contiguous;
+using flashrwkv2::validation::check_same_device;
+using flashrwkv2::validation::check_recurrent_layout;
+using flashrwkv2::validation::prepare_recurrent_metadata_cuda;
 
 namespace {
 
@@ -351,7 +351,7 @@ void register_infer_recurrent_bindings(py::module_& module) {
   module.def(
       "recurrent_fp32_from_decay_logits",
       &recurrent_fp32_from_decay_logits,
-      "FlashRWKV recurrent forward with fused raw decay logits and FP32 state",
+      "FlashRWKV2 recurrent forward with fused raw decay logits and FP32 state",
       py::arg("query_start_loc"), py::arg("state_indices"),
       py::arg("state"), py::arg("r"), py::arg("decay_logits"),
       py::arg("k"), py::arg("v"), py::arg("a"), py::arg("b"),

@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from flash_rwkv.tmix.normalization import (
+from flashrwkv2.tmix.normalization import (
     infer_tmix_add_forward_varlen,
     infer_tmix_add_last_layer_norm_forward_varlen,
     infer_tmix_add_layer_norm_forward_varlen,

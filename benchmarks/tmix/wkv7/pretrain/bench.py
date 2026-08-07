@@ -6,7 +6,7 @@ import json
 
 import torch
 
-from flash_rwkv import pretrain_recurrent_bf16
+from flashrwkv2 import pretrain_recurrent_bf16
 
 
 SOURCE_REVISION = "952102498e9ed367ea0a59ee64106916d474d30f"

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 
 #pragma once
 
 #include <torch/extension.h>
 
-void register_flash_rwkv_bindings(py::module_&);
+void register_flashrwkv2_bindings(py::module_&);
 void register_infer_recurrent_bindings(py::module_&);
 void register_infer_recurrent_fp16_bindings(py::module_&);
 void register_tmix_mix6_bindings(py::module_&);

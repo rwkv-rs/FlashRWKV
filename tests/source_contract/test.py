@@ -35,30 +35,30 @@ MIRRORED_MODULES = (
     "tmix/wkv7",
 )
 PUBLIC_INFERENCE_MODULES = (
-    "flash_rwkv.embedding",
-    "flash_rwkv.tmix.mix6",
-    "flash_rwkv.tmix.kk_a_gate",
-    "flash_rwkv.tmix.linear",
-    "flash_rwkv.tmix.lnx_rkvres_xg",
-    "flash_rwkv.tmix.normalization",
-    "flash_rwkv.tmix.vres_gate",
-    "flash_rwkv.tmix.wkv7",
-    "flash_rwkv.cmix.mix",
-    "flash_rwkv.cmix.sparse",
-    "flash_rwkv.head.linear",
+    "flashrwkv2.embedding",
+    "flashrwkv2.tmix.mix6",
+    "flashrwkv2.tmix.kk_a_gate",
+    "flashrwkv2.tmix.linear",
+    "flashrwkv2.tmix.lnx_rkvres_xg",
+    "flashrwkv2.tmix.normalization",
+    "flashrwkv2.tmix.vres_gate",
+    "flashrwkv2.tmix.wkv7",
+    "flashrwkv2.cmix.mix",
+    "flashrwkv2.cmix.sparse",
+    "flashrwkv2.head.linear",
 )
 PUBLIC_TRAINING_MODULES = (
-    "flash_rwkv.tmix.wkv7",
-    "flash_rwkv.tmix.wkv7.statetune",
-    "flash_rwkv.tmix.a_gate",
-    "flash_rwkv.tmix.vres_gate",
-    "flash_rwkv.tmix.mix6",
-    "flash_rwkv.tmix.kk_pre",
-    "flash_rwkv.tmix.lnx_rkvres_xg",
-    "flash_rwkv.cmix.mix",
-    "flash_rwkv.loss.l2wrap_ce",
-    "flash_rwkv.head.l2wrap_ce",
-    "flash_rwkv.rl_infctx.wkv7",
+    "flashrwkv2.tmix.wkv7",
+    "flashrwkv2.tmix.wkv7.statetune",
+    "flashrwkv2.tmix.a_gate",
+    "flashrwkv2.tmix.vres_gate",
+    "flashrwkv2.tmix.mix6",
+    "flashrwkv2.tmix.kk_pre",
+    "flashrwkv2.tmix.lnx_rkvres_xg",
+    "flashrwkv2.cmix.mix",
+    "flashrwkv2.loss.l2wrap_ce",
+    "flashrwkv2.head.l2wrap_ce",
+    "flashrwkv2.rl_infctx.wkv7",
 )
 PUBLIC_TRAINING_PREFIXES = ("pretrain_", "statetune_", "rl_infctx_")
 
@@ -107,7 +107,7 @@ def test_active_native_sources_are_paired_and_listed() -> None:
 
 def test_module_paths_are_mirrored() -> None:
     for module in MIRRORED_MODULES:
-        assert (ROOT / "flash_rwkv" / module).exists(), module
+        assert (ROOT / "flashrwkv2" / module).exists(), module
         assert (ROOT / "tests" / module).exists(), module
         assert (ROOT / "benchmarks" / module).exists(), module
         assert any(
@@ -117,13 +117,13 @@ def test_module_paths_are_mirrored() -> None:
 
 def test_forbidden_global_and_legacy_paths_are_absent_from_active_tree() -> None:
     assert not (ROOT / "csrc" / "common").exists()
-    assert not (ROOT / "flash_rwkv" / "elementwise").exists()
+    assert not (ROOT / "flashrwkv2" / "elementwise").exists()
     assert not (ROOT / "csrc" / "elementwise").exists()
 
     active_paths = {
         path.relative_to(ROOT)
         for root in (
-            ROOT / "flash_rwkv",
+            ROOT / "flashrwkv2",
             ROOT / "csrc" / "sm90",
             ROOT / "csrc" / "sm120",
         )
@@ -151,9 +151,9 @@ def test_module_cuda_files_have_provenance_headers() -> None:
 
 
 def test_python_surface_stays_operator_only() -> None:
-    """FlashRWKV exposes operators; model classes and model forward APIs stay external."""
+    """FlashRWKV2 exposes operators; model classes and model forward APIs stay external."""
 
-    for path in sorted((ROOT / "flash_rwkv").rglob("*.py")):
+    for path in sorted((ROOT / "flashrwkv2").rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
@@ -166,7 +166,7 @@ def test_python_surface_stays_operator_only() -> None:
 
 
 def test_root_exports_all_public_inference_operators() -> None:
-    import flash_rwkv
+    import flashrwkv2
 
     expected = {}
     for module_name in PUBLIC_INFERENCE_MODULES:
@@ -182,15 +182,15 @@ def test_root_exports_all_public_inference_operators() -> None:
 
     assert len(expected) == 44
     root_inference_names = {
-        name for name in flash_rwkv.__all__ if name.startswith("infer_")
+        name for name in flashrwkv2.__all__ if name.startswith("infer_")
     }
     assert root_inference_names == set(expected)
     for name, operator in expected.items():
-        assert getattr(flash_rwkv, name) is operator
+        assert getattr(flashrwkv2, name) is operator
 
 
 def test_root_exports_all_public_training_operators() -> None:
-    import flash_rwkv
+    import flashrwkv2
 
     expected = {}
     for module_name in PUBLIC_TRAINING_MODULES:
@@ -207,12 +207,12 @@ def test_root_exports_all_public_training_operators() -> None:
     assert len(expected) == 12
     root_training_names = {
         name
-        for name in flash_rwkv.__all__
+        for name in flashrwkv2.__all__
         if name.startswith(PUBLIC_TRAINING_PREFIXES)
     }
     assert root_training_names == set(expected)
     for name, operator in expected.items():
-        assert getattr(flash_rwkv, name) is operator
+        assert getattr(flashrwkv2, name) is operator
 
 
 def test_fp16_elapsed_advance_stays_in_the_wkv7_owner() -> None:
@@ -224,7 +224,7 @@ def test_fp16_elapsed_advance_stays_in_the_wkv7_owner() -> None:
         ROOT
         / "csrc/sm120/tmix/wkv7/infer_recurrent_fp16_forward_varlen.cpp"
     ).read_text()
-    python_source = (ROOT / "flash_rwkv/tmix/wkv7/__init__.py").read_text()
+    python_source = (ROOT / "flashrwkv2/tmix/wkv7/__init__.py").read_text()
 
     assert "advance_i32_varlen_kernel" in cuda_source
     assert "recurrent_fp16_advance_i32_varlen" in cpp_source

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 // This binding exposes the mechanically migrated RL/Infctx output replay
 // stage.  It is not a train_temp backward alias.
 
@@ -13,8 +13,8 @@
 #include <optional>
 #include <utility>
 
-using flash_rwkv::validation::check_cuda_contiguous;
-using flash_rwkv::validation::check_same_device;
+using flashrwkv2::validation::check_cuda_contiguous;
+using flashrwkv2::validation::check_same_device;
 
 namespace {
 

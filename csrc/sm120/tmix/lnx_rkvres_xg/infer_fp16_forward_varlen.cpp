@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 // Albatross source revision: ee3308f6922e59f2166c7fac3c5a192340a2b48e.
 
 #include "../../../validation.h"
@@ -25,8 +25,8 @@ void tmix_lnx_rkvres_xg_forward_varlen_cuda(
     torch::Tensor g,
     torch::Tensor output);
 
-using flash_rwkv::validation::check_cuda_contiguous;
-using flash_rwkv::validation::check_same_device;
+using flashrwkv2::validation::check_cuda_contiguous;
+using flashrwkv2::validation::check_same_device;
 
 namespace {
 

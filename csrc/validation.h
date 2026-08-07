@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 
 #pragma once
 
@@ -7,7 +7,7 @@
 
 #include <optional>
 
-namespace flash_rwkv::validation {
+namespace flashrwkv2::validation {
 
 struct RecurrentDimensions {
   int64_t num_sequences;
@@ -44,4 +44,4 @@ PreparedRecurrentMetadata prepare_recurrent_metadata_cuda(
     int64_t total_tokens,
     int64_t state_pool_size);
 
-}  // namespace flash_rwkv::validation
+}  // namespace flashrwkv2::validation

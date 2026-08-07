@@ -13,8 +13,8 @@ from pathlib import Path
 
 import torch
 
-from flash_rwkv.loss.l2wrap_ce import pretrain_l2wrap_ce_bf16
-from flash_rwkv.tmix.wkv7 import _extension
+from flashrwkv2.loss.l2wrap_ce import pretrain_l2wrap_ce_bf16
+from flashrwkv2.tmix.wkv7 import _extension
 
 
 SOURCE_REVISION = "952102498e9ed367ea0a59ee64106916d474d30f"
@@ -78,7 +78,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--samples", type=int, default=30)
     parser.add_argument(
-        "--output", type=str, default="/tmp/flash-rwkv-l2wrap-ce.json"
+        "--output", type=str, default="/tmp/flashrwkv2-l2wrap-ce.json"
     )
     args = parser.parse_args()
     if not torch.cuda.is_available():

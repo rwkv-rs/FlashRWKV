@@ -3,7 +3,7 @@
 // Canonical source: RWKV-LM RWKV-v7/train_temp/cuda/rwkv7_head_l2wrap_ce_bf16_v4.cu
 // Source revision: 952102498e9ed367ea0a59ee64106916d474d30f.
 // Local adaptation: the canonical row-chunk/reduction kernels are retained;
-// FlashRWKV owns the module-local memory-bounded wrapper below.
+// FlashRWKV2 owns the module-local memory-bounded wrapper below.
 
 #include <torch/extension.h>
 

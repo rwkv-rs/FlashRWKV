@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 //
 // The FP16 kernel body is adapted from Albatross faster3a_2607 at revision
 // ee3308f6922e59f2166c7fac3c5a192340a2b48e.  vllm-rwkv is used only for the
@@ -41,9 +41,9 @@ void recurrent_fp16_advance_i32_varlen_cuda(
 torch::Tensor recurrent_add_vec_forward_varlen_cuda(
     torch::Tensor x, torch::Tensor vec);
 
-using flash_rwkv::validation::check_cuda_contiguous;
-using flash_rwkv::validation::check_same_device;
-using flash_rwkv::validation::prepare_recurrent_metadata_cuda;
+using flashrwkv2::validation::check_cuda_contiguous;
+using flashrwkv2::validation::check_same_device;
+using flashrwkv2::validation::prepare_recurrent_metadata_cuda;
 
 namespace {
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 
-from flash_rwkv.tmix.linear import (
+from flashrwkv2.tmix.linear import (
     infer_tmix_linear_rank_in_forward_varlen,
     infer_tmix_linear_rank_out_forward_varlen,
     infer_tmix_linear_rank_out_sigmoid_forward_varlen,
@@ -21,14 +21,14 @@ from flash_rwkv.tmix.linear import (
     infer_tmix_lowrank_vres_forward_varlen,
     infer_tmix_lowrank_wagv_in_forward_varlen,
 )
-from flash_rwkv.tmix.vres_gate import infer_tmix_vres_gate_forward_varlen
+from flashrwkv2.tmix.vres_gate import infer_tmix_vres_gate_forward_varlen
 
 SOURCE_REVISION = "ee3308f6922e59f2166c7fac3c5a192340a2b48e"
 DEFAULT_ROWS = (1, 4, 5, 7, 8, 9, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512, 1024)
 DEFAULT_RANKS = (96, 128, 480)
 
 
-def _flash_rwkv_revision() -> str:
+def _flashrwkv2_revision() -> str:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=Path(__file__).resolve().parents[3],
@@ -403,9 +403,9 @@ def main() -> None:
         )
 
     metadata = {
-        "benchmark": "flash_rwkv_tmix_lowrank_dispatch",
+        "benchmark": "flashrwkv2_tmix_lowrank_dispatch",
         "source_revision": SOURCE_REVISION,
-        "flash_rwkv_revision": _flash_rwkv_revision(),
+        "flashrwkv2_revision": _flashrwkv2_revision(),
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "gpu": torch.cuda.get_device_name(),

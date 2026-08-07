@@ -30,7 +30,7 @@ param_size: 参数规模, 仅有 0.1b, 0.4b, 1.5b(often used in RL), 2.9b, 7.2b(
 `{a|b}` 表示只能从列出的选项中选择一个。
 
 ```text
-Python 源码：./flash_rwkv/<module_name>[/<sub_module_name>]/__init__.py
+Python 源码：./flashrwkv2/<module_name>[/<sub_module_name>]/__init__.py
 测试代码：  ./tests/<module_name>[/<sub_module_name>]/test.py
 性能基准：  ./benchmarks/<module_name>[/<sub_module_name>]/bench.py
 C++/CUDA：  ./csrc/sm{60|75|80|90|120}/<module_name>[/<sub_module_name>]/
@@ -53,7 +53,7 @@ C++/CUDA：  ./csrc/sm{60|75|80|90|120}/<module_name>[/<sub_module_name>]/
 例如，`tmix/wkv7` 模块应按下面的方式对应组织：
 
 ```text
-flash_rwkv/tmix/wkv7/__init__.py
+flashrwkv2/tmix/wkv7/__init__.py
 tests/tmix/wkv7/test.py
 benchmarks/tmix/wkv7/bench.py
 csrc/sm90/tmix/wkv7/infer_recurrent_fp16_forward_varlen.cu
@@ -89,7 +89,7 @@ csrc/sm90/tmix/wkv7/statetune_recurrent_fp16_forward.cu
 ## Machine for Testing and Benchmarking
 ```bash
 ssh rwkv-sha-pro6000x8
-cd ~/Projects/MachineLearning/flash-rwkv
+cd ~/Projects/MachineLearning/flashrwkv2
 ```
 use git to sync your changes instead of rsync.
 

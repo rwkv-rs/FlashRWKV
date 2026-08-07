@@ -110,8 +110,8 @@ wheels = [
 ]
 
 [[package]]
-name = "flash-rwkv"
-version = "0.1.0"
+name = "flashrwkv2"
+version = "0.1.0a1"
 source = { editable = "." }
 dependencies = [
     { name = "torch" },
@@ -125,7 +125,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "torch", specifier = ">=2.4" }]
+requires-dist = [{ name = "torch", specifier = "==2.11.0" }]
 
 [package.metadata.requires-dev]
 dev = [

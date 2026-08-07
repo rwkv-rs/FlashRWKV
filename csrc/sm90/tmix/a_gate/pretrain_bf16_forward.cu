@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to BlinkDL/RWKV-LM
 // Canonical source: RWKV-LM RWKV-v7/train_temp/cuda/rwkv7_tmix_a_gate_bf16.cu
 // Source revision: 952102498e9ed367ea0a59ee64106916d474d30f.
-// Local adaptation: module-local FlashRWKV binding names only; tensor contract
+// Local adaptation: module-local FlashRWKV2 binding names only; tensor contract
 // remains the canonical train_temp [B,T,C] BF16 contract.
 
 #include <torch/extension.h>

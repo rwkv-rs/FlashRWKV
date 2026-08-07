@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the Albatross project
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 //
 // Source: BlinkDL/Albatross/faster3a_2607/cuda/rwkv7_fast_ops_fp16.cu,
 // revision ee3308f6922e59f2166c7fac3c5a192340a2b48e.
@@ -45,9 +45,9 @@ torch::Tensor cmix_sparse_forward_varlen_cuda(
     torch::Tensor state_indices,
     torch::Tensor metadata_status);
 
-using flash_rwkv::validation::check_cuda_contiguous;
-using flash_rwkv::validation::check_same_device;
-using flash_rwkv::validation::prepare_recurrent_metadata_cuda;
+using flashrwkv2::validation::check_cuda_contiguous;
+using flashrwkv2::validation::check_same_device;
+using flashrwkv2::validation::prepare_recurrent_metadata_cuda;
 
 namespace {
 

@@ -5,14 +5,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from flash_rwkv.cmix.mix import (
+from flashrwkv2.cmix.mix import (
     infer_cmix_add_layer_norm_mix_forward_varlen,
     infer_cmix_linear_ffn_down_forward_varlen,
     infer_cmix_mix_forward_varlen,
     infer_cmix_relu_square_forward_varlen,
     pretrain_cmix_bf16,
 )
-from flash_rwkv.tmix.wkv7 import prepare_recurrent_metadata
+from flashrwkv2.tmix.wkv7 import prepare_recurrent_metadata
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

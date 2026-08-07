@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from flash_rwkv.tmix.wkv7 import infer_chunk_bf16_forward_varlen
+from flashrwkv2.tmix.wkv7 import infer_chunk_bf16_forward_varlen
 
 
 def main() -> None:

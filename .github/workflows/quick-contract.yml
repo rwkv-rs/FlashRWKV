@@ -68,7 +68,7 @@ jobs:
       - name: Check maintained Python and repository whitespace
         run: |
           .venv/bin/ruff check --select E9,F63,F7,F82 \
-            flash_rwkv tests benchmarks setup.py
+            flashrwkv2 tests benchmarks setup.py
           .venv/bin/ruff check ci
           git diff --check
       - name: Validate CI helpers and active source contract
@@ -95,7 +95,7 @@ jobs:
       - name: Upload revision-bound impact contract
         uses: actions/upload-artifact@v4
         with:
-          name: flash-rwkv-impact-${{ steps.revision.outputs.head }}
+          name: flashrwkv2-impact-${{ steps.revision.outputs.head }}
           path: artifacts/impact.json
           if-no-files-found: error
           retention-days: 90

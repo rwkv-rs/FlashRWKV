@@ -17,7 +17,7 @@
 
 namespace {
 
-using flash_rwkv::wkv7::recurrent_retention;
+using flashrwkv2::wkv7::recurrent_retention;
 
 template <typename io_t>
 __device__ __forceinline__ float to_float(io_t value) {
@@ -194,7 +194,7 @@ void statetune_recurrent_fp32io16_forward_cuda_impl(
       at::ScalarType::Half,
       at::ScalarType::BFloat16,
       r.scalar_type(),
-      "flash_rwkv_statetune_recurrent_fp32io16_forward",
+      "flashrwkv2_statetune_recurrent_fp32io16_forward",
       [&] {
         switch (state.size(2)) {
           case 64:

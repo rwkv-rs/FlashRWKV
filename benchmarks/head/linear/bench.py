@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from flash_rwkv.head.linear import infer_head_linear_forward_varlen
+from flashrwkv2.head.linear import infer_head_linear_forward_varlen
 
 
 def main() -> None:

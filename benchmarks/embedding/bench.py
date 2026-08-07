@@ -8,7 +8,7 @@ import time
 
 import torch
 
-from flash_rwkv.embedding import infer_embedding_ln0_forward_varlen
+from flashrwkv2.embedding import infer_embedding_ln0_forward_varlen
 
 
 def main() -> None:

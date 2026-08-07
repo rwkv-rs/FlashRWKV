@@ -7,12 +7,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from flash_rwkv.cmix.sparse import (
+from flashrwkv2.cmix.sparse import (
     infer_cmix_sparse_down_relu_forward_varlen,
     infer_cmix_sparse_forward_varlen,
     infer_cmix_sparse_up_forward_varlen,
 )
-from flash_rwkv.tmix.wkv7 import prepare_recurrent_metadata
+from flashrwkv2.tmix.wkv7 import prepare_recurrent_metadata
 
 
 def test_cmix_sparse_down_dispatch_uses_batch_max_metadata() -> None:

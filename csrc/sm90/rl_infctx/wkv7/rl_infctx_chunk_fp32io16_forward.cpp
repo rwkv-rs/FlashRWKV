@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV project
+// SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 // RL/Infctx binding mechanically restores the retained materialized and
 // factor-recompute CUDA families.  The public decay boundary is raw logits.
 
@@ -53,9 +53,9 @@ void recompute_chunk_fp32_from_decay_logits_cuda(
     torch::Tensor boundary,
     double scale);
 
-using flash_rwkv::validation::check_cuda_contiguous;
-using flash_rwkv::validation::check_recurrent_layout;
-using flash_rwkv::validation::check_same_device;
+using flashrwkv2::validation::check_cuda_contiguous;
+using flashrwkv2::validation::check_recurrent_layout;
+using flashrwkv2::validation::check_same_device;
 
 namespace {
 

@@ -9,7 +9,7 @@ import time
 
 import torch
 
-from flash_rwkv.cmix.sparse import infer_cmix_sparse_forward_varlen
+from flashrwkv2.cmix.sparse import infer_cmix_sparse_forward_varlen
 
 
 SOURCE_REVISION = "ee3308f6922e59f2166c7fac3c5a192340a2b48e"
@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--samples", type=int, default=30)
-    parser.add_argument("--output", type=str, default="/tmp/flash-rwkv-cmix-sparse.json")
+    parser.add_argument("--output", type=str, default="/tmp/flashrwkv2-cmix-sparse.json")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
