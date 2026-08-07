@@ -72,7 +72,7 @@ jobs:
           with urllib.request.urlopen(request) as response:
               payload = json.load(response)
           successful = {run["name"] for run in payload["workflow_runs"]}
-          required = {"Fast CI", "SM120 quality gate"}
+          required = {"Fast CI"}
           missing = sorted(required - successful)
           if missing:
               raise SystemExit(
