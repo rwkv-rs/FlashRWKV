@@ -220,7 +220,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
-          enable-cache: true
+          enable-cache: false
       - name: Verify clean exact source
         env:
           EXPECTED_SHA: ${{ needs.impact.outputs.head_sha }}
@@ -370,7 +370,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
-          enable-cache: true
+          enable-cache: false
       - uses: actions/download-artifact@v4
         with:
           name: flashrwkv2-sm120-test-${{ needs.impact.outputs.head_sha }}
