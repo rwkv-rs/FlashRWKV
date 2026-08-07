@@ -263,7 +263,11 @@ jobs:
         run: |
           set -o pipefail
           test_root="$RUNNER_TEMP/flashrwkv2-gpu-tests-$GITHUB_RUN_ID"
+          support_root="$RUNNER_TEMP/flashrwkv2-test-support-$GITHUB_RUN_ID"
           mkdir -p "$test_root"
+          mkdir -p "$support_root"
+          ln -s "$GITHUB_WORKSPACE/benchmarks" "$support_root/benchmarks"
+          export PYTHONPATH="$support_root"
           for module in $(python3 -c 'import json,os; print(" ".join(json.loads(os.environ["MODULES_JSON"])))'); do
             safe="${module//\//-}"
             (
