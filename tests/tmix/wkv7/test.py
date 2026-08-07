@@ -1111,6 +1111,8 @@ def test_module_paths_and_setup_source_set_are_minimal() -> None:
         "csrc/sm120/embedding/infer_fp16_forward_varlen.cu",
         "csrc/sm120/head/linear/infer_fp16_forward_varlen.cpp",
         "csrc/sm120/head/linear/infer_fp16_forward_varlen.cu",
+        "csrc/sm120/sampling/infer_fp32_forward_varlen.cpp",
+        "csrc/sm120/sampling/infer_fp32_forward_varlen.cu",
         "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_forward.cpp",
         "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_forward.cu",
         "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_backward.cpp",
