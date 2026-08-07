@@ -17,6 +17,16 @@ The runtime and reproducible source-build contracts currently pin PyTorch
 
 ## Installation
 
+The current alpha is distributed as source and builds the CUDA extension on the
+target machine:
+
+```bash
+TORCH_CUDA_ARCH_LIST=12.0 \
+  python -m pip install --pre FlashRWKV2
+```
+
+For development from a checkout:
+
 ```bash
 git clone https://github.com/rwkv-rs/FlashRWKV2.git
 cd FlashRWKV2
@@ -27,8 +37,8 @@ TORCH_CUDA_ARCH_LIST=12.0 \
 
 ## Kernel API
 
-See the [Kernel API reference](docs/kernel_api.md) for the complete public
-operator surface and tensor contracts.
+See the [Kernel API reference](https://github.com/rwkv-rs/FlashRWKV2/blob/main/docs/kernel_api.md)
+for the complete public operator surface and tensor contracts.
 
 ## Tests
 
@@ -75,4 +85,5 @@ JSON without adding a model-level benchmark:
 
 ## License
 
-FlashRWKV2 is distributed under the [MIT License](LICENSE).
+FlashRWKV2 is distributed under the
+[MIT License](https://github.com/rwkv-rs/FlashRWKV2/blob/main/LICENSE).
