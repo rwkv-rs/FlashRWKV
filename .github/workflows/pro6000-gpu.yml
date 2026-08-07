@@ -351,6 +351,7 @@ jobs:
     if: needs.impact.outputs.run_benchmark == 'true' && needs.impact.outputs.trusted == 'true' && needs.gpu-test.result == 'success'
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         target: ${{ fromJSON(needs.impact.outputs.benchmark_matrix) }}
     runs-on: [self-hosted, linux, x64, rwkv-sha-pro6000x8]
