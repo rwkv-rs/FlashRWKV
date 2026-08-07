@@ -43,34 +43,48 @@ std::vector<torch::Tensor> tmix_lowrank_in_forward_varlen_cuda(
     torch::Tensor x_w,
     torch::Tensor x_a,
     torch::Tensor x_g,
-    torch::Tensor w1,
-    torch::Tensor a1,
-    torch::Tensor g1);
+    std::optional<torch::Tensor> w1_t,
+    std::optional<torch::Tensor> a1_t,
+    std::optional<torch::Tensor> g1_t,
+    std::optional<torch::Tensor> w1,
+    std::optional<torch::Tensor> a1,
+    std::optional<torch::Tensor> g1);
 std::vector<torch::Tensor> tmix_lowrank_wagv_in_forward_varlen_cuda(
     torch::Tensor x_w,
     torch::Tensor x_a,
     torch::Tensor x_g,
     torch::Tensor x_v,
-    torch::Tensor w1,
-    torch::Tensor a1,
-    torch::Tensor g1,
-    torch::Tensor v1);
+    std::optional<torch::Tensor> w1_t,
+    std::optional<torch::Tensor> a1_t,
+    std::optional<torch::Tensor> g1_t,
+    std::optional<torch::Tensor> v1_t,
+    std::optional<torch::Tensor> w1,
+    std::optional<torch::Tensor> a1,
+    std::optional<torch::Tensor> g1,
+    std::optional<torch::Tensor> v1);
 std::vector<torch::Tensor> tmix_lowrank_out_forward_varlen_cuda(
     torch::Tensor w1,
     torch::Tensor a1,
     torch::Tensor g1,
-    torch::Tensor w2,
-    torch::Tensor a2,
-    torch::Tensor g2);
+    std::optional<torch::Tensor> w2_t,
+    std::optional<torch::Tensor> a2_t,
+    std::optional<torch::Tensor> g2_t,
+    std::optional<torch::Tensor> w2,
+    std::optional<torch::Tensor> a2,
+    std::optional<torch::Tensor> g2);
 std::vector<torch::Tensor> tmix_lowrank_vres_forward_varlen_cuda(
     torch::Tensor w1,
     torch::Tensor a1,
     torch::Tensor g1,
     torch::Tensor v1,
-    torch::Tensor w2,
-    torch::Tensor a2,
-    torch::Tensor g2,
-    torch::Tensor v2,
+    std::optional<torch::Tensor> w2_t,
+    std::optional<torch::Tensor> a2_t,
+    std::optional<torch::Tensor> g2_t,
+    std::optional<torch::Tensor> v2_t,
+    std::optional<torch::Tensor> w2,
+    std::optional<torch::Tensor> a2,
+    std::optional<torch::Tensor> g2,
+    std::optional<torch::Tensor> v2,
     torch::Tensor v,
     torch::Tensor v_first,
     torch::Tensor v0);
@@ -109,7 +123,8 @@ void check_rank_dispatch(
     const torch::Tensor& x,
     const std::optional<torch::Tensor>& weight,
     const std::optional<torch::Tensor>& weight_t,
-    bool input_projection) {
+    bool input_projection,
+    bool enforce_lowrank_limit = false) {
   check_half(x, "x");
   TORCH_CHECK(x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
               "x must have packed shape [total_tokens,features]");
@@ -145,6 +160,11 @@ void check_rank_dispatch(
     TORCH_CHECK(runtime_rank == original_rank,
                 "weight and weight_t must describe the same rank projection");
   }
+  const int64_t rank = weight.has_value()
+      ? (input_projection ? weight->size(1) : weight->size(0))
+      : (input_projection ? weight_t->size(0) : weight_t->size(1));
+  TORCH_CHECK(!enforce_lowrank_limit || rank <= 512,
+              "low-rank projection requires R<=512");
 }
 
 }  // namespace
@@ -262,27 +282,21 @@ std::vector<torch::Tensor> tmix_lowrank_in_forward_varlen(
     torch::Tensor x_w,
     torch::Tensor x_a,
     torch::Tensor x_g,
-    torch::Tensor w1,
-    torch::Tensor a1,
-    torch::Tensor g1) {
+    std::optional<torch::Tensor> w1_t,
+    std::optional<torch::Tensor> a1_t,
+    std::optional<torch::Tensor> g1_t,
+    std::optional<torch::Tensor> w1,
+    std::optional<torch::Tensor> a1,
+    std::optional<torch::Tensor> g1) {
   check_rows(x_w, x_w, "x_w");
-  for (const auto& item : {
-           std::pair<const torch::Tensor*, const char*>{&x_a, "x_a"},
-           {&x_g, "x_g"},
-       }) {
-    check_rows(*item.first, x_w, item.second);
-  }
-  for (const auto& item : {
-           std::pair<const torch::Tensor*, const char*>{&w1, "w1"},
-           {&a1, "a1"},
-           {&g1, "g1"},
-       }) {
-    check_half(*item.first, item.second);
-    check_same(x_w, *item.first, item.second);
-    TORCH_CHECK(item.first->dim() == 2 && item.first->size(1) == x_w.size(1),
-                item.second, " must have shape [rank,C]");
-  }
-  return tmix_lowrank_in_forward_varlen_cuda(x_w, x_a, x_g, w1, a1, g1);
+  check_rows(x_a, x_w, "x_a");
+  check_rows(x_g, x_w, "x_g");
+  check_rank_dispatch(x_w, w1, w1_t, true, true);
+  check_rank_dispatch(x_a, a1, a1_t, true, true);
+  check_rank_dispatch(x_g, g1, g1_t, true, true);
+  return tmix_lowrank_in_forward_varlen_cuda(
+      x_w, x_a, x_g, std::move(w1_t), std::move(a1_t),
+      std::move(g1_t), std::move(w1), std::move(a1), std::move(g1));
 }
 
 std::vector<torch::Tensor> tmix_lowrank_wagv_in_forward_varlen(
@@ -290,58 +304,47 @@ std::vector<torch::Tensor> tmix_lowrank_wagv_in_forward_varlen(
     torch::Tensor x_a,
     torch::Tensor x_g,
     torch::Tensor x_v,
-    torch::Tensor w1,
-    torch::Tensor a1,
-    torch::Tensor g1,
-    torch::Tensor v1) {
+    std::optional<torch::Tensor> w1_t,
+    std::optional<torch::Tensor> a1_t,
+    std::optional<torch::Tensor> g1_t,
+    std::optional<torch::Tensor> v1_t,
+    std::optional<torch::Tensor> w1,
+    std::optional<torch::Tensor> a1,
+    std::optional<torch::Tensor> g1,
+    std::optional<torch::Tensor> v1) {
   check_rows(x_w, x_w, "x_w");
-  for (const auto& item : {
-           std::pair<const torch::Tensor*, const char*>{&x_a, "x_a"},
-           {&x_g, "x_g"},
-           {&x_v, "x_v"},
-       }) {
-    check_rows(*item.first, x_w, item.second);
-  }
-  for (const auto& item : {
-           std::pair<const torch::Tensor*, const char*>{&w1, "w1"},
-           {&a1, "a1"},
-           {&g1, "g1"},
-           {&v1, "v1"},
-       }) {
-    check_half(*item.first, item.second);
-    check_same(x_w, *item.first, item.second);
-    TORCH_CHECK(item.first->dim() == 2 && item.first->size(1) == x_w.size(1),
-                item.second, " must have shape [rank,C]");
-  }
+  check_rows(x_a, x_w, "x_a");
+  check_rows(x_g, x_w, "x_g");
+  check_rows(x_v, x_w, "x_v");
+  check_rank_dispatch(x_w, w1, w1_t, true, true);
+  check_rank_dispatch(x_a, a1, a1_t, true, true);
+  check_rank_dispatch(x_g, g1, g1_t, true, true);
+  check_rank_dispatch(x_v, v1, v1_t, true, true);
   return tmix_lowrank_wagv_in_forward_varlen_cuda(
-      x_w, x_a, x_g, x_v, w1, a1, g1, v1);
+      x_w, x_a, x_g, x_v, std::move(w1_t), std::move(a1_t),
+      std::move(g1_t), std::move(v1_t), std::move(w1), std::move(a1),
+      std::move(g1), std::move(v1));
 }
 
 std::vector<torch::Tensor> tmix_lowrank_out_forward_varlen(
     torch::Tensor w1,
     torch::Tensor a1,
     torch::Tensor g1,
-    torch::Tensor w2,
-    torch::Tensor a2,
-    torch::Tensor g2) {
+    std::optional<torch::Tensor> w2_t,
+    std::optional<torch::Tensor> a2_t,
+    std::optional<torch::Tensor> g2_t,
+    std::optional<torch::Tensor> w2,
+    std::optional<torch::Tensor> a2,
+    std::optional<torch::Tensor> g2) {
   check_rows(w1, w1, "w1");
-  for (const auto& item : {
-           std::pair<const torch::Tensor*, const char*>{&a1, "a1"},
-           {&g1, "g1"},
-       }) {
-    check_rows(*item.first, w1, item.second);
-  }
-  for (const auto& item : {
-           std::pair<const torch::Tensor*, const char*>{&w2, "w2"},
-           {&a2, "a2"},
-           {&g2, "g2"},
-       }) {
-    check_half(*item.first, item.second);
-    check_same(w1, *item.first, item.second);
-    TORCH_CHECK(item.first->dim() == 2 && item.first->size(1) == w1.size(1),
-                item.second, " must have shape [C,rank]");
-  }
-  return tmix_lowrank_out_forward_varlen_cuda(w1, a1, g1, w2, a2, g2);
+  check_rows(a1, w1, "a1");
+  check_rows(g1, w1, "g1");
+  check_rank_dispatch(w1, w2, w2_t, false, true);
+  check_rank_dispatch(a1, a2, a2_t, false, true);
+  check_rank_dispatch(g1, g2, g2_t, false, true);
+  return tmix_lowrank_out_forward_varlen_cuda(
+      w1, a1, g1, std::move(w2_t), std::move(a2_t), std::move(g2_t),
+      std::move(w2), std::move(a2), std::move(g2));
 }
 
 std::vector<torch::Tensor> tmix_lowrank_vres_forward_varlen(
@@ -349,10 +352,14 @@ std::vector<torch::Tensor> tmix_lowrank_vres_forward_varlen(
     torch::Tensor a1,
     torch::Tensor g1,
     torch::Tensor v1,
-    torch::Tensor w2,
-    torch::Tensor a2,
-    torch::Tensor g2,
-    torch::Tensor v2,
+    std::optional<torch::Tensor> w2_t,
+    std::optional<torch::Tensor> a2_t,
+    std::optional<torch::Tensor> g2_t,
+    std::optional<torch::Tensor> v2_t,
+    std::optional<torch::Tensor> w2,
+    std::optional<torch::Tensor> a2,
+    std::optional<torch::Tensor> g2,
+    std::optional<torch::Tensor> v2,
     torch::Tensor v,
     torch::Tensor v_first,
     torch::Tensor v0) {
@@ -362,23 +369,23 @@ std::vector<torch::Tensor> tmix_lowrank_vres_forward_varlen(
        }) {
     check_rows(*item.first, w1, item.second);
   }
-  for (const auto& item : {
-           std::pair<const torch::Tensor*, const char*>{&w2, "w2"},
-           {&a2, "a2"}, {&g2, "g2"}, {&v2, "v2"},
-       }) {
-    check_half(*item.first, item.second);
-    check_same(w1, *item.first, item.second);
-    TORCH_CHECK(item.first->dim() == 2 && item.first->size(1) == w1.size(1),
-                item.second, " must have shape [C,rank]");
-  }
+  check_rank_dispatch(w1, w2, w2_t, false, true);
+  check_rank_dispatch(a1, a2, a2_t, false, true);
+  check_rank_dispatch(g1, g2, g2_t, false, true);
+  check_rank_dispatch(v1, v2, v2_t, false, true);
+  const int64_t channels = w2_t.has_value() ? w2_t->size(0) : w2->size(1);
   check_rows(v, w1, "v");
   check_rows(v_first, v, "v_first");
+  TORCH_CHECK(v.size(1) == channels,
+              "v and v_first must have shape [total_tokens,C]");
   check_half(v0, "v0");
   check_same(v, v0, "v0");
   TORCH_CHECK(v0.dim() == 1 && v0.size(0) == v.size(1),
               "v0 must have shape [C]");
   return tmix_lowrank_vres_forward_varlen_cuda(
-      w1, a1, g1, v1, w2, a2, g2, v2, v, v_first, v0);
+      w1, a1, g1, v1, std::move(w2_t), std::move(a2_t),
+      std::move(g2_t), std::move(v2_t), std::move(w2), std::move(a2),
+      std::move(g2), std::move(v2), v, v_first, v0);
 }
 
 void register_tmix_linear_bindings(py::module_& module) {
@@ -430,20 +437,28 @@ void register_tmix_linear_bindings(py::module_& module) {
       py::arg("weight_t") = py::none());
   module.def(
       "tmix_lowrank_in_forward_varlen", &tmix_lowrank_in_forward_varlen,
-      py::arg("x_w"), py::arg("x_a"), py::arg("x_g"), py::arg("w1"),
-      py::arg("a1"), py::arg("g1"));
+      py::arg("x_w"), py::arg("x_a"), py::arg("x_g"),
+      py::arg("w1_t") = py::none(), py::arg("a1_t") = py::none(),
+      py::arg("g1_t") = py::none(), py::arg("w1") = py::none(),
+      py::arg("a1") = py::none(), py::arg("g1") = py::none());
   module.def(
       "tmix_lowrank_wagv_in_forward_varlen",
       &tmix_lowrank_wagv_in_forward_varlen,
       py::arg("x_w"), py::arg("x_a"), py::arg("x_g"), py::arg("x_v"),
-      py::arg("w1"), py::arg("a1"), py::arg("g1"), py::arg("v1"));
+      py::arg("w1_t") = py::none(), py::arg("a1_t") = py::none(),
+      py::arg("g1_t") = py::none(), py::arg("v1_t") = py::none(),
+      py::arg("w1") = py::none(), py::arg("a1") = py::none(),
+      py::arg("g1") = py::none(), py::arg("v1") = py::none());
   module.def(
       "tmix_lowrank_out_forward_varlen", &tmix_lowrank_out_forward_varlen,
-      py::arg("w1"), py::arg("a1"), py::arg("g1"), py::arg("w2"),
-      py::arg("a2"), py::arg("g2"));
+      py::arg("w1"), py::arg("a1"), py::arg("g1"),
+      py::arg("w2_t") = py::none(), py::arg("a2_t") = py::none(),
+      py::arg("g2_t") = py::none(), py::arg("w2") = py::none(),
+      py::arg("a2") = py::none(), py::arg("g2") = py::none());
   module.def(
       "tmix_lowrank_vres_forward_varlen", &tmix_lowrank_vres_forward_varlen,
       py::arg("w1"), py::arg("a1"), py::arg("g1"), py::arg("v1"),
+      py::arg("w2_t"), py::arg("a2_t"), py::arg("g2_t"), py::arg("v2_t"),
       py::arg("w2"), py::arg("a2"), py::arg("g2"), py::arg("v2"),
       py::arg("v"), py::arg("v_first"), py::arg("v0"));
 }

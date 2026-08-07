@@ -56,10 +56,23 @@ WKV7 recurrent correctness benchmark with:
 These benchmarks measure individual operators. They do not report or infer
 model-level latency.
 
-## Source Attribution
+For Albatross-compatible TMix low-rank inference, `varlen` means that the
+operator consumes packed token rows; it does not mean that one fused kernel is
+used for every row count.  The public composite callers automatically use the
+canonical fused rank-in window at `M<=7`, the fused rank-out/value-residual
+window at `M<=4`, and the canonical large-row linear dispatcher otherwise.
+Callers may provide both the original checkpoint layout and a runtime layout.
+Both layouts must be prepared outside the timed forward region and retained for
+the lifetime of the inference weights; FlashRWKV never transposes or copies a
+missing layout during dispatch.
 
-Kernel provenance and ownership are recorded in the
-[RWKV7 kernel migration manifest](docs/kernels/albatross-train-temp-manifest.md).
+The existing low-rank operator benchmark reports correctness and latency as
+JSON without adding a model-level benchmark:
+
+```bash
+./.venv/bin/python benchmarks/tmix/linear/bench.py \
+  --operator projection-group --layout both --channels 4096
+```
 
 ## License
 

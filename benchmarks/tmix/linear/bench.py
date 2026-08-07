@@ -4,36 +4,424 @@ from __future__ import annotations
 
 import argparse
 import json
-import time
+import math
+import subprocess
+from collections.abc import Callable
+from pathlib import Path
 
 import torch
 
-from flash_rwkv.tmix.linear import infer_tmix_linear_forward_varlen
+from flash_rwkv.tmix.linear import (
+    infer_tmix_linear_rank_in_forward_varlen,
+    infer_tmix_linear_rank_out_forward_varlen,
+    infer_tmix_linear_rank_out_sigmoid_forward_varlen,
+    infer_tmix_linear_rank_out_tanh_forward_varlen,
+    infer_tmix_lowrank_in_forward_varlen,
+    infer_tmix_lowrank_out_forward_varlen,
+    infer_tmix_lowrank_vres_forward_varlen,
+    infer_tmix_lowrank_wagv_in_forward_varlen,
+)
+from flash_rwkv.tmix.vres_gate import infer_tmix_vres_gate_forward_varlen
+
+SOURCE_REVISION = "ee3308f6922e59f2166c7fac3c5a192340a2b48e"
+DEFAULT_ROWS = (1, 4, 5, 7, 8, 9, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512, 1024)
+DEFAULT_RANKS = (96, 128, 480)
+
+
+def _flash_rwkv_revision() -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parents[3],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return "unknown"
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=Path(__file__).resolve().parents[3],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    suffix = "+dirty" if dirty.returncode == 0 and dirty.stdout else ""
+    return result.stdout.strip() + suffix
+
+
+def _parse_ints(value: str) -> tuple[int, ...]:
+    result = tuple(int(item) for item in value.replace(",", " ").split())
+    if not result or any(item <= 0 for item in result):
+        raise argparse.ArgumentTypeError(
+            "expected a non-empty list of positive integers"
+        )
+    return result
+
+
+def _percentile(values: list[float], quantile: float) -> float:
+    return float(
+        torch.quantile(torch.tensor(values, dtype=torch.float64), quantile).item()
+    )
+
+
+def _layouts(
+    runtime: torch.Tensor, layout: str
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    original = runtime.t().contiguous()
+    if layout == "original":
+        return original, None
+    if layout == "runtime":
+        return None, runtime
+    return original, runtime
+
+
+def _metrics(
+    actual: tuple[torch.Tensor, ...], expected: tuple[torch.Tensor, ...]
+) -> dict[str, float]:
+    differences = [
+        left.float() - right.float()
+        for left, right in zip(actual, expected, strict=True)
+    ]
+    max_abs = max(float(difference.abs().max().item()) for difference in differences)
+    square_sum = sum(
+        float(difference.square().sum().item()) for difference in differences
+    )
+    elements = sum(difference.numel() for difference in differences)
+    return {"max_abs": max_abs, "rmse": math.sqrt(square_sum / elements)}
+
+
+def _time(
+    call: Callable[[], tuple[torch.Tensor, ...]], warmup: int, samples: int
+) -> list[float]:
+    for _ in range(warmup):
+        call()
+    torch.cuda.synchronize()
+    values = []
+    for _ in range(samples):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        call()
+        end.record()
+        end.synchronize()
+        values.append(float(start.elapsed_time(end)) * 1000.0)
+    return values
+
+
+def _case(
+    operator: str,
+    rows: int,
+    channels: int,
+    rank: int,
+    layout: str,
+    warmup: int,
+    samples: int,
+) -> dict[str, object]:
+    device = torch.device("cuda")
+    inputs = [
+        torch.randn(rows, channels, device=device, dtype=torch.float16)
+        for _ in range(4)
+    ]
+    rank_in_runtime = [
+        torch.randn(channels, rank, device=device, dtype=torch.float16)
+        for _ in range(4)
+    ]
+    rank_in_layouts = [_layouts(weight, layout) for weight in rank_in_runtime]
+    rank_out_runtime = [
+        torch.randn(rank, channels, device=device, dtype=torch.float16)
+        for _ in range(4)
+    ]
+    rank_out_layouts = [_layouts(weight, layout) for weight in rank_out_runtime]
+    value = torch.randn(rows, channels, device=device, dtype=torch.float16)
+    value_first = torch.randn_like(value)
+    value_bias = torch.randn(channels, device=device, dtype=torch.float16)
+
+    individual_call: Callable[[], tuple[torch.Tensor, ...]]
+    if operator == "rank-in":
+        call = lambda: (
+            infer_tmix_linear_rank_in_forward_varlen(
+                inputs[0], weight=rank_in_layouts[0][1], weight_t=rank_in_layouts[0][0]
+            ),
+        )
+        expected = (inputs[0].float() @ rank_in_runtime[0].float(),)
+        individual_call = call
+        dispatch = "linear_t_f16" if rows <= 7 and layout != "runtime" else "large-auto"
+    elif operator == "rank-out":
+        rank_input = torch.randn(rows, rank, device=device, dtype=torch.float16)
+        call = lambda: (
+            infer_tmix_linear_rank_out_forward_varlen(
+                rank_input,
+                weight=rank_out_layouts[0][1],
+                weight_t=rank_out_layouts[0][0],
+            ),
+        )
+        expected = (rank_input.float() @ rank_out_runtime[0].float(),)
+        individual_call = call
+        dispatch = "linear_t_f16" if rows <= 4 and layout != "runtime" else "large-auto"
+    else:
+        rank_inputs = lambda: infer_tmix_lowrank_wagv_in_forward_varlen(
+            *inputs,
+            *(weights[0] for weights in rank_in_layouts),
+            w1_runtime=rank_in_layouts[0][1],
+            a1_runtime=rank_in_layouts[1][1],
+            g1_runtime=rank_in_layouts[2][1],
+            v1_runtime=rank_in_layouts[3][1],
+        )
+        individual_rank_inputs = lambda: tuple(
+            infer_tmix_linear_rank_in_forward_varlen(
+                source, weight=weights[1], weight_t=weights[0]
+            )
+            for source, weights in zip(inputs, rank_in_layouts, strict=True)
+        )
+
+        def individual_rank_outputs(
+            projected: tuple[torch.Tensor, ...],
+        ) -> tuple[torch.Tensor, ...]:
+            return (
+                infer_tmix_linear_rank_out_tanh_forward_varlen(
+                    projected[0],
+                    weight=rank_out_layouts[0][1],
+                    weight_t=rank_out_layouts[0][0],
+                ),
+                infer_tmix_linear_rank_out_forward_varlen(
+                    projected[1],
+                    weight=rank_out_layouts[1][1],
+                    weight_t=rank_out_layouts[1][0],
+                ),
+                infer_tmix_linear_rank_out_sigmoid_forward_varlen(
+                    projected[2],
+                    weight=rank_out_layouts[2][1],
+                    weight_t=rank_out_layouts[2][0],
+                ),
+            )
+
+        def public_vres(
+            projected: tuple[torch.Tensor, ...],
+        ) -> tuple[torch.Tensor, ...]:
+            return infer_tmix_lowrank_vres_forward_varlen(
+                *projected,
+                *(weights[0] for weights in rank_out_layouts),
+                value,
+                value_first,
+                value_bias,
+                w2_runtime=rank_out_layouts[0][1],
+                a2_runtime=rank_out_layouts[1][1],
+                g2_runtime=rank_out_layouts[2][1],
+                v2_runtime=rank_out_layouts[3][1],
+            )
+
+        def individual_vres(
+            projected: tuple[torch.Tensor, ...],
+        ) -> tuple[torch.Tensor, ...]:
+            outputs = individual_rank_outputs(projected)
+            value_delta = infer_tmix_linear_rank_out_forward_varlen(
+                projected[3],
+                weight=rank_out_layouts[3][1],
+                weight_t=rank_out_layouts[3][0],
+            )
+            return outputs + (
+                infer_tmix_vres_gate_forward_varlen(
+                    value, value_first, value_bias, value_delta
+                ),
+            )
+
+        if operator == "wag":
+            call = lambda: infer_tmix_lowrank_in_forward_varlen(
+                *inputs[:3],
+                *(weights[0] for weights in rank_in_layouts[:3]),
+                w1_runtime=rank_in_layouts[0][1],
+                a1_runtime=rank_in_layouts[1][1],
+                g1_runtime=rank_in_layouts[2][1],
+            )
+            expected = tuple(
+                source.float() @ weight.float()
+                for source, weight in zip(inputs[:3], rank_in_runtime[:3], strict=True)
+            )
+            individual_call = lambda: individual_rank_inputs()[:3]
+        elif operator == "wagv":
+            call = rank_inputs
+            expected = tuple(
+                source.float() @ weight.float()
+                for source, weight in zip(inputs, rank_in_runtime, strict=True)
+            )
+            individual_call = individual_rank_inputs
+        else:
+            projected = rank_inputs()
+            if operator == "rank-out-group":
+                call = lambda: infer_tmix_lowrank_out_forward_varlen(
+                    *projected[:3],
+                    *(weights[0] for weights in rank_out_layouts[:3]),
+                    w2_runtime=rank_out_layouts[0][1],
+                    a2_runtime=rank_out_layouts[1][1],
+                    g2_runtime=rank_out_layouts[2][1],
+                )
+                expected = (
+                    torch.tanh(projected[0].float()) @ rank_out_runtime[0].float(),
+                    projected[1].float() @ rank_out_runtime[1].float(),
+                    torch.sigmoid(projected[2].float()) @ rank_out_runtime[2].float(),
+                )
+                individual_call = lambda: individual_rank_outputs(projected)
+            elif operator == "vres":
+                call = lambda: public_vres(projected)
+                individual_call = lambda: individual_vres(projected)
+                value_delta = projected[3].float() @ rank_out_runtime[3].float()
+                expected = (
+                    torch.tanh(projected[0].float()) @ rank_out_runtime[0].float(),
+                    projected[1].float() @ rank_out_runtime[1].float(),
+                    torch.sigmoid(projected[2].float()) @ rank_out_runtime[2].float(),
+                    value.float()
+                    + (value_first.float() - value.float())
+                    * torch.sigmoid(value_bias.float() + value_delta),
+                )
+            else:
+                call = lambda: public_vres(rank_inputs())
+                individual_call = lambda: individual_vres(individual_rank_inputs())
+                rank_in_reference = tuple(
+                    source.float() @ weight.float()
+                    for source, weight in zip(inputs, rank_in_runtime, strict=True)
+                )
+                if not all(
+                    torch.allclose(actual_rank.float(), reference, atol=0.08, rtol=0.08)
+                    for actual_rank, reference in zip(
+                        projected, rank_in_reference, strict=True
+                    )
+                ):
+                    raise RuntimeError(
+                        "projection-group rank-in correctness gate failed"
+                    )
+                projected_expected = tuple(
+                    rank_feature.float() for rank_feature in projected
+                )
+                value_delta = projected_expected[3] @ rank_out_runtime[3].float()
+                expected = (
+                    torch.tanh(projected_expected[0]) @ rank_out_runtime[0].float(),
+                    projected_expected[1] @ rank_out_runtime[1].float(),
+                    torch.sigmoid(projected_expected[2]) @ rank_out_runtime[2].float(),
+                    value.float()
+                    + (value_first.float() - value.float())
+                    * torch.sigmoid(value_bias.float() + value_delta),
+                )
+        if operator == "projection-group":
+            dispatch = {
+                "rank_in": (
+                    "fused-composite"
+                    if rows <= 7 and layout != "runtime"
+                    else "large-auto"
+                ),
+                "rank_out": (
+                    "fused-composite"
+                    if rows <= 4 and layout != "runtime"
+                    else "large-auto"
+                ),
+                "value_residual": (
+                    "fused-composite"
+                    if rows <= 4 and layout != "runtime"
+                    else "large-auto+vres-gate"
+                ),
+            }
+        else:
+            limit = 4 if operator in ("rank-out-group", "vres") else 7
+            dispatch = (
+                "fused-composite"
+                if rows <= limit and layout != "runtime"
+                else "large-auto"
+            )
+
+    torch.cuda.reset_peak_memory_stats()
+    actual = tuple(call())
+    correctness = _metrics(actual, tuple(expected))
+    if not all(torch.isfinite(tensor).all().item() for tensor in actual):
+        raise RuntimeError("non-finite output")
+    if not all(
+        torch.allclose(left.float(), right.float(), atol=0.08, rtol=0.08)
+        for left, right in zip(actual, expected, strict=True)
+    ):
+        raise RuntimeError(f"correctness gate failed: {correctness}")
+    individual_actual = tuple(individual_call())
+    if not all(
+        torch.allclose(left.float(), right.float(), atol=0.04, rtol=0.04)
+        for left, right in zip(actual, individual_actual, strict=True)
+    ):
+        raise RuntimeError("public composite and individual canonical paths disagree")
+    torch.cuda.reset_peak_memory_stats()
+    raw_latency_us = _time(call, warmup, samples)
+    public_peak_allocated = torch.cuda.max_memory_allocated()
+    public_peak_reserved = torch.cuda.max_memory_reserved()
+    individual_latency_us = _time(individual_call, warmup, samples)
+    return {
+        "operator": operator,
+        "rows": rows,
+        "channels": channels,
+        "rank": rank,
+        "weight_layout": layout,
+        "expected_dispatch_family": dispatch,
+        "warmup": warmup,
+        "samples": samples,
+        "raw_latency_us": raw_latency_us,
+        "p10_us": _percentile(raw_latency_us, 0.10),
+        "p50_us": _percentile(raw_latency_us, 0.50),
+        "p90_us": _percentile(raw_latency_us, 0.90),
+        "individual_raw_latency_us": individual_latency_us,
+        "individual_p10_us": _percentile(individual_latency_us, 0.10),
+        "individual_p50_us": _percentile(individual_latency_us, 0.50),
+        "individual_p90_us": _percentile(individual_latency_us, 0.90),
+        "correctness": correctness,
+        "peak_allocated_bytes": public_peak_allocated,
+        "peak_reserved_bytes": public_peak_reserved,
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tokens", type=int, default=256)
+    parser.add_argument(
+        "--operator",
+        choices=(
+            "rank-in",
+            "rank-out",
+            "wag",
+            "wagv",
+            "rank-out-group",
+            "vres",
+            "projection-group",
+        ),
+        default="wag",
+    )
+    parser.add_argument("--rows", type=_parse_ints, default=DEFAULT_ROWS)
+    parser.add_argument("--ranks", type=_parse_ints, default=DEFAULT_RANKS)
     parser.add_argument("--channels", type=int, default=4096)
-    parser.add_argument("--output-channels", type=int, default=4096)
+    parser.add_argument(
+        "--layout", choices=("original", "runtime", "both"), default="both"
+    )
+    parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--samples", type=int, default=30)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
-    device = torch.device("cuda")
-    x = torch.randn(args.tokens, args.channels, device=device, dtype=torch.float16)
-    weight = torch.randn(args.output_channels, args.channels, device=device, dtype=torch.float16)
-    for _ in range(10):
-        infer_tmix_linear_forward_varlen(x, weight)
-    torch.cuda.synchronize()
-    samples = []
-    for _ in range(args.samples):
-        start = time.perf_counter()
-        infer_tmix_linear_forward_varlen(x, weight)
-        torch.cuda.synchronize()
-        samples.append((time.perf_counter() - start) * 1e6)
-    result = {"operator": "infer_tmix_linear_forward_varlen", "raw_latency_us": samples, "p50_us": sorted(samples)[len(samples) // 2], "source_revision": "ee3308f6922e59f2166c7fac3c5a192340a2b48e", "gpu": torch.cuda.get_device_name(), "correctness": "validated-by-tests/tmix/linear/test.py"}
-    print(json.dumps(result))
+    if args.channels <= 0 or args.warmup < 0 or args.samples <= 0:
+        raise ValueError(
+            "channels and samples must be positive; warmup must be non-negative"
+        )
+
+    metadata = {
+        "benchmark": "flash_rwkv_tmix_lowrank_dispatch",
+        "source_revision": SOURCE_REVISION,
+        "flash_rwkv_revision": _flash_rwkv_revision(),
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "gpu": torch.cuda.get_device_name(),
+    }
+    for rows in args.rows:
+        for rank in args.ranks:
+            result = _case(
+                args.operator,
+                rows,
+                args.channels,
+                rank,
+                args.layout,
+                args.warmup,
+                args.samples,
+            )
+            print(json.dumps(metadata | result), flush=True)
 
 
 if __name__ == "__main__":

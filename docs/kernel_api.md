@@ -317,33 +317,39 @@ outputs. `M` denotes packed rows, `K` input features, `N` output features, and
 
 - Import: `from flash_rwkv import infer_tmix_lowrank_in_forward_varlen`
 - Owner: `flash_rwkv.tmix.linear`
-- Signature: `infer_tmix_lowrank_in_forward_varlen(x_w, x_a, x_g, w1, a1, g1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
-- Contract: three packed sources `[M,C]` and three first-stage weights `[R,C]`.
-- Result: returns the W/A/G rank projections, each `[M,R]`; inputs are not mutated.
+- Signature: `infer_tmix_lowrank_in_forward_varlen(x_w, x_a, x_g, w1, a1, g1, *, w1_runtime=None, a1_runtime=None, g1_runtime=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
+- Contract: three packed sources `[M,C]`; each projection requires an original-layout `[R,C]` positional weight, a runtime-layout `[C,R]` keyword weight, or both. `R<=512`.
+- Dispatch and result: `M<=7` uses the fused original-layout W/A/G family when all original weights are present. Other cases use the canonical Albatross large-row dispatcher and its available-layout policy. Returns three `[M,R]` tensors without mutating or converting inputs.
 
 ### `infer_tmix_lowrank_wagv_in_forward_varlen`
 
 - Import: `from flash_rwkv import infer_tmix_lowrank_wagv_in_forward_varlen`
 - Owner: `flash_rwkv.tmix.linear`
-- Signature: `infer_tmix_lowrank_wagv_in_forward_varlen(x_w, x_a, x_g, x_v, w1, a1, g1, v1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
-- Contract: four packed sources `[M,C]` and four first-stage weights `[R,C]`.
-- Result: returns W/A/G/V rank projections `[M,R]`; inputs are not mutated.
+- Signature: `infer_tmix_lowrank_wagv_in_forward_varlen(x_w, x_a, x_g, x_v, w1, a1, g1, v1, *, w1_runtime=None, a1_runtime=None, g1_runtime=None, v1_runtime=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
+- Contract: four packed sources `[M,C]`; each projection accepts original `[R,C]`, runtime `[C,R]`, or both layouts. `R<=512`.
+- Dispatch and result: the fused original-layout W/A/G/V family is selected only for `M<=7` with every original weight available. Larger or runtime-only inputs use canonical large-row dispatch and return four `[M,R]` tensors.
 
 ### `infer_tmix_lowrank_out_forward_varlen`
 
 - Import: `from flash_rwkv import infer_tmix_lowrank_out_forward_varlen`
 - Owner: `flash_rwkv.tmix.linear`
-- Signature: `infer_tmix_lowrank_out_forward_varlen(w1, a1, g1, w2, a2, g2) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
-- Contract: rank features `w1`, `a1`, and `g1 [M,R]`; second-stage weights `w2`, `a2`, and `g2 [C,R]`.
-- Result: returns tanh-projected W, linear A, and sigmoid-projected G outputs `[M,C]`.
+- Signature: `infer_tmix_lowrank_out_forward_varlen(w1, a1, g1, w2, a2, g2, *, w2_runtime=None, a2_runtime=None, g2_runtime=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
+- Contract: rank features `[M,R]`; each projection accepts original `[C,R]`, runtime `[R,C]`, or both layouts. `R<=512`.
+- Dispatch and result: `M<=4` with all original weights uses fused rank-out. Otherwise native composition applies tanh to W and sigmoid to G before canonical large-row dispatch. Returns W/A/G `[M,C]` without timed layout conversion.
 
 ### `infer_tmix_lowrank_vres_forward_varlen`
 
 - Import: `from flash_rwkv import infer_tmix_lowrank_vres_forward_varlen`
 - Owner: `flash_rwkv.tmix.linear`
-- Signature: `infer_tmix_lowrank_vres_forward_varlen(w1, a1, g1, v1, w2, a2, g2, v2, v, v_first, v0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
-- Contract: W/A/G/V rank features `[M,R]`, second-stage weights `[C,R]`, value tensors `[M,C]`, and `v0 [C]`.
-- Result: returns W/A/G projections plus gated value-residual output, each `[M,C]`.
+- Signature: `infer_tmix_lowrank_vres_forward_varlen(w1, a1, g1, v1, w2, a2, g2, v2, v, v_first, v0, *, w2_runtime=None, a2_runtime=None, g2_runtime=None, v2_runtime=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
+- Contract: W/A/G/V rank features `[M,R]`; each second-stage projection accepts original `[C,R]`, runtime `[R,C]`, or both layouts. Value tensors are `[M,C]`, `v0 [C]`, and `R<=512`.
+- Dispatch and result: `M<=4` with every original weight uses fused W/A/G/V plus value residual. Other cases use canonical rank-out dispatch for W/A/G/V followed by `infer_tmix_vres_gate_forward_varlen`; no Torch/ATen fallback or layout conversion is performed.
+
+For these four composite APIs, `M` is total packed rows, not a promise that a
+single fused body accepts arbitrary `M`. If both layouts are supplied, native
+dispatch chooses the fixed Albatross winner. Callers own layout preparation and
+lifetime; runtime layouts should be inference-only non-persistent buffers and
+must be rebuilt after weight, device, or dtype changes.
 
 ## ChannelMix inference
 
@@ -841,28 +847,32 @@ column means that the argument is optional.
 | Parameter | Dtype | Shape | Description |
 | --- | --- | --- | --- |
 | `x_w`, `x_a`, `x_g` | fp16 | `[M,C]` each | W/A/G full-rank source rows. |
-| `w1`, `a1`, `g1` | fp16 | `[R,C]` each | First-stage rank projections. |
+| `w1`, `a1`, `g1` | fp16/None | `[R,C]` each | Original-layout projections; positional compatibility is retained. |
+| `w1_runtime`, `a1_runtime`, `g1_runtime` | fp16/None | `[C,R]` each | Keyword-only runtime layouts prepared by the caller. Each projection requires at least one layout. |
 
 #### `infer_tmix_lowrank_wagv_in_forward_varlen`
 
 | Parameter | Dtype | Shape | Description |
 | --- | --- | --- | --- |
 | `x_w`, `x_a`, `x_g`, `x_v` | fp16 | `[M,C]` each | W/A/G/V full-rank source rows. |
-| `w1`, `a1`, `g1`, `v1` | fp16 | `[R,C]` each | First-stage rank projections. |
+| `w1`, `a1`, `g1`, `v1` | fp16/None | `[R,C]` each | Original-layout projections. |
+| `w1_runtime`, `a1_runtime`, `g1_runtime`, `v1_runtime` | fp16/None | `[C,R]` each | Keyword-only runtime layouts; no in-call transpose is performed. |
 
 #### `infer_tmix_lowrank_out_forward_varlen`
 
 | Parameter | Dtype | Shape | Description |
 | --- | --- | --- | --- |
 | `w1`, `a1`, `g1` | fp16 | `[M,R]` each | W/A/G rank features. |
-| `w2`, `a2`, `g2` | fp16 | `[C,R]` each | Second-stage projections. |
+| `w2`, `a2`, `g2` | fp16/None | `[C,R]` each | Original-layout second-stage projections. |
+| `w2_runtime`, `a2_runtime`, `g2_runtime` | fp16/None | `[R,C]` each | Keyword-only runtime layouts prepared outside forward. |
 
 #### `infer_tmix_lowrank_vres_forward_varlen`
 
 | Parameter | Dtype | Shape | Description |
 | --- | --- | --- | --- |
 | `w1`, `a1`, `g1`, `v1` | fp16 | `[M,R]` each | W/A/G/V rank features. |
-| `w2`, `a2`, `g2`, `v2` | fp16 | `[C,R]` each | Second-stage projections. |
+| `w2`, `a2`, `g2`, `v2` | fp16/None | `[C,R]` each | Original-layout second-stage projections. |
+| `w2_runtime`, `a2_runtime`, `g2_runtime`, `v2_runtime` | fp16/None | `[R,C]` each | Keyword-only runtime layouts prepared outside forward. |
 | `v`, `v_first` | fp16 | `[M,C]` each | Current and first-layer values. |
 | `v0` | fp16 | `[C]` | Value-residual gate bias. |
 

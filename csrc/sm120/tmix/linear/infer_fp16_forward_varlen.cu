@@ -28,6 +28,14 @@
 using dtype = at::Half;
 namespace wmma = nvcuda::wmma;
 
+void tmix_vres_gate_forward_varlen_cuda(
+    int total_tokens,
+    int channels,
+    at::Tensor v,
+    at::Tensor v_first,
+    at::Tensor v0,
+    at::Tensor v12,
+    at::Tensor output);
 
 namespace {
 
@@ -2987,10 +2995,22 @@ std::vector<at::Tensor> tmix_lowrank_in_forward_varlen_cuda(
     at::Tensor x_w,
     at::Tensor x_a,
     at::Tensor x_g,
-    at::Tensor w1,
-    at::Tensor a1,
-    at::Tensor g1) {
-  return linear_wag_rank_in_f16_cuda(x_w, x_a, x_g, w1, a1, g1);
+    std::optional<at::Tensor> w1_t,
+    std::optional<at::Tensor> a1_t,
+    std::optional<at::Tensor> g1_t,
+    std::optional<at::Tensor> w1,
+    std::optional<at::Tensor> a1,
+    std::optional<at::Tensor> g1) {
+  const int64_t rows = x_w.size(0);
+  if (rows <= 7 && w1_t.has_value() && a1_t.has_value() && g1_t.has_value()) {
+    return linear_wag_rank_in_f16_cuda(
+        x_w, x_a, x_g, *w1_t, *a1_t, *g1_t);
+  }
+  return {
+      linear_lowrank_large_dispatch_f16_cuda(x_w, w1, w1_t, true),
+      linear_lowrank_large_dispatch_f16_cuda(x_a, a1, a1_t, true),
+      linear_lowrank_large_dispatch_f16_cuda(x_g, g1, g1_t, true),
+  };
 }
 
 std::vector<at::Tensor> tmix_lowrank_wagv_in_forward_varlen_cuda(
@@ -2998,22 +3018,52 @@ std::vector<at::Tensor> tmix_lowrank_wagv_in_forward_varlen_cuda(
     at::Tensor x_a,
     at::Tensor x_g,
     at::Tensor x_v,
-    at::Tensor w1,
-    at::Tensor a1,
-    at::Tensor g1,
-    at::Tensor v1) {
-  return linear_wagv_rank_in_f16_cuda(
-      x_w, x_a, x_g, x_v, w1, a1, g1, v1);
+    std::optional<at::Tensor> w1_t,
+    std::optional<at::Tensor> a1_t,
+    std::optional<at::Tensor> g1_t,
+    std::optional<at::Tensor> v1_t,
+    std::optional<at::Tensor> w1,
+    std::optional<at::Tensor> a1,
+    std::optional<at::Tensor> g1,
+    std::optional<at::Tensor> v1) {
+  const int64_t rows = x_w.size(0);
+  if (rows <= 7 && w1_t.has_value() && a1_t.has_value() &&
+      g1_t.has_value() && v1_t.has_value()) {
+    return linear_wagv_rank_in_f16_cuda(
+        x_w, x_a, x_g, x_v, *w1_t, *a1_t, *g1_t, *v1_t);
+  }
+  return {
+      linear_lowrank_large_dispatch_f16_cuda(x_w, w1, w1_t, true),
+      linear_lowrank_large_dispatch_f16_cuda(x_a, a1, a1_t, true),
+      linear_lowrank_large_dispatch_f16_cuda(x_g, g1, g1_t, true),
+      linear_lowrank_large_dispatch_f16_cuda(x_v, v1, v1_t, true),
+  };
 }
 
 std::vector<at::Tensor> tmix_lowrank_out_forward_varlen_cuda(
     at::Tensor w1,
     at::Tensor a1,
     at::Tensor g1,
-    at::Tensor w2,
-    at::Tensor a2,
-    at::Tensor g2) {
-  return linear_wag_rank_out_f16_cuda(w1, a1, g1, w2, a2, g2);
+    std::optional<at::Tensor> w2_t,
+    std::optional<at::Tensor> a2_t,
+    std::optional<at::Tensor> g2_t,
+    std::optional<at::Tensor> w2,
+    std::optional<at::Tensor> a2,
+    std::optional<at::Tensor> g2) {
+  const int64_t rows = w1.size(0);
+  if (rows <= 4 && w2_t.has_value() && a2_t.has_value() && g2_t.has_value()) {
+    return linear_wag_rank_out_f16_cuda(
+        w1, a1, g1, *w2_t, *a2_t, *g2_t);
+  }
+  auto w1_activated = tmix_linear_act_tanh_forward_varlen_cuda(w1);
+  auto g1_activated = tmix_linear_act_sigmoid_forward_varlen_cuda(g1);
+  return {
+      linear_lowrank_large_dispatch_f16_cuda(
+          w1_activated, w2, w2_t, false),
+      linear_lowrank_large_dispatch_f16_cuda(a1, a2, a2_t, false),
+      linear_lowrank_large_dispatch_f16_cuda(
+          g1_activated, g2, g2_t, false),
+  };
 }
 
 std::vector<at::Tensor> tmix_lowrank_vres_forward_varlen_cuda(
@@ -3021,13 +3071,30 @@ std::vector<at::Tensor> tmix_lowrank_vres_forward_varlen_cuda(
     at::Tensor a1,
     at::Tensor g1,
     at::Tensor v1,
-    at::Tensor w2,
-    at::Tensor a2,
-    at::Tensor g2,
-    at::Tensor v2,
+    std::optional<at::Tensor> w2_t,
+    std::optional<at::Tensor> a2_t,
+    std::optional<at::Tensor> g2_t,
+    std::optional<at::Tensor> v2_t,
+    std::optional<at::Tensor> w2,
+    std::optional<at::Tensor> a2,
+    std::optional<at::Tensor> g2,
+    std::optional<at::Tensor> v2,
     at::Tensor v,
     at::Tensor v_first,
     at::Tensor v0) {
-  return linear_wagv_rank_out_f16_cuda(
-      w1, a1, g1, v1, w2, a2, g2, v2, v, v_first, v0);
+  const int64_t rows = w1.size(0);
+  if (rows <= 4 && w2_t.has_value() && a2_t.has_value() &&
+      g2_t.has_value() && v2_t.has_value()) {
+    return linear_wagv_rank_out_f16_cuda(
+        w1, a1, g1, v1, *w2_t, *a2_t, *g2_t, *v2_t,
+        v, v_first, v0);
+  }
+  auto wag = tmix_lowrank_out_forward_varlen_cuda(
+      w1, a1, g1, w2_t, a2_t, g2_t, w2, a2, g2);
+  auto v12 = linear_lowrank_large_dispatch_f16_cuda(v1, v2, v2_t, false);
+  auto value = at::empty_like(v);
+  tmix_vres_gate_forward_varlen_cuda(
+      static_cast<int>(rows), static_cast<int>(v.size(1)),
+      v, v_first, v0, v12, value);
+  return {wag[0], wag[1], wag[2], value};
 }

@@ -140,9 +140,7 @@ def infer_tmix_linear_t_vres_forward_varlen(
         or v0.shape != (weight_t.shape[0],)
     ):
         raise ValueError("v0 must be contiguous CUDA float16 with shape [N]")
-    return _extension().tmix_linear_t_vres_forward_varlen(
-        x, weight_t, v, v_first, v0
-    )
+    return _extension().tmix_linear_t_vres_forward_varlen(x, weight_t, v, v_first, v0)
 
 
 def _check_rank_source(
@@ -151,24 +149,52 @@ def _check_rank_source(
     weight_t: torch.Tensor | None,
     *,
     input_projection: bool,
+    enforce_lowrank_limit: bool = False,
 ) -> None:
     if weight is None and weight_t is None:
         raise ValueError("one of weight or weight_t must be provided")
     if weight is not None:
-        if weight.dtype != torch.float16 or not weight.is_cuda or not weight.is_contiguous():
+        if (
+            weight.dtype != torch.float16
+            or not weight.is_cuda
+            or not weight.is_contiguous()
+        ):
             raise ValueError("weight must be contiguous CUDA float16")
-        if weight.device != x.device or weight.ndim != 2 or weight.shape[0] != x.shape[1]:
+        if (
+            weight.device != x.device
+            or weight.ndim != 2
+            or weight.shape[0] != x.shape[1]
+        ):
             raise ValueError(
                 "weight must have shape [input,rank] for rank-in or [rank,output] for rank-out"
             )
     if weight_t is not None:
-        if weight_t.dtype != torch.float16 or not weight_t.is_cuda or not weight_t.is_contiguous():
+        if (
+            weight_t.dtype != torch.float16
+            or not weight_t.is_cuda
+            or not weight_t.is_contiguous()
+        ):
             raise ValueError("weight_t must be contiguous CUDA float16")
-        if weight_t.device != x.device or weight_t.ndim != 2 or weight_t.shape[1] != x.shape[1]:
+        if (
+            weight_t.device != x.device
+            or weight_t.ndim != 2
+            or weight_t.shape[1] != x.shape[1]
+        ):
             raise ValueError(
                 "weight_t must have shape [rank,input] for rank-in or [output,rank] for rank-out"
             )
-    if weight is not None and weight_t is not None and weight.shape[1] != weight_t.shape[0]:
+    rank = (
+        (weight.shape[1] if input_projection else weight.shape[0])
+        if weight is not None
+        else (weight_t.shape[0] if input_projection else weight_t.shape[1])
+    )
+    if enforce_lowrank_limit and rank > 512:
+        raise ValueError("low-rank projection requires R<=512")
+    if (
+        weight is not None
+        and weight_t is not None
+        and weight.shape[1] != weight_t.shape[0]
+    ):
         raise ValueError("weight and weight_t must describe the same rank projection")
 
 
@@ -189,9 +215,7 @@ def infer_tmix_linear_rank_in_forward_varlen(
     _check_rank_source(x, weight, weight_t, input_projection=True)
     if weight_t is not None and x.shape[0] <= 7:
         return infer_tmix_linear_t_forward_varlen(x, weight_t)
-    return _extension().tmix_linear_rank_in_dispatch_forward_varlen(
-        x, weight, weight_t
-    )
+    return _extension().tmix_linear_rank_in_dispatch_forward_varlen(x, weight, weight_t)
 
 
 def infer_tmix_linear_rank_out_forward_varlen(
@@ -249,20 +273,43 @@ def infer_tmix_lowrank_in_forward_varlen(
     x_w: torch.Tensor,
     x_a: torch.Tensor,
     x_g: torch.Tensor,
-    w1: torch.Tensor,
-    a1: torch.Tensor,
-    g1: torch.Tensor,
+    w1: torch.Tensor | None,
+    a1: torch.Tensor | None,
+    g1: torch.Tensor | None,
+    *,
+    w1_runtime: torch.Tensor | None = None,
+    a1_runtime: torch.Tensor | None = None,
+    g1_runtime: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Canonical W/A/G rank-in dispatch over packed rows.
+
+    The positional weights keep the existing original layout ``[rank,C]``.
+    Optional runtime weights use ``[C,rank]``.  Callers should prepare both
+    layouts once when they want every Albatross tuned-table winner available.
+    """
+
     rows = x_w.shape[0]
     for name, tensor in (("x_w", x_w), ("x_a", x_a), ("x_g", x_g)):
         _check_rows(tensor, name, rows=rows)
         if tensor.device != x_w.device:
             raise ValueError(f"{name} must share x_w's device")
-    for name, tensor in (("w1", w1), ("a1", a1), ("g1", g1)):
-        _check_rows(tensor, name)
-        if tensor.device != x_w.device or tensor.shape[1] != x_w.shape[1]:
-            raise ValueError(f"{name} must have shape [rank,C]")
-    return tuple(_extension().tmix_lowrank_in_forward_varlen(x_w, x_a, x_g, w1, a1, g1))
+    for source, original, runtime in (
+        (x_w, w1, w1_runtime),
+        (x_a, a1, a1_runtime),
+        (x_g, g1, g1_runtime),
+    ):
+        _check_rank_source(
+            source,
+            runtime,
+            original,
+            input_projection=True,
+            enforce_lowrank_limit=True,
+        )
+    return tuple(
+        _extension().tmix_lowrank_in_forward_varlen(
+            x_w, x_a, x_g, w1, a1, g1, w1_runtime, a1_runtime, g1_runtime
+        )
+    )
 
 
 def infer_tmix_lowrank_wagv_in_forward_varlen(
@@ -270,12 +317,17 @@ def infer_tmix_lowrank_wagv_in_forward_varlen(
     x_a: torch.Tensor,
     x_g: torch.Tensor,
     x_v: torch.Tensor,
-    w1: torch.Tensor,
-    a1: torch.Tensor,
-    g1: torch.Tensor,
-    v1: torch.Tensor,
+    w1: torch.Tensor | None,
+    a1: torch.Tensor | None,
+    g1: torch.Tensor | None,
+    v1: torch.Tensor | None,
+    *,
+    w1_runtime: torch.Tensor | None = None,
+    a1_runtime: torch.Tensor | None = None,
+    g1_runtime: torch.Tensor | None = None,
+    v1_runtime: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Packed Albatross ``linear_wagv_rank_in_f16`` caller path."""
+    """Canonical W/A/G/V rank-in dispatch over packed rows."""
 
     rows = x_w.shape[0]
     for name, tensor in (
@@ -287,13 +339,33 @@ def infer_tmix_lowrank_wagv_in_forward_varlen(
         _check_rows(tensor, name, rows=rows)
         if tensor.device != x_w.device or tensor.shape[1] != x_w.shape[1]:
             raise ValueError(f"{name} must match x_w's packed shape and device")
-    for name, tensor in (("w1", w1), ("a1", a1), ("g1", g1), ("v1", v1)):
-        _check_rows(tensor, name)
-        if tensor.device != x_w.device or tensor.shape[1] != x_w.shape[1]:
-            raise ValueError(f"{name} must have shape [rank,C]")
+    for source, original, runtime in (
+        (x_w, w1, w1_runtime),
+        (x_a, a1, a1_runtime),
+        (x_g, g1, g1_runtime),
+        (x_v, v1, v1_runtime),
+    ):
+        _check_rank_source(
+            source,
+            runtime,
+            original,
+            input_projection=True,
+            enforce_lowrank_limit=True,
+        )
     return tuple(
         _extension().tmix_lowrank_wagv_in_forward_varlen(
-            x_w, x_a, x_g, x_v, w1, a1, g1, v1
+            x_w,
+            x_a,
+            x_g,
+            x_v,
+            w1,
+            a1,
+            g1,
+            v1,
+            w1_runtime,
+            a1_runtime,
+            g1_runtime,
+            v1_runtime,
         )
     )
 
@@ -302,18 +374,36 @@ def infer_tmix_lowrank_out_forward_varlen(
     w1: torch.Tensor,
     a1: torch.Tensor,
     g1: torch.Tensor,
-    w2: torch.Tensor,
-    a2: torch.Tensor,
-    g2: torch.Tensor,
+    w2: torch.Tensor | None,
+    a2: torch.Tensor | None,
+    g2: torch.Tensor | None,
+    *,
+    w2_runtime: torch.Tensor | None = None,
+    a2_runtime: torch.Tensor | None = None,
+    g2_runtime: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Canonical W/A/G rank-out dispatch over packed rows."""
+
     rows = w1.shape[0]
     for name, tensor in (("w1", w1), ("a1", a1), ("g1", g1)):
         _check_rows(tensor, name, rows=rows)
-    for name, tensor in (("w2", w2), ("a2", a2), ("g2", g2)):
-        _check_rows(tensor, name)
-        if tensor.device != w1.device or tensor.shape[1] != w1.shape[1]:
-            raise ValueError(f"{name} must have shape [C,rank]")
-    return tuple(_extension().tmix_lowrank_out_forward_varlen(w1, a1, g1, w2, a2, g2))
+    for source, original, runtime in (
+        (w1, w2, w2_runtime),
+        (a1, a2, a2_runtime),
+        (g1, g2, g2_runtime),
+    ):
+        _check_rank_source(
+            source,
+            runtime,
+            original,
+            input_projection=False,
+            enforce_lowrank_limit=True,
+        )
+    return tuple(
+        _extension().tmix_lowrank_out_forward_varlen(
+            w1, a1, g1, w2, a2, g2, w2_runtime, a2_runtime, g2_runtime
+        )
+    )
 
 
 def infer_tmix_lowrank_vres_forward_varlen(
@@ -321,24 +411,44 @@ def infer_tmix_lowrank_vres_forward_varlen(
     a1: torch.Tensor,
     g1: torch.Tensor,
     v1: torch.Tensor,
-    w2: torch.Tensor,
-    a2: torch.Tensor,
-    g2: torch.Tensor,
-    v2: torch.Tensor,
+    w2: torch.Tensor | None,
+    a2: torch.Tensor | None,
+    g2: torch.Tensor | None,
+    v2: torch.Tensor | None,
     v: torch.Tensor,
     v_first: torch.Tensor,
     v0: torch.Tensor,
+    *,
+    w2_runtime: torch.Tensor | None = None,
+    a2_runtime: torch.Tensor | None = None,
+    g2_runtime: torch.Tensor | None = None,
+    v2_runtime: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     rows = w1.shape[0]
     for name, tensor in (("w1", w1), ("a1", a1), ("g1", g1), ("v1", v1)):
         _check_rows(tensor, name, rows=rows)
-    for name, tensor in (("w2", w2), ("a2", a2), ("g2", g2), ("v2", v2)):
-        _check_rows(tensor, name)
-        if tensor.device != w1.device or tensor.shape[1] != w1.shape[1]:
-            raise ValueError(f"{name} must have shape [C,rank]")
+    for source, original, runtime in (
+        (w1, w2, w2_runtime),
+        (a1, a2, a2_runtime),
+        (g1, g2, g2_runtime),
+        (v1, v2, v2_runtime),
+    ):
+        _check_rank_source(
+            source,
+            runtime,
+            original,
+            input_projection=False,
+            enforce_lowrank_limit=True,
+        )
+    if w2 is not None:
+        output_channels = w2.shape[0]
+    elif w2_runtime is not None:
+        output_channels = w2_runtime.shape[1]
+    else:
+        raise AssertionError("rank-out validation accepted no W projection weight")
     for name, tensor in (("v", v), ("v_first", v_first)):
         _check_rows(tensor, name, rows=rows)
-        if tensor.device != w1.device or tensor.shape[1] != w2.shape[0]:
+        if tensor.device != w1.device or tensor.shape[1] != output_channels:
             raise ValueError(f"{name} must have shape [total_tokens,C]")
     if v0.dtype != torch.float16 or not v0.is_cuda or not v0.is_contiguous():
         raise ValueError("v0 must be contiguous CUDA float16")
@@ -346,27 +456,41 @@ def infer_tmix_lowrank_vres_forward_varlen(
         raise ValueError("v0 must have shape [C]")
     return tuple(
         _extension().tmix_lowrank_vres_forward_varlen(
-            w1, a1, g1, v1, w2, a2, g2, v2, v, v_first, v0
+            w1,
+            a1,
+            g1,
+            v1,
+            w2,
+            a2,
+            g2,
+            v2,
+            w2_runtime,
+            a2_runtime,
+            g2_runtime,
+            v2_runtime,
+            v,
+            v_first,
+            v0,
         )
     )
 
 
 __all__ = [
-    "infer_tmix_linear_forward_varlen",
+    "infer_tmix_linear_act_sigmoid_forward_varlen",
+    "infer_tmix_linear_act_tanh_forward_varlen",
     "infer_tmix_linear_attention_c2c_forward_varlen",
     "infer_tmix_linear_ffn_key_forward_varlen",
-    "infer_tmix_linear_t_forward_varlen",
-    "infer_tmix_linear_t_tanh_forward_varlen",
-    "infer_tmix_linear_t_sigmoid_forward_varlen",
-    "infer_tmix_linear_act_tanh_forward_varlen",
-    "infer_tmix_linear_act_sigmoid_forward_varlen",
-    "infer_tmix_linear_t_vres_forward_varlen",
+    "infer_tmix_linear_forward_varlen",
     "infer_tmix_linear_rank_in_forward_varlen",
     "infer_tmix_linear_rank_out_forward_varlen",
-    "infer_tmix_linear_rank_out_tanh_forward_varlen",
     "infer_tmix_linear_rank_out_sigmoid_forward_varlen",
+    "infer_tmix_linear_rank_out_tanh_forward_varlen",
+    "infer_tmix_linear_t_forward_varlen",
+    "infer_tmix_linear_t_sigmoid_forward_varlen",
+    "infer_tmix_linear_t_tanh_forward_varlen",
+    "infer_tmix_linear_t_vres_forward_varlen",
     "infer_tmix_lowrank_in_forward_varlen",
-    "infer_tmix_lowrank_wagv_in_forward_varlen",
     "infer_tmix_lowrank_out_forward_varlen",
     "infer_tmix_lowrank_vres_forward_varlen",
+    "infer_tmix_lowrank_wagv_in_forward_varlen",
 ]
