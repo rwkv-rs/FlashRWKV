@@ -78,5 +78,18 @@ The FLA chunk_rwkv7 and fused_recurrent_rwkv7 implementations are used only
 through an external correctness and benchmark dependency. No FLA
 implementation source is bundled here.
 
+The SM120 sampling operator contains material mechanically adapted from
+Triang-jyed-driung/Rapid-Sampling commit
+e0297f7830c3fa581d49ddddddba32f35ea7f733, with indexed per-request state and
+penalty behavior adapted from rwkv-rs/vllm-rwkv commit
+fd440426689f10e240b5761e1a7c82e4c37deb8d:
+
+- csrc/sm120/sampling/infer_fp32_forward_varlen.cpp
+- csrc/sm120/sampling/infer_fp32_forward_varlen.cu
+
+The Rapid-Sampling contributor authorized this material for inclusion under
+the MIT License. The vLLM-derived changes retain their source attribution and
+MIT-compatible distribution boundary.
+
 All other original FlashRWKV2 work is licensed under the repository's MIT
 license unless a file states otherwise.

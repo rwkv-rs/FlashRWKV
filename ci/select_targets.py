@@ -17,6 +17,7 @@ MODULES = (
     "head/linear",
     "loss/l2wrap_ce",
     "rl_infctx/wkv7",
+    "sampling",
     "tmix/a_gate",
     "tmix/kk_a_gate",
     "tmix/kk_pre",

@@ -168,6 +168,8 @@ ext_modules = (
                 "csrc/sm120/embedding/infer_fp16_forward_varlen.cu",
                 "csrc/sm120/head/linear/infer_fp16_forward_varlen.cpp",
                 "csrc/sm120/head/linear/infer_fp16_forward_varlen.cu",
+                "csrc/sm120/sampling/infer_fp32_forward_varlen.cpp",
+                "csrc/sm120/sampling/infer_fp32_forward_varlen.cu",
                 "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_forward.cpp",
                 "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_forward.cu",
                 "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_backward.cpp",
@@ -218,6 +220,7 @@ ext_modules = (
                     "--expt-relaxed-constexpr",
                     "--expt-extended-lambda",
                     "-lineinfo",
+                    "-Xptxas=-v",
                     "-D_N_=64",
                     "-D_CHUNK_LEN_=16",
                     # CUDA 13 nvcc ICEs on the unmodified canonical Albatross

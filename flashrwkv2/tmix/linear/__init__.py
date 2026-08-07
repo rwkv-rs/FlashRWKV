@@ -6,6 +6,8 @@ import torch
 
 from ..wkv7 import _extension
 
+_MAX_GRID_DIM_YZ = 65535
+
 
 def _check_rows(tensor: torch.Tensor, name: str, *, rows: int | None = None) -> None:
     if not isinstance(tensor, torch.Tensor):
@@ -71,6 +73,11 @@ def _check_linear_t(x: torch.Tensor, weight_t: torch.Tensor) -> None:
     _check_rows(weight_t, "weight_t")
     if weight_t.device != x.device or weight_t.shape[1] != x.shape[1]:
         raise ValueError("weight_t must have shape [N,K]")
+    if x.shape[0] > _MAX_GRID_DIM_YZ:
+        raise ValueError(
+            f"tmix linear_t supports at most {_MAX_GRID_DIM_YZ} packed rows because "
+            f"M maps to CUDA grid.y; got M={x.shape[0]}"
+        )
 
 
 def infer_tmix_linear_t_forward_varlen(

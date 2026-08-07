@@ -30,6 +30,7 @@ BENCHMARKS = {
     "head/linear": ("benchmarks/head/linear/bench.py", "samples"),
     "loss/l2wrap_ce": ("benchmarks/loss/l2wrap_ce/bench.py", "samples"),
     "rl_infctx/wkv7": ("benchmarks/rl_infctx/wkv7/bench.py", "samples"),
+    "sampling": ("benchmarks/sampling/bench.py", "samples"),
     "tmix/a_gate": ("benchmarks/tmix/a_gate/bench.py", "iters"),
     "tmix/kk_a_gate": ("benchmarks/tmix/kk_a_gate/bench.py", "samples"),
     "tmix/kk_pre": ("benchmarks/tmix/kk_pre/bench.py", "samples"),
@@ -84,7 +85,11 @@ print(json.dumps({
 """
     payload = json.loads(
         subprocess.run(
-            (python, "-c", program), check=True, capture_output=True, text=True
+            (python, "-c", program),
+            cwd=tempfile.gettempdir(),
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout
     )
     extension_path = Path(payload["extension_path"])
@@ -109,9 +114,13 @@ print(json.dumps({
         values = [value.strip() for value in output.split(",")]
         payload["driver"] = values[0] if values else None
         payload["throttle_reason"] = values[4] if len(values) > 4 else None
-        if payload["throttle_reason"] not in {"Not Active", "Not Active."}:
+        throttle_reason = payload["throttle_reason"]
+        inactive_clock_event = throttle_reason in {"Not Active", "Not Active.", "0"}
+        if isinstance(throttle_reason, str) and throttle_reason.startswith("0x"):
+            inactive_clock_event = int(throttle_reason, 16) == 0
+        if not inactive_clock_event:
             raise SystemExit(
-                f"benchmark GPU reports an active clock event: {payload['throttle_reason']}"
+                f"benchmark GPU reports an active clock event: {throttle_reason}"
             )
     except (FileNotFoundError, subprocess.CalledProcessError) as error:
         raise SystemExit(f"cannot record benchmark GPU environment: {error}") from error
@@ -150,6 +159,28 @@ def _last_json(stdout: str) -> dict[str, Any]:
 
 
 def _metrics(payload: dict[str, Any], module: str) -> list[Metric]:
+    if module == "sampling":
+        metrics = []
+        for row in payload.get("results", []):
+            if row.get("correctness") != "passed":
+                raise SystemExit(f"sampling benchmark correctness failed: {row}")
+            raw = tuple(float(value) for value in row.get("raw_latency_us", ()))
+            if not raw or any(not math.isfinite(value) or value <= 0 for value in raw):
+                raise SystemExit(f"sampling benchmark has invalid samples: {row}")
+            metrics.append(
+                Metric(
+                    str(row["profile"]),
+                    "latency",
+                    "us",
+                    "lower",
+                    float(row["p50_us"]),
+                    raw,
+                )
+            )
+        if not metrics:
+            raise SystemExit("sampling benchmark emitted no measured profiles")
+        return metrics
+
     if module == "tmix/wkv7":
         metrics: list[Metric] = []
         for row in payload.get("results", []):

@@ -308,7 +308,7 @@ jobs:
               .runtime-venv/bin/python -m pytest -q "tests/$module" -x \
               2>&1 | tee "artifacts/sanitizer/$safe-memcheck.log"
             case "$module" in
-              cmix/mix|cmix/sparse|rl_infctx/wkv7|tmix/mix6|tmix/wkv7)
+              cmix/mix|cmix/sparse|rl_infctx/wkv7|sampling|tmix/mix6|tmix/wkv7)
                 compute-sanitizer --tool racecheck --target-processes all \
                   --error-exitcode 98 \
                   .runtime-venv/bin/python -m pytest -q "tests/$module" -x \
@@ -410,6 +410,11 @@ jobs:
           if [[ "$status" -eq 0 ]]; then
             echo "source=approved-artifact" >> "$GITHUB_OUTPUT"
           elif [[ "$status" -eq 2 ]]; then
+            if ! git cat-file -e "$BASE_SHA:benchmarks/$MODULE/bench.py"; then
+              echo "No base benchmark exists for new module $MODULE; bootstrapping from validated head evidence."
+              echo "source=new-module-bootstrap" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "No compatible approved artifact was found; measuring the PR base."
             base_root="$RUNNER_TEMP/flashrwkv2-base-$SAFE_MODULE"
             git worktree add --detach "$base_root" "$BASE_SHA"
@@ -441,9 +446,31 @@ jobs:
         id: comparison
         env:
           SAFE_MODULE: ${{ matrix.target.safe }}
+          BASELINE_SOURCE: ${{ steps.baseline.outputs.source }}
           ACCEPT_BASELINE: ${{ inputs.accept_baseline }}
           APPROVAL_REASON: ${{ inputs.approval_reason }}
         run: |
+          if [[ "$BASELINE_SOURCE" = "new-module-bootstrap" ]]; then
+            python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          safe = os.environ["SAFE_MODULE"]
+          head = json.loads(Path(f"artifacts/benchmark/{safe}-head.json").read_text())
+          if head.get("independent_runs") != 3 or not head.get("profiles"):
+              raise SystemExit("new-module benchmark bootstrap lacks complete three-run evidence")
+          payload = {
+              "schema_version": 1,
+              "module": head["module"],
+              "head_revision": head["revision"],
+              "baseline_source": "new-module-bootstrap",
+              "passed": True,
+          }
+          Path(f"artifacts/benchmark/{safe}-comparison.json").write_text(
+              json.dumps(payload, indent=2) + "\n"
+          )
+          PY
+            exit 0
+          fi
           set +e
           python3 ci/benchmark_gate.py compare \
             --baseline "artifacts/benchmark/$SAFE_MODULE-baseline.json" \

@@ -30,6 +30,8 @@ at::Tensor tmix_linear_forward_varlen_cuda(
 
 namespace {
 
+constexpr unsigned int kMaxGridDimYZ = 65535;
+
 using dtype = at::Half;
 
 __device__ inline __half2 load_h2(const dtype* ptr) {
@@ -205,8 +207,12 @@ void cmix_mix_forward_varlen_cuda(
     torch::Tensor metadata_status) {
   constexpr int threads = 256;
   constexpr int cmix_mix_3d_b1_t_4096[] = {2, 4, 16, 64, 512};
-  bool use_3d = channels == 4096 && batch_size <= 65535 && max_seqlen <= 65535 &&
-      max_seqlen > 1;
+  // Albatross uses grid=(channel_tiles,T,B).  This packed adaptation places
+  // all token rows in grid.y, so actual total_tokens must satisfy the CUDA
+  // y-dimension limit in addition to the upstream B/T tuned predicate.
+  bool use_3d = channels == 4096 && batch_size <= 65535 &&
+      max_seqlen <= 65535 && max_seqlen > 1 &&
+      total_tokens <= kMaxGridDimYZ;
   if (use_3d && batch_size < 2) {
     use_3d = false;
     for (const int candidate : cmix_mix_3d_b1_t_4096) {

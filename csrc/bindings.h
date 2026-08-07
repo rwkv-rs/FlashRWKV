@@ -17,6 +17,7 @@ void register_tmix_linear_bindings(py::module_&);
 void register_tmix_normalization_bindings(py::module_&);
 void register_embedding_bindings(py::module_&);
 void register_head_linear_bindings(py::module_&);
+void register_sampling_bindings(py::module_&);
 void register_cmix_sparse_bindings(py::module_&);
 void register_pretrain_l2wrap_ce_forward_bindings(py::module_&);
 void register_pretrain_l2wrap_ce_backward_bindings(py::module_&);

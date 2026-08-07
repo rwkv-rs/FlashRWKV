@@ -526,6 +526,13 @@ __global__ __launch_bounds__(256, 1) void add_layer_norm_f16_centered_cache_kern
   }
 }
 
+// Disabled migration references (Albatross revision
+// ee3308f6922e59f2166c7fac3c5a192340a2b48e): these non-packed fused CMix/TMix
+// bodies have no launch owner in the current FlashRWKV translation unit.  The
+// packed families below own the public varlen paths.  Keep the upstream bodies
+// for provenance, but do not re-enable them without an owned non-packed API,
+// correctness coverage, launch guards and benchmark evidence.
+#if 0
 template <bool CacheRounded>
 __global__ __launch_bounds__(256, 1) void add_layer_norm_cmix_mix_f16_welford_kernel(
     const dtype* __restrict__ x,
@@ -658,6 +665,13 @@ __global__ __launch_bounds__(Threads, 1) void add_layer_norm_cmix_mix_f16_kernel
   }
 }
 
+// Disabled migration reference (Albatross revision
+// ee3308f6922e59f2166c7fac3c5a192340a2b48e): this scalar-statistics CMix
+// body has no launch owner or selector in the current FlashRWKV translation
+// unit.  Its vectorized active counterpart owns the public contract.  Do not
+// re-enable without a real dispatch owner, correctness coverage and benchmark
+// evidence.
+#if 0
 template <int Threads>
 __global__ __launch_bounds__(Threads, 1) void add_layer_norm_cmix_mix_f16_scalar_stats_kernel(
     const dtype* __restrict__ x,
@@ -716,6 +730,8 @@ __global__ __launch_bounds__(Threads, 1) void add_layer_norm_cmix_mix_f16_scalar
     reinterpret_cast<__half2*>(shift_state)[base2 + p] = y2;
   }
 }
+
+#endif
 
 template <int Threads>
 __global__ __launch_bounds__(Threads, 1) void add_layer_norm_tmix_mix6_f16_kernel(
@@ -799,6 +815,8 @@ __global__ __launch_bounds__(Threads, 1) void add_layer_norm_tmix_mix6_f16_kerne
     reinterpret_cast<__half2*>(shift_state)[base2 + p] = y2;
   }
 }
+
+#endif
 
 // Exact Albatross add_layer_norm_cmix_mix_f16_welford_kernel with the only
 // varlen adaptation being the state-slot address.  The fused caller is
@@ -1121,6 +1139,11 @@ __global__ __launch_bounds__(Threads, 1) void add_layer_norm_tmix_mix6_f16_packe
   }
 }
 
+// Disabled migration reference (same fixed Albatross revision): this
+// scalar-statistics TMix body has no local launch owner or selector.  The
+// active vectorized family above owns the public path.  Re-enabling requires
+// an explicit dispatch contract, correctness coverage and benchmark evidence.
+#if 0
 template <int Threads>
 __global__ __launch_bounds__(Threads, 1) void add_layer_norm_tmix_mix6_f16_scalar_stats_kernel(
     const dtype* __restrict__ x,
@@ -1200,6 +1223,8 @@ __global__ __launch_bounds__(Threads, 1) void add_layer_norm_tmix_mix6_f16_scala
     reinterpret_cast<__half2*>(shift_state)[base2 + p] = y2;
   }
 }
+
+#endif
 
 template <int Threads, bool VecStats, bool VecOut, bool Indexed, bool Packed = false>
 __global__ __launch_bounds__(Threads, 1) void add_last_layer_norm_f16_small_kernel(
@@ -1372,6 +1397,13 @@ __global__ __launch_bounds__(Threads, 1) void add_last_layer_norm_f16_generic_ke
   }
 }
 
+// Disabled migration references (Albatross revision
+// ee3308f6922e59f2166c7fac3c5a192340a2b48e): these generic fused CMix/TMix
+// bodies have no launch owner or selector in the current local translation
+// unit.  They are retained for provenance but excluded from the active binary.
+// Re-enable only with an owned selector, shape/launch guards, correctness tests
+// and benchmark evidence.
+#if 0
 template <int Threads>
 __global__ __launch_bounds__(Threads, 1) void add_layer_norm_cmix_mix_f16_generic_kernel(
     const dtype* __restrict__ x,
@@ -1500,6 +1532,8 @@ __global__ __launch_bounds__(Threads, 1) void add_layer_norm_tmix_mix6_f16_gener
     reinterpret_cast<__half2*>(shift_state)[base2 + p] = y2;
   }
 }
+
+#endif
 
 } // namespace
 

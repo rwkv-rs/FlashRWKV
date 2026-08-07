@@ -763,7 +763,11 @@ def main(argv: list[str] | None = None) -> int:
                     "dispatch": {
                         "batch_size": workload.batch_size,
                         "max_seqlen": max(workload.lengths),
-                        "policy": "Albatross use_small_auto; short_block reserved for internal diagnostic mode",
+                        "policy": (
+                            "automatic policy uses Albatross large/small-auto; "
+                            "upstream forced short-block is retained under #if 0 "
+                            "because no local selector exists"
+                        ),
                     },
                 }
                 try:

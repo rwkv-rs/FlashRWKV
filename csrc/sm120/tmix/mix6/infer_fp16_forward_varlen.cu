@@ -25,6 +25,7 @@ namespace {
 
 constexpr int HEAD_SIZE = 64;
 constexpr int WARPS_PER_BLOCK = 4;
+constexpr unsigned int kMaxGridDimYZ = 65535;
 
 inline int64_t ceil_div(int64_t n, int64_t d) {
   return (n + d - 1) / d;
@@ -186,12 +187,18 @@ __global__ void update_shift_state_last_kernel(
   }
 }
 
-bool use_tmix_mix6_grid3d(int batch_size, int max_seqlen, int channels) {
-  // Exact tuned predicate from rwkv7_fast_v3a.py.  The packed API has no
-  // fixed T; max_seqlen is the dispatch metadata equivalent.
+bool use_tmix_mix6_grid3d(
+    int batch_size,
+    int total_tokens,
+    int max_seqlen,
+    int channels) {
+  // Albatross launches this family as grid=(channel_tiles,T,B).  Packed
+  // varlen storage flattens T/B into grid.y=total_tokens, so the upstream
+  // scheduler predicate and the actual CUDA launch extent are independent
+  // requirements.
   constexpr int kB1T4096[] = {2, 4, 16, 64, 512};
   if (max_seqlen == 1 || channels != 4096 || batch_size > 65535 ||
-      max_seqlen > 65535) {
+      max_seqlen > 65535 || total_tokens > kMaxGridDimYZ) {
     return false;
   }
   if (batch_size >= 2) {
@@ -227,7 +234,8 @@ void tmix_mix6_forward_varlen_cuda(
   const auto stream = at::cuda::getCurrentCUDAStream();
   const int pairs = channels / 2;
   const bool use_grid3d =
-      use_tmix_mix6_grid3d(batch_size, max_seqlen, channels);
+      use_tmix_mix6_grid3d(
+          batch_size, total_tokens, max_seqlen, channels);
   const bool update_in_mix = max_seqlen == 1;
 
   if (use_grid3d) {

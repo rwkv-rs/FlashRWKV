@@ -40,6 +40,23 @@ def _weight_layouts(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize(
+    "operator",
+    (
+        infer_tmix_linear_t_forward_varlen,
+        infer_tmix_linear_t_tanh_forward_varlen,
+        infer_tmix_linear_t_sigmoid_forward_varlen,
+    ),
+)
+def test_custom_linear_t_rejects_m_beyond_cuda_grid_y(operator) -> None:
+    device = torch.device("cuda")
+    x = torch.empty(65536, 2, device=device, dtype=torch.float16)
+    weight_t = torch.empty(2, 2, device=device, dtype=torch.float16)
+    with pytest.raises(ValueError, match=r"linear_t.*65535.*grid\.y.*65536"):
+        operator(x, weight_t)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_tmix_linear_and_lowrank_families() -> None:
     torch.manual_seed(51)
     device = torch.device("cuda")

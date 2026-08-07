@@ -51,6 +51,23 @@ using flashrwkv2::validation::prepare_recurrent_metadata_cuda;
 
 namespace {
 
+constexpr int64_t kMaxGridDimYZ = 65535;
+
+void check_sparse_grid_rows(
+    int64_t rows,
+    const char* operator_name,
+    const char* grid_dimension) {
+  TORCH_CHECK(
+      rows <= kMaxGridDimYZ,
+      operator_name,
+      " supports at most ",
+      kMaxGridDimYZ,
+      " packed rows because rows map to CUDA ",
+      grid_dimension,
+      "; got ",
+      rows);
+}
+
 void check_half(
     const torch::Tensor& tensor,
     const torch::Tensor& reference,
@@ -139,6 +156,7 @@ torch::Tensor cmix_sparse_up_forward_varlen(
   TORCH_CHECK(
       x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
       "x must have packed shape [total_tokens,C]");
+  check_sparse_grid_rows(x.size(0), "cmix sparse up", "grid.y");
   check_half(shift_state_pool, x, "shift_state_pool");
   TORCH_CHECK(
       shift_state_pool.dim() == 2 &&
@@ -186,6 +204,8 @@ torch::Tensor cmix_sparse_down_relu_forward_varlen(
   TORCH_CHECK(
       preact.dim() == 2 && preact.size(0) > 0 && preact.size(1) > 0,
       "preact must have packed shape [total_tokens,F]");
+  check_sparse_grid_rows(
+      preact.size(0), "cmix sparse down", "grid.y/grid.z");
   TORCH_CHECK(
       value_fc.dim() == 2 && value_fc.size(0) == preact.size(1) &&
           value_fc.size(1) > 0 && value_fc.size(1) % 8 == 0,
@@ -218,6 +238,8 @@ torch::Tensor cmix_sparse_forward_varlen(
   TORCH_CHECK(
       x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
       "x must have packed shape [total_tokens,C]");
+  check_sparse_grid_rows(
+      x.size(0), "cmix sparse combined", "grid.y/grid.z");
   check_half(shift_state_pool, x, "shift_state_pool");
   TORCH_CHECK(
       shift_state_pool.dim() == 2 &&

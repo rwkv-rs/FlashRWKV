@@ -27,6 +27,44 @@ def test_cmix_sparse_down_dispatch_uses_batch_max_metadata() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cmix_sparse_rejects_rows_beyond_cuda_grid_extent_before_launch() -> None:
+    device = torch.device("cuda")
+    rows, channels, features = 65536, 8, 1
+    x = torch.empty(rows, channels, device=device, dtype=torch.float16)
+    x_k = torch.empty(channels, device=device, dtype=torch.float16)
+    key_fc = torch.empty(features, channels, device=device, dtype=torch.float16)
+    value_fc = torch.empty(features, channels, device=device, dtype=torch.float16)
+    shift = torch.empty(1, channels, device=device, dtype=torch.float16)
+    cu = torch.tensor([0, rows], device=device, dtype=torch.int32)
+    slots = torch.tensor([0], device=device, dtype=torch.int32)
+
+    with pytest.raises(ValueError, match=r"cmix sparse combined.*65535.*grid\.y/grid\.z.*65536"):
+        infer_cmix_sparse_forward_varlen(
+            x,
+            x_k,
+            key_fc,
+            value_fc,
+            shift_state_pool=shift,
+            cu_seqlens=cu,
+            state_indices=slots,
+        )
+    with pytest.raises(ValueError, match=r"cmix sparse up.*65535.*grid\.y.*65536"):
+        infer_cmix_sparse_up_forward_varlen(
+            x,
+            x_k,
+            key_fc,
+            shift_state_pool=shift,
+            cu_seqlens=cu,
+            state_indices=slots,
+        )
+
+    preact = torch.empty(rows, features, device=device, dtype=torch.float16)
+    down_weight = torch.empty(features, 2, device=device, dtype=torch.float16)
+    with pytest.raises(ValueError, match=r"cmix sparse down.*65535.*grid\.y/grid\.z.*65536"):
+        infer_cmix_sparse_down_relu_forward_varlen(preact, down_weight)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_cmix_sparse_ragged_up_down_and_combined() -> None:
     torch.manual_seed(41)
     device = torch.device("cuda")

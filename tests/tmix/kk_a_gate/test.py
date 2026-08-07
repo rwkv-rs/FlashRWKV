@@ -9,6 +9,38 @@ from flashrwkv2.tmix.kk_a_gate import infer_tmix_kk_a_gate_forward_varlen
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize(
+    ("rows", "batch_size", "max_seqlen"),
+    ((65535, 255, 257), (65536, 256, 256)),
+)
+def test_kk_a_gate_cuda_grid_y_boundaries(
+    rows: int, batch_size: int, max_seqlen: int
+) -> None:
+    device = torch.device("cuda")
+    channels = 4096
+    k = torch.ones(rows, channels, device=device, dtype=torch.float16)
+    k_k = torch.ones(channels, device=device, dtype=torch.float16)
+    a0 = torch.zeros(channels, device=device, dtype=torch.float16)
+    a12 = torch.zeros(rows, channels, device=device, dtype=torch.float16)
+    k_a = torch.ones(channels, device=device, dtype=torch.float16)
+
+    new_k, neg_kk, kka = infer_tmix_kk_a_gate_forward_varlen(
+        k,
+        k_k,
+        a0,
+        a12,
+        k_a,
+        batch_size=batch_size,
+        max_seqlen=max_seqlen,
+    )
+    for output in (new_k, neg_kk, kka):
+        assert torch.isfinite(output).all()
+    assert torch.allclose(new_k[[0, -1]], torch.full_like(new_k[[0, -1]], 0.5))
+    assert torch.allclose(neg_kk[[0, -1]], torch.full_like(neg_kk[[0, -1]], -0.125))
+    assert torch.allclose(kka[[0, -1]], torch.full_like(kka[[0, -1]], 0.0625))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_kk_a_gate_packed_and_grid2d() -> None:
     torch.manual_seed(17)
     device = torch.device("cuda")

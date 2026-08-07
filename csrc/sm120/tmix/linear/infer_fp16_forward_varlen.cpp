@@ -91,6 +91,8 @@ std::vector<torch::Tensor> tmix_lowrank_vres_forward_varlen_cuda(
 
 namespace {
 
+constexpr int64_t kMaxGridDimYZ = 65535;
+
 void check_half(const torch::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.is_cuda(), name, " must be CUDA");
   TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
@@ -114,6 +116,12 @@ void check_linear_t(const torch::Tensor& x, const torch::Tensor& weight_t) {
   check_same(x, weight_t, "weight_t");
   TORCH_CHECK(x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
               "x must have packed shape [total_tokens,K]");
+  TORCH_CHECK(
+      x.size(0) <= kMaxGridDimYZ,
+      "TMix linear_t supports at most ",
+      kMaxGridDimYZ,
+      " packed rows because M maps to CUDA grid.y; got ",
+      x.size(0));
   TORCH_CHECK(weight_t.dim() == 2 && weight_t.size(0) > 0 &&
                   weight_t.size(1) == x.size(1),
               "weight_t must have shape [N,K]");

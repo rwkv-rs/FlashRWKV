@@ -79,7 +79,7 @@ chunk metadata and returns a new final pool rather than mutating the input pool.
 - Import: `from flashrwkv2 import infer_recurrent_fp32io16_forward_varlen`
 - Owner: `flashrwkv2.tmix.wkv7`
 - Signature: `infer_recurrent_fp32io16_forward_varlen(r, decay_logits, k, v, a, b, *, state_pool, cu_seqlens, state_indices, scale=1.0, decay_bias=None, max_seqlen=None, validated_metadata=None) -> torch.Tensor`
-- Contract: `r`, `decay_logits`, `k`, `v`, `a`, and `b` are matching packed `[N,H,D]` FP16 or BF16 tensors. `state_pool` is contiguous FP32 `[slots,H,D,D]`; supported `D` values are 64, 128, and 256. `decay_bias`, when supplied, is the per-head decay bias accepted by the native binding.
+- Contract: `r`, `decay_logits`, `k`, `v`, `a`, and `b` are matching packed `[N,H,D]` FP16 or BF16 tensors. `state_pool` is contiguous FP32 `[slots,H,D,D]`; supported `D` values are 64, 128, and 256. `decay_bias`, when supplied, is the per-head decay bias accepted by the native binding. Automatic dispatch uses the Albatross large and small-auto families. The upstream forced short-block family is retained as disabled `#if 0` reference code because this API exposes no corresponding selector.
 - Result and mutation: returns output shaped like `v` and updates selected `state_pool` slots in place. No custom autograd.
 
 ### `infer_recurrent_fp16_forward_varlen`
@@ -169,7 +169,7 @@ chunk metadata and returns a new final pool rather than mutating the input pool.
 - Import: `from flashrwkv2 import infer_tmix_lnx_rkvres_xg_forward_varlen`
 - Owner: `flashrwkv2.tmix.lnx_rkvres_xg`
 - Signature: `infer_tmix_lnx_rkvres_xg_forward_varlen(x, r, k, v, r_k, weight, bias, g, *, batch_size=1, max_seqlen=None) -> torch.Tensor`
-- Contract: FP16 packed `x`, `r`, `k`, `v`, and `g [N,C]`; vectors `r_k`, `weight`, and `bias [C]`; `C` is divisible by 64.
+- Contract: FP16 packed `x`, `r`, `k`, `v`, and `g [N,C]`; vectors `r_k`, `weight`, and `bias [C]`; `C` is divisible by 64. Automatic dispatch exposes only the basic and warp families. Albatross's forced warp-2D family is retained as disabled `#if 0` reference code because this API has no forced head-grid selector.
 - Result and mutation: returns fused head-wise normalization/residual/gate output `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_vres_gate_forward_varlen`
@@ -245,21 +245,21 @@ outputs. `M` denotes packed rows, `K` input features, `N` output features, and
 - Import: `from flashrwkv2 import infer_tmix_linear_t_forward_varlen`
 - Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_t_forward_varlen(x, weight_t) -> torch.Tensor`
-- Contract and result: `x [M,K]`, `weight_t [N,K]`; returns `x @ weight_t.T` with shape `[M,N]`.
+- Contract and result: `x [M,K]`, `weight_t [N,K]`, with `M <= 65535` because the custom kernel maps `M` to CUDA `grid.y`; returns `x @ weight_t.T` with shape `[M,N]`.
 
 ### `infer_tmix_linear_t_tanh_forward_varlen`
 
 - Import: `from flashrwkv2 import infer_tmix_linear_t_tanh_forward_varlen`
 - Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_t_tanh_forward_varlen(x, weight_t) -> torch.Tensor`
-- Contract and result: applies tanh to `x [M,K]` before the `[N,K]` projection and returns `[M,N]`.
+- Contract and result: applies tanh to `x [M,K]` before the `[N,K]` projection and returns `[M,N]`; `M <= 65535` because the custom kernel maps `M` to CUDA `grid.y`.
 
 ### `infer_tmix_linear_t_sigmoid_forward_varlen`
 
 - Import: `from flashrwkv2 import infer_tmix_linear_t_sigmoid_forward_varlen`
 - Owner: `flashrwkv2.tmix.linear`
 - Signature: `infer_tmix_linear_t_sigmoid_forward_varlen(x, weight_t) -> torch.Tensor`
-- Contract and result: applies sigmoid to `x [M,K]` before the `[N,K]` projection and returns `[M,N]`.
+- Contract and result: applies sigmoid to `x [M,K]` before the `[N,K]` projection and returns `[M,N]`; `M <= 65535` because the custom kernel maps `M` to CUDA `grid.y`.
 
 ### `infer_tmix_linear_act_tanh_forward_varlen`
 
@@ -388,7 +388,7 @@ must be rebuilt after weight, device, or dtype changes.
 - Import: `from flashrwkv2 import infer_cmix_sparse_forward_varlen`
 - Owner: `flashrwkv2.cmix.sparse`
 - Signature: `infer_cmix_sparse_forward_varlen(x, x_k, key_fc, value_fc, *, shift_state_pool, cu_seqlens, state_indices, max_seqlen=None, validated_metadata=None) -> torch.Tensor`
-- Contract: FP16 `x [N,C]`, `x_k [C]`, `key_fc [F,C]`, `value_fc [F,C]`, and shift state `[slots,C]` with packed metadata.
+- Contract: FP16 `x [N,C]`, `x_k [C]`, `key_fc [F,C]`, `value_fc [F,C]`, and shift state `[slots,C]` with packed metadata. `N <= 65535` because active kernels map packed rows to CUDA `grid.y` and `grid.z`.
 - Result and mutation: returns fused sparse CMix output `[N,C]` and updates selected shift-state slots.
 
 ### `infer_cmix_sparse_up_forward_varlen`
@@ -396,7 +396,7 @@ must be rebuilt after weight, device, or dtype changes.
 - Import: `from flashrwkv2 import infer_cmix_sparse_up_forward_varlen`
 - Owner: `flashrwkv2.cmix.sparse`
 - Signature: `infer_cmix_sparse_up_forward_varlen(x, x_k, key_fc, *, shift_state_pool, cu_seqlens, state_indices, max_seqlen=None, validated_metadata=None) -> torch.Tensor`
-- Contract: FP16 `x [N,C]`, `x_k [C]`, `key_fc [F,C]`, and shift state `[slots,C]` with packed metadata.
+- Contract: FP16 `x [N,C]`, `x_k [C]`, `key_fc [F,C]`, and shift state `[slots,C]` with packed metadata. `N <= 65535` because the active up kernel maps packed rows to CUDA `grid.y`.
 - Result and mutation: returns pre-activation `[N,F]` and updates selected shift-state slots.
 
 ### `infer_cmix_sparse_down_relu_forward_varlen`
@@ -404,7 +404,7 @@ must be rebuilt after weight, device, or dtype changes.
 - Import: `from flashrwkv2 import infer_cmix_sparse_down_relu_forward_varlen`
 - Owner: `flashrwkv2.cmix.sparse`
 - Signature: `infer_cmix_sparse_down_relu_forward_varlen(preact, value_fc, *, batch_size=None, max_seqlen=None) -> torch.Tensor`
-- Contract: FP16 `preact [N,F]` and `value_fc [F,C]` with even `C`. `batch_size` and `max_seqlen` are either both omitted or both positive and large enough to cover `N` rows.
+- Contract: FP16 `preact [N,F]` and `value_fc [F,C]` with even `C`. `N <= 65535` because active down kernels map packed rows to CUDA `grid.y` or `grid.z`. `batch_size` and `max_seqlen` are either both omitted or both positive and large enough to cover `N` rows.
 - Result: applies sparse ReLU-square/down projection and returns `[N,C]` without mutation.
 
 ## Head inference

@@ -10,8 +10,9 @@
 //   - packed [total_tokens,H,D] inputs selected by cu_seqlens;
 //   - state_indices-backed state slots in canonical [K,V] layout;
 //   - raw decay logits plus optional decay bias are transformed in-kernel;
-//   - Albatross large, small-warp and short-block implementations are kept as
-//     distinct internal dispatch families;
+//   - Albatross large and small-warp implementations remain active automatic
+//     dispatch families; the forced-only short-block body is retained under
+//     #if 0 because this API intentionally has no forced mode selector;
 //   - metadata status remains fail-closed for the low-level binding.
 //
 // vllm-rwkv at 6d683f9e49a2997e405c47edc147872c8609513b is a packed-varlen
@@ -273,10 +274,14 @@ void wkv_fp32_v2_small_warp_kernel(
   }
 }
 
-// Kept as a separate family to preserve the canonical Albatross dispatch
-// surface.  The current SM120 implementation uses one warp per block; the
-// block reduction is still explicit so this remains an independent tuning
-// point when the target shape warrants it.
+// Upstream status: Albatross revision
+// ee3308f6922e59f2166c7fac3c5a192340a2b48e exposes this body through the
+// registered forward_block operator (mode==3).  Local status: FlashRWKV's
+// public packed-varlen API intentionally has no forced mode selector.  Keep
+// the upstream adaptation as disabled reference code; do not re-enable it
+// without a real selector, packed-varlen correctness and launch-boundary
+// coverage, and benchmark evidence.
+#if 0
 template <int HeadSize, typename io_t>
 __global__ __launch_bounds__(kBlockThreads, 4)
 void wkv_fp32_v2_short_block_kernel(
@@ -359,6 +364,7 @@ void wkv_fp32_v2_short_block_kernel(
     __syncthreads();
   }
 }
+#endif
 
 bool use_small_auto(int batch_size, int max_seqlen, bool io_fp16) {
   if (io_fp16) {
@@ -397,14 +403,16 @@ void launch_recurrent_fp32(
   const int64_t output_elements = output.numel();
   const bool io_fp16 = r.scalar_type() == at::ScalarType::Half;
   const bool use_small = use_small_auto(num_sequences, max_seqlen, io_fp16);
-  const bool use_short = false;
   const auto* query_ptr = query_start_loc.data_ptr<int>();
   const auto* state_indices_ptr = state_indices.data_ptr<int>();
   const auto* status_ptr = metadata_status.data_ptr<int>();
   auto* state_ptr = state.data_ptr<float>();
   const auto* decay_bias_ptr =
       decay_bias.defined() ? decay_bias.data_ptr<io_t>() : nullptr;
-  if (use_short) {
+  // Disabled upstream forced-mode launch retained beside the automatic
+  // selector.  See the #if 0 kernel body above for provenance.
+#if 0
+  if (use_short_block_mode) {
     wkv_fp32_v2_short_block_kernel<HeadSize, io_t>
         <<<dim3(HeadSize, num_heads, num_sequences), dim3(kBlockThreads), 0,
                stream>>>(
@@ -413,7 +421,9 @@ void launch_recurrent_fp32(
             decay_logits.data_ptr<io_t>(), decay_bias_ptr, k.data_ptr<io_t>(),
             v.data_ptr<io_t>(), a.data_ptr<io_t>(), b.data_ptr<io_t>(),
             output.data_ptr<io_t>(), scale);
-  } else if (use_small) {
+  }
+#endif
+  if (use_small) {
     wkv_fp32_v2_small_warp_kernel<HeadSize, io_t>
         <<<dim3(HeadSize, num_heads, num_sequences), dim3(kWarpThreads), 0,
                stream>>>(

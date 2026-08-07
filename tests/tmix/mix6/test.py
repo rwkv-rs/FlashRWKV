@@ -14,6 +14,51 @@ from flashrwkv2.tmix.wkv7 import prepare_recurrent_metadata
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize(
+    ("batch_size", "max_seqlen", "total_tokens"),
+    ((255, 257, 65535), (256, 256, 65536), (320, 256, 81920)),
+)
+def test_infer_mix6_cuda_grid_y_boundaries(
+    batch_size: int, max_seqlen: int, total_tokens: int
+) -> None:
+    device = torch.device("cuda")
+    channels = 4096
+    lengths = [max_seqlen] * (batch_size - 1)
+    lengths.append(total_tokens - sum(lengths))
+    assert min(lengths) > 0 and max(lengths) == max_seqlen
+    starts = [0]
+    for length in lengths:
+        starts.append(starts[-1] + length)
+
+    x = torch.zeros(total_tokens, channels, device=device, dtype=torch.float16)
+    params = [
+        torch.full((channels,), value, device=device, dtype=torch.float16)
+        for value in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+    ]
+    shift = torch.ones(batch_size, channels, device=device, dtype=torch.float16)
+    cu = torch.tensor(starts, device=device, dtype=torch.int32)
+    slots = torch.arange(batch_size, device=device, dtype=torch.int32)
+
+    outputs = infer_tmix_mix6_forward_varlen(
+        x,
+        *params,
+        shift_state_pool=shift,
+        cu_seqlens=cu,
+        state_indices=slots,
+        max_seqlen=max_seqlen,
+    )
+    first_rows = torch.tensor(starts[:-1], device=device)
+    second_rows = first_rows + 1
+    for output, parameter in zip(outputs, params, strict=True):
+        assert torch.isfinite(output).all()
+        assert torch.allclose(
+            output[first_rows], parameter.expand(batch_size, -1), atol=0.001, rtol=0.001
+        )
+        assert torch.count_nonzero(output[second_rows]) == 0
+    assert torch.count_nonzero(shift) == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_pretrain_mix6_forward_backward() -> None:
     torch.manual_seed(7)
     device = torch.device("cuda")

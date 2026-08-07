@@ -78,6 +78,11 @@ from .head.linear import (
     infer_head_linear_forward_varlen,
     infer_head_linear_last_forward_varlen,
 )
+from .sampling import (
+    infer_sampling_six_parameter_forward_varlen,
+    infer_sampling_temperature_topk_topp_forward_varlen,
+    setup_sampling_states,
+)
 from .tmix.wkv7.statetune import statetune_recurrent_fp32io16
 from .tmix.a_gate import pretrain_tmix_a_gate_bf16
 from .tmix.kk_pre import pretrain_tmix_kk_pre_bf16
@@ -133,6 +138,8 @@ __all__ = [
     "infer_head_linear_all_forward_varlen",
     "infer_head_linear_forward_varlen",
     "infer_head_linear_last_forward_varlen",
+    "infer_sampling_six_parameter_forward_varlen",
+    "infer_sampling_temperature_topk_topp_forward_varlen",
     "pretrain_recurrent_bf16",
     "statetune_recurrent_fp32io16",
     "prepare_recurrent_metadata",
@@ -146,6 +153,7 @@ __all__ = [
     "pretrain_l2wrap_ce_bf16",
     "rl_infctx_chunk_fp32io16",
     "rl_infctx_chunk_fp32io16_factor_recompute",
+    "setup_sampling_states",
 ]
 
-__version__ = "0.1.0a1"
+__version__ = "0.1.0a2"

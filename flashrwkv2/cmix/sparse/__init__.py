@@ -11,6 +11,16 @@ from ...tmix.wkv7 import (
     prepare_recurrent_metadata,
 )
 
+_MAX_GRID_DIM_YZ = 65535
+
+
+def _check_sparse_grid_rows(rows: int, operator: str, grid_dimension: str) -> None:
+    if rows > _MAX_GRID_DIM_YZ:
+        raise ValueError(
+            f"{operator} supports at most {_MAX_GRID_DIM_YZ} packed rows because "
+            f"rows map to CUDA {grid_dimension}; got rows={rows}"
+        )
+
 
 def _check_half(tensor: torch.Tensor, name: str, reference: torch.Tensor) -> None:
     if not isinstance(tensor, torch.Tensor):
@@ -49,6 +59,7 @@ def infer_cmix_sparse_forward_varlen(
         raise ValueError("value_fc must have shape [F,C]")
     if shift_state_pool.ndim != 2 or shift_state_pool.shape[1] != x.shape[1]:
         raise ValueError("shift_state_pool must have shape [slots,C]")
+    _check_sparse_grid_rows(x.shape[0], "cmix sparse combined", "grid.y/grid.z")
     _check_metadata_inputs(cu_seqlens, state_indices)
     if max_seqlen is None:
         launch_max_seqlen = -1
@@ -106,6 +117,7 @@ def infer_cmix_sparse_up_forward_varlen(
         raise ValueError("invalid CMix sparse up shapes")
     if shift_state_pool.ndim != 2 or shift_state_pool.shape[1] != x.shape[1]:
         raise ValueError("shift_state_pool must have shape [slots,C]")
+    _check_sparse_grid_rows(x.shape[0], "cmix sparse up", "grid.y")
     _check_metadata_inputs(cu_seqlens, state_indices)
     if max_seqlen is None:
         launch_max_seqlen = -1
@@ -157,6 +169,7 @@ def infer_cmix_sparse_down_relu_forward_varlen(
         raise ValueError("preact must be [rows,F] and value_fc must be [F,C]")
     if value_fc.shape[1] <= 0 or value_fc.shape[1] % 2:
         raise ValueError("value_fc must have an even C in shape [F,C]")
+    _check_sparse_grid_rows(preact.shape[0], "cmix sparse down", "grid.y/grid.z")
     if (batch_size is None) != (max_seqlen is None):
         raise ValueError("batch_size and max_seqlen must be provided together")
     if batch_size is None:

@@ -24,6 +24,7 @@ MIRRORED_MODULES = (
     "head/linear",
     "loss/l2wrap_ce",
     "rl_infctx/wkv7",
+    "sampling",
     "tmix/a_gate",
     "tmix/kk_a_gate",
     "tmix/kk_pre",
@@ -46,6 +47,7 @@ PUBLIC_INFERENCE_MODULES = (
     "flashrwkv2.cmix.mix",
     "flashrwkv2.cmix.sparse",
     "flashrwkv2.head.linear",
+    "flashrwkv2.sampling",
 )
 PUBLIC_TRAINING_MODULES = (
     "flashrwkv2.tmix.wkv7",
@@ -180,7 +182,7 @@ def test_root_exports_all_public_inference_operators() -> None:
             )
             expected[name] = getattr(module, name)
 
-    assert len(expected) == 44
+    assert len(expected) == 46
     root_inference_names = {
         name for name in flashrwkv2.__all__ if name.startswith("infer_")
     }
@@ -215,6 +217,14 @@ def test_root_exports_all_public_training_operators() -> None:
         assert getattr(flashrwkv2, name) is operator
 
 
+def test_root_exports_sampling_state_setup() -> None:
+    import flashrwkv2
+    from flashrwkv2.sampling import setup_sampling_states
+
+    assert "setup_sampling_states" in flashrwkv2.__all__
+    assert flashrwkv2.setup_sampling_states is setup_sampling_states
+
+
 def test_fp16_elapsed_advance_stays_in_the_wkv7_owner() -> None:
     cuda_source = (
         ROOT
@@ -230,3 +240,121 @@ def test_fp16_elapsed_advance_stays_in_the_wkv7_owner() -> None:
     assert "recurrent_fp16_advance_i32_varlen" in cpp_source
     assert "infer_recurrent_fp16_advance_i32_varlen" in python_source
     assert "elementwise" not in python_source
+
+
+def test_packed_multidimensional_launches_check_the_actual_extent() -> None:
+    mix6 = (ROOT / "csrc/sm120/tmix/mix6/infer_fp16_forward_varlen.cu").read_text()
+    cmix = (ROOT / "csrc/sm120/cmix/mix/infer_fp16_forward_varlen.cu").read_text()
+    kk_a = (ROOT / "csrc/sm120/tmix/kk_a_gate/infer_fp16_forward_varlen.cu").read_text()
+    sparse = (ROOT / "csrc/sm120/cmix/sparse/infer_fp16_forward_varlen.cpp").read_text()
+    linear = (ROOT / "csrc/sm120/tmix/linear/infer_fp16_forward_varlen.cpp").read_text()
+
+    assert re.search(
+        r"use_tmix_mix6_grid3d\(\s*int batch_size,\s*int total_tokens,"
+        r"\s*int max_seqlen,\s*int channels\)",
+        mix6,
+    )
+    assert "total_tokens > kMaxGridDimYZ" in mix6
+    assert "total_tokens <= kMaxGridDimYZ" in cmix
+    assert "total_tokens <= kMaxGridDimYZ" in kk_a
+    assert sparse.count("check_sparse_grid_rows(") == 4
+    assert '"grid.y"' in sparse and '"grid.y/grid.z"' in sparse
+    assert "M maps to CUDA grid.y" in linear
+    assert "x.size(0) <= kMaxGridDimYZ" in linear
+
+
+def test_forced_only_upstream_kernels_are_explicit_disabled_references() -> None:
+    lnx = (
+        ROOT / "csrc/sm120/tmix/lnx_rkvres_xg/infer_fp16_forward_varlen.cu"
+    ).read_text()
+    fp32_wkv = (
+        ROOT / "csrc/sm120/tmix/wkv7/infer_recurrent_fp32io16_forward_varlen.cu"
+    ).read_text()
+
+    assert "const bool use_grid2d = false" not in lnx
+    assert "const bool use_short = false" not in fp32_wkv
+    assert re.search(
+        r"#if 0.*tmix_lnx_rkvres_xg_warp_2d_kernel.*#endif",
+        lnx,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"#if 0.*wkv_fp32_v2_short_block_kernel.*#endif",
+        fp32_wkv,
+        re.DOTALL,
+    )
+    for source in (lnx, fp32_wkv):
+        assert "Upstream status:" in source
+        assert "Local status:" in source
+        assert "ee3308f6922e59f2166c7fac3c5a192340a2b48e" in source
+
+
+def test_sm120_has_no_hardcoded_false_runtime_dispatch() -> None:
+    forbidden = re.compile(
+        r"(?:const|constexpr)\s+bool\s+\w+\s*=\s*false\s*;|if\s*\(\s*false\s*\)"
+    )
+    offenders = []
+    for path in sorted((ROOT / "csrc/sm120").rglob("*")):
+        if path.suffix not in {".cpp", ".cu"}:
+            continue
+        if forbidden.search(path.read_text()):
+            offenders.append(path.relative_to(ROOT))
+    assert not offenders
+
+
+def test_sm120_active_kernels_have_launch_owners_and_disabled_allowlist_is_exact() -> None:
+    kernel_definition = re.compile(
+        r"__global__\s+(?:void\s+)?"
+        r"(?:__launch_bounds__\s*\([^)]*\)\s*)?"
+        r"(?:void\s+)?([A-Za-z_]\w*)\s*\("
+    )
+
+    def split_disabled_if0(source: str) -> tuple[str, list[str]]:
+        active_lines = []
+        disabled_regions = []
+        disabled_lines = []
+        depth = 0
+        for line in source.splitlines(keepends=True):
+            directive = line.lstrip()
+            if depth:
+                if directive.startswith("#if"):
+                    depth += 1
+                elif directive.startswith("#endif"):
+                    depth -= 1
+                if depth:
+                    disabled_lines.append(line)
+                else:
+                    disabled_regions.append("".join(disabled_lines))
+                    disabled_lines = []
+                continue
+            if re.match(r"#if\s+0\b", directive):
+                depth = 1
+                continue
+            active_lines.append(line)
+        assert depth == 0
+        return "".join(active_lines), disabled_regions
+
+    disabled_symbols = set()
+    unreachable = []
+    for path in sorted((ROOT / "csrc/sm120").rglob("*.cu")):
+        source = path.read_text()
+        active, disabled_regions = split_disabled_if0(source)
+        for region in disabled_regions:
+            disabled_symbols.update(kernel_definition.findall(region))
+        active_without_comments = re.sub(r"//.*?$|/\*.*?\*/", "", active, flags=re.MULTILINE | re.DOTALL)
+        for symbol in kernel_definition.findall(active_without_comments):
+            if len(re.findall(rf"\b{re.escape(symbol)}\b", active_without_comments)) < 2:
+                unreachable.append((path.relative_to(ROOT), symbol))
+
+    assert disabled_symbols == {
+        "add_layer_norm_cmix_mix_f16_kernel",
+        "add_layer_norm_cmix_mix_f16_generic_kernel",
+        "add_layer_norm_cmix_mix_f16_scalar_stats_kernel",
+        "add_layer_norm_cmix_mix_f16_welford_kernel",
+        "add_layer_norm_tmix_mix6_f16_kernel",
+        "add_layer_norm_tmix_mix6_f16_generic_kernel",
+        "add_layer_norm_tmix_mix6_f16_scalar_stats_kernel",
+        "tmix_lnx_rkvres_xg_warp_2d_kernel",
+        "wkv_fp32_v2_short_block_kernel",
+    }
+    assert not unreachable, "\n".join(f"{path}: {symbol}" for path, symbol in unreachable)

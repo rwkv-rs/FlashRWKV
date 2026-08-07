@@ -15,6 +15,7 @@ void register_flashrwkv2_bindings(py::module_& module) {
   register_tmix_normalization_bindings(module);
   register_embedding_bindings(module);
   register_head_linear_bindings(module);
+  register_sampling_bindings(module);
   register_cmix_sparse_bindings(module);
   register_pretrain_l2wrap_ce_forward_bindings(module);
   register_pretrain_l2wrap_ce_backward_bindings(module);

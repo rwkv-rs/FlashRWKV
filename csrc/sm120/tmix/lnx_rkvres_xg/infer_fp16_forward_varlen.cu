@@ -166,8 +166,15 @@ __global__ __launch_bounds__(32) void tmix_lnx_rkvres_xg_warp_kernel(
       (d1 * rstd * ln_weight.y + ln_bias.y + rkv * vv.y) * gate.y);
 }
 
-// Exact Albatross head-grid body.  The public varlen API keeps this family
-// available for its internal packed-row dispatch; callers do not supply B/T.
+// Upstream status: this exact Albatross body is reachable through the forced
+// head-grid lnx2d/grid2d operator at revision
+// ee3308f6922e59f2166c7fac3c5a192340a2b48e, but the canonical tuned policy
+// does not select it.  Local status: FlashRWKV's public packed-varlen API does
+// not expose those forced head-grid modes.  Preserve the upstream body as
+// disabled reference code; do not re-enable it without a real selector,
+// packed-varlen correctness coverage, an actual grid.y extent guard, and
+// benchmark evidence.
+#if 0
 __global__ __launch_bounds__(32) void tmix_lnx_rkvres_xg_warp_2d_kernel(
     int H,
     const dtype* __restrict__ x,
@@ -213,6 +220,7 @@ __global__ __launch_bounds__(32) void tmix_lnx_rkvres_xg_warp_2d_kernel(
       (d0 * rstd * ln_weight.x + ln_bias.x + rkv * vv.x) * gate.x,
       (d1 * rstd * ln_weight.y + ln_bias.y + rkv * vv.y) * gate.y);
 }
+#endif
 
 }  // namespace
 
@@ -252,15 +260,19 @@ void tmix_lnx_rkvres_xg_forward_varlen_cuda(
       }
     }
   }
-  const bool use_grid2d = false;
-  if (use_grid2d) {
+  // Disabled upstream forced-mode launch retained beside its original owner.
+  // See the #if 0 kernel body above for provenance and re-enable conditions.
+#if 0
+  if (use_lnx_head_grid_2d) {
     tmix_lnx_rkvres_xg_warp_2d_kernel<<<
         dim3(static_cast<unsigned int>(heads), static_cast<unsigned int>(total_tokens)),
         dim3(32), 0, stream>>>(
         heads, x.data_ptr<dtype>(), r.data_ptr<dtype>(), k.data_ptr<dtype>(),
         v.data_ptr<dtype>(), r_k.data_ptr<dtype>(), weight.data_ptr<dtype>(),
         bias.data_ptr<dtype>(), g.data_ptr<dtype>(), output.data_ptr<dtype>());
-  } else if (use_warp) {
+  }
+#endif
+  if (use_warp) {
     tmix_lnx_rkvres_xg_warp_kernel<<<
         static_cast<unsigned int>(rows), dim3(32), 0, stream>>>(
         heads, x.data_ptr<dtype>(), r.data_ptr<dtype>(), k.data_ptr<dtype>(),
