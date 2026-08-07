@@ -271,6 +271,7 @@ jobs:
               "$GITHUB_WORKSPACE/.runtime-venv/bin/python" -m pytest -q \
                 "$GITHUB_WORKSPACE/tests/$module" \
                 -c /dev/null \
+                -o 'python_files=test.py test_*.py' \
                 --rootdir="$test_root" \
                 --junitxml="$GITHUB_WORKSPACE/artifacts/test-results/$safe.xml"
             ) 2>&1 | tee "artifacts/test-results/$safe.log"
