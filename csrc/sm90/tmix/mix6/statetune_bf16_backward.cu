@@ -110,7 +110,23 @@ __global__ void statetune_tmix_mix6_backward_kernel(
       dx.x += next.x;
       dx.y += next.y;
     }
-    store_bf16x2(grad_x + idx, __floats2bfloat162_rn(dx.x, dx.y));
+    if (t_size == 1) {
+      // For the single-token case, match PyTorch's BF16 autograd branch
+      // accumulation exactly.  There is no recurrent next-token contribution,
+      // and preserving this order avoids a one-ULP cancellation difference
+      // after the returned-shift gradient is added.
+      __nv_bfloat162 rounded = __hmul2(gr, mr);
+      rounded = __hadd2(rounded, __hmul2(gw, mw));
+      rounded = __hadd2(rounded, __hmul2(gk, mk));
+      rounded = __hadd2(rounded, __hmul2(gv, mv));
+      rounded = __hadd2(rounded, __hmul2(ga, ma));
+      rounded = __hadd2(rounded, __hmul2(gg, mg));
+      rounded = __hadd2(
+          rounded, load_bf16x2(grad_next + b * c_size + c));
+      store_bf16x2(grad_x + idx, rounded);
+    } else {
+      store_bf16x2(grad_x + idx, __floats2bfloat162_rn(dx.x, dx.y));
+    }
 #undef ACCUM_DX
 
     const __nv_bfloat162 previous =
