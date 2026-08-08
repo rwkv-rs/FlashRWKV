@@ -26,8 +26,12 @@ void register_flashrwkv2_bindings(py::module_& module) {
   register_pretrain_tmix_vres_gate_backward_bindings(module);
   register_pretrain_tmix_mix6_forward_bindings(module);
   register_pretrain_tmix_mix6_backward_bindings(module);
+  register_statetune_tmix_mix6_forward_bindings(module);
+  register_statetune_tmix_mix6_backward_bindings(module);
   register_pretrain_cmix_forward_bindings(module);
   register_pretrain_cmix_backward_bindings(module);
+  register_statetune_cmix_forward_bindings(module);
+  register_statetune_cmix_backward_bindings(module);
   register_pretrain_tmix_kk_pre_bindings(module);
   register_pretrain_tmix_kk_pre_backward_bindings(module);
   register_pretrain_tmix_lnx_rkvres_xg_forward_bindings(module);

@@ -9,6 +9,7 @@ from flashrwkv2.tmix.mix6 import (
     infer_tmix_mix6_add_layer_norm_forward_varlen,
     infer_tmix_mix6_forward_varlen,
     pretrain_tmix_mix6_bf16,
+    statetune_tmix_mix6_bf16,
 )
 from flashrwkv2.tmix.wkv7 import prepare_recurrent_metadata
 
@@ -63,7 +64,10 @@ def test_pretrain_mix6_forward_backward() -> None:
     torch.manual_seed(7)
     device = torch.device("cuda")
     x = (torch.randn(2, 3, 8, device=device) * 0.1).to(torch.bfloat16).requires_grad_()
-    params = [(torch.randn(8, device=device) * 0.1).to(torch.bfloat16).requires_grad_() for _ in range(6)]
+    params = [
+        (torch.randn(8, device=device) * 0.1).to(torch.bfloat16).requires_grad_()
+        for _ in range(6)
+    ]
     outputs = pretrain_tmix_mix6_bf16(x, *params)
     reference = []
     previous = torch.zeros_like(x[:, :1])
@@ -79,9 +83,154 @@ def test_pretrain_mix6_forward_backward() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("batch_size", (1, 2))
+@pytest.mark.parametrize("seqlen", (1, 2, 7, 16, 31))
+@pytest.mark.parametrize("zero_shift", (False, True))
+def test_statetune_mix6_matches_torch_forward_backward(
+    batch_size: int, seqlen: int, zero_shift: bool
+) -> None:
+    torch.manual_seed(1000 + batch_size * 100 + seqlen)
+    device = torch.device("cuda")
+    channels = 128
+    x = (
+        (torch.randn(batch_size, seqlen, channels, device=device) * 0.05)
+        .to(torch.bfloat16)
+        .requires_grad_()
+    )
+    initial = (torch.randn(batch_size, channels, device=device) * 0.05).to(
+        torch.bfloat16
+    )
+    if zero_shift:
+        initial.zero_()
+    initial.requires_grad_()
+    params = [
+        (torch.randn(channels, device=device) * 0.1).to(torch.bfloat16).requires_grad_()
+        for _ in range(6)
+    ]
+    actual = statetune_tmix_mix6_bf16(x, initial, *params)
+
+    x_ref = x.detach().clone().requires_grad_()
+    initial_ref = initial.detach().clone().requires_grad_()
+    params_ref = [parameter.detach().clone().requires_grad_() for parameter in params]
+    previous = torch.cat((initial_ref[:, None, :], x_ref[:, :-1, :]), dim=1)
+    expected = tuple(
+        x_ref + (previous - x_ref) * parameter for parameter in params_ref
+    ) + (x_ref[:, -1, :].contiguous(),)
+    upstream = [torch.randn_like(output) for output in actual]
+    actual_grads = torch.autograd.grad(
+        actual, (x, initial, *params), grad_outputs=upstream
+    )
+    expected_grads = torch.autograd.grad(
+        expected, (x_ref, initial_ref, *params_ref), grad_outputs=upstream
+    )
+    for output, reference in zip(actual, expected, strict=True):
+        assert torch.allclose(output, reference, atol=0.01, rtol=0.01)
+    for gradient, reference in zip(actual_grads, expected_grads, strict=True):
+        assert torch.allclose(gradient, reference, atol=0.03, rtol=0.03)
+
+    if zero_shift:
+        pretrain = pretrain_tmix_mix6_bf16(x.detach(), *(p.detach() for p in params))
+        for output, reference in zip(actual[:6], pretrain, strict=True):
+            assert torch.equal(output, reference)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_statetune_mix6_chunk_composition() -> None:
+    torch.manual_seed(23)
+    device = torch.device("cuda")
+    b, t, c, split = 2, 7, 128, 3
+    x = torch.randn(b, t, c, device=device, dtype=torch.bfloat16).requires_grad_()
+    initial = torch.randn(b, c, device=device, dtype=torch.bfloat16).requires_grad_()
+    params = [
+        torch.randn(c, device=device, dtype=torch.bfloat16).requires_grad_()
+        for _ in range(6)
+    ]
+    whole = statetune_tmix_mix6_bf16(x, initial, *params)
+    upstream = [torch.randn_like(output) for output in whole]
+    whole_grads = torch.autograd.grad(
+        whole, (x, initial, *params), grad_outputs=upstream
+    )
+
+    x_chunked = x.detach().clone().requires_grad_()
+    initial_chunked = initial.detach().clone().requires_grad_()
+    params_chunked = [parameter.detach().clone().requires_grad_() for parameter in params]
+    first = statetune_tmix_mix6_bf16(
+        x_chunked[:, :split].contiguous(), initial_chunked, *params_chunked
+    )
+    second = statetune_tmix_mix6_bf16(
+        x_chunked[:, split:].contiguous(), first[-1], *params_chunked
+    )
+    chunked = tuple(
+        torch.cat((left, right), dim=1)
+        for left, right in zip(first[:6], second[:6], strict=True)
+    ) + (second[-1],)
+    chunked_grads = torch.autograd.grad(
+        chunked,
+        (x_chunked, initial_chunked, *params_chunked),
+        grad_outputs=upstream,
+    )
+    for expected, actual in zip(whole, chunked, strict=True):
+        assert torch.equal(expected, actual)
+    for expected, actual in zip(whole_grads, chunked_grads, strict=True):
+        assert torch.allclose(expected, actual, atol=0.03, rtol=0.03)
+
+
+def test_statetune_mix6_rejects_cpu_and_invalid_shape() -> None:
+    x = torch.zeros(1, 1, 8, dtype=torch.bfloat16)
+    initial = torch.zeros(1, 8, dtype=torch.bfloat16)
+    params = [torch.zeros(8, dtype=torch.bfloat16) for _ in range(6)]
+    with pytest.raises(ValueError, match="CUDA"):
+        statetune_tmix_mix6_bf16(x, initial, *params)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_statetune_mix6_rejects_misaligned_vec2_input() -> None:
+    device = torch.device("cuda")
+    x = torch.empty(1 * 2 * 8 + 1, device=device, dtype=torch.bfloat16)[1:].view(
+        1, 2, 8
+    )
+    initial = torch.zeros(1, 8, device=device, dtype=torch.bfloat16)
+    params = [torch.zeros(8, device=device, dtype=torch.bfloat16) for _ in range(6)]
+    assert x.is_contiguous() and x.data_ptr() % 4 == 2
+    with pytest.raises(ValueError, match="x must be 4-byte aligned"):
+        statetune_tmix_mix6_bf16(x, initial, *params)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_statetune_mix6_rejects_invalid_cuda_contracts() -> None:
+    device = torch.device("cuda")
+    x = torch.zeros(1, 2, 8, device=device, dtype=torch.bfloat16)
+    initial = torch.zeros(1, 8, device=device, dtype=torch.bfloat16)
+    params = [torch.zeros(8, device=device, dtype=torch.bfloat16) for _ in range(6)]
+    with pytest.raises(TypeError, match="x must have dtype"):
+        statetune_tmix_mix6_bf16(x.float(), initial, *params)
+    with pytest.raises(TypeError, match="initial_shift must have dtype"):
+        statetune_tmix_mix6_bf16(x, initial.half(), *params)
+    with pytest.raises(ValueError, match="x must be contiguous"):
+        statetune_tmix_mix6_bf16(x.transpose(1, 2), initial, *params)
+    with pytest.raises(ValueError, match="non-empty"):
+        statetune_tmix_mix6_bf16(x[:, :0], initial, *params)
+    with pytest.raises(ValueError, match="initial_shift must have shape"):
+        statetune_tmix_mix6_bf16(x, initial[:, :-2].contiguous(), *params)
+    with pytest.raises(ValueError, match="x_r must have shape"):
+        statetune_tmix_mix6_bf16(x, initial, params[0][:-2].contiguous(), *params[1:])
+
+    odd_x = torch.zeros(1, 2, 7, device=device, dtype=torch.bfloat16)
+    odd_initial = torch.zeros(1, 7, device=device, dtype=torch.bfloat16)
+    odd_params = [torch.zeros(7, device=device, dtype=torch.bfloat16) for _ in range(6)]
+    with pytest.raises(ValueError, match="divisible by 2"):
+        statetune_tmix_mix6_bf16(odd_x, odd_initial, *odd_params)
+
+    if torch.cuda.device_count() > 1:
+        foreign = params[0].to("cuda:1")
+        with pytest.raises(ValueError, match="x_r must share x's device"):
+            statetune_tmix_mix6_bf16(x, initial, foreign, *params[1:])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_infer_mix6_consumes_packed_metadata_ticket_and_updates_last_shift() -> None:
     device = torch.device("cuda")
-    b, c = 2, 8
+    c = 8
     lengths = (2, 3)
     total = sum(lengths)
     x = torch.arange(total * c, device=device, dtype=torch.float16).reshape(total, c)
@@ -169,10 +318,7 @@ def test_infer_mix6_fused_add_layer_norm_matches_albatross_t1_path() -> None:
     residual = (torch.randn(1, c, device=device) * 0.02).to(torch.float16)
     weight = (torch.randn(c, device=device) * 0.1 + 1.0).to(torch.float16)
     bias = (torch.randn(c, device=device) * 0.01).to(torch.float16)
-    params = [
-        (torch.randn(c, device=device) * 0.1).to(torch.float16)
-        for _ in range(6)
-    ]
+    params = [(torch.randn(c, device=device) * 0.1).to(torch.float16) for _ in range(6)]
     initial = torch.randn(5, c, device=device, dtype=torch.float16)
     shift_state = initial.clone()
     cu_seqlens = torch.tensor([0, 1], device=device, dtype=torch.int32)
@@ -200,7 +346,9 @@ def test_infer_mix6_fused_add_layer_norm_matches_albatross_t1_path() -> None:
     summed = x.float() + residual.float()
     mean = summed.mean(dim=-1, keepdim=True)
     rstd = torch.rsqrt((summed - mean).square().mean(dim=-1, keepdim=True) + eps)
-    normalized = ((summed - mean) * rstd * weight.float() + bias.float()).to(torch.float16)
+    normalized = ((summed - mean) * rstd * weight.float() + bias.float()).to(
+        torch.float16
+    )
     previous = initial[3]
     expected = [
         (
@@ -224,7 +372,9 @@ def test_infer_mix6_fused_rejects_non_b1_dispatch() -> None:
     device = torch.device("cuda")
     x = torch.zeros(1, 4096, device=device, dtype=torch.float16)
     residual = torch.zeros_like(x)
-    parameters = [torch.ones(4096, device=device, dtype=torch.float16) for _ in range(8)]
+    parameters = [
+        torch.ones(4096, device=device, dtype=torch.float16) for _ in range(8)
+    ]
     cu_seqlens = torch.tensor([0, 1, 2], device=device, dtype=torch.int32)
     state_indices = torch.tensor([0, 1], device=device, dtype=torch.int32)
     with pytest.raises(ValueError, match="B=1"):

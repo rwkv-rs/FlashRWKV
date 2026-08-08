@@ -9,7 +9,6 @@ import torch
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-
 _ARCHITECTURE_PATTERN = re.compile(
     r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)(?:a)?(?:\+PTX)?",
     re.IGNORECASE,
@@ -46,7 +45,9 @@ def _validate_wheel_architectures(
             "FlashRWKV2 native builds require TORCH_CUDA_ARCH_LIST=12.0 or an "
             "SM120 CUDA device"
         )
-    unsupported = tuple(capability for capability in capabilities if capability < (12, 0))
+    unsupported = tuple(
+        capability for capability in capabilities if capability < (12, 0)
+    )
     if unsupported:
         rendered = ", ".join(f"{major}.{minor}" for major, minor in unsupported)
         raise RuntimeError(
@@ -70,8 +71,8 @@ class UniqueObjectBuildExtension(BuildExtension):
         original_setup_compile = compiler._setup_compile
 
         def setup_compile(*args, **kwargs):
-            macros, objects, extra_postargs, pp_opts, build = (
-                original_setup_compile(*args, **kwargs)
+            macros, objects, extra_postargs, pp_opts, build = original_setup_compile(
+                *args, **kwargs
             )
             sources = kwargs.get("sources")
             if sources is None and len(args) >= 4:
@@ -136,18 +137,12 @@ ext_modules = (
                 "csrc/registration.cpp",
                 "csrc/validation.cpp",
                 "csrc/validation/recurrent_metadata.cu",
-                "csrc/sm120/tmix/wkv7/"
-                "infer_recurrent_fp32io16_forward_varlen.cpp",
-                "csrc/sm120/tmix/wkv7/"
-                "infer_recurrent_fp32io16_forward_varlen.cu",
-                "csrc/sm120/tmix/wkv7/"
-                "infer_recurrent_fp16_forward_varlen.cpp",
-                "csrc/sm120/tmix/wkv7/"
-                "infer_recurrent_fp16_forward_varlen.cu",
-                "csrc/sm120/tmix/wkv7/"
-                "infer_chunk_bf16_forward_varlen.cpp",
-                "csrc/sm120/tmix/wkv7/"
-                "infer_chunk_bf16_forward_varlen.cu",
+                "csrc/sm120/tmix/wkv7/infer_recurrent_fp32io16_forward_varlen.cpp",
+                "csrc/sm120/tmix/wkv7/infer_recurrent_fp32io16_forward_varlen.cu",
+                "csrc/sm120/tmix/wkv7/infer_recurrent_fp16_forward_varlen.cpp",
+                "csrc/sm120/tmix/wkv7/infer_recurrent_fp16_forward_varlen.cu",
+                "csrc/sm120/tmix/wkv7/infer_chunk_bf16_forward_varlen.cpp",
+                "csrc/sm120/tmix/wkv7/infer_chunk_bf16_forward_varlen.cu",
                 "csrc/sm120/tmix/mix6/infer_fp16_forward_varlen.cpp",
                 "csrc/sm120/tmix/mix6/infer_fp16_forward_varlen.cu",
                 "csrc/sm120/tmix/kk_a_gate/infer_fp16_forward_varlen.cpp",
@@ -174,10 +169,8 @@ ext_modules = (
                 "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_forward.cu",
                 "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_backward.cpp",
                 "csrc/sm90/loss/l2wrap_ce/pretrain_bf16_backward.cu",
-                "csrc/sm90/tmix/wkv7/"
-                "pretrain_recurrent_bf16_forward.cpp",
-                "csrc/sm90/tmix/wkv7/"
-                "pretrain_recurrent_bf16_forward.cu",
+                "csrc/sm90/tmix/wkv7/pretrain_recurrent_bf16_forward.cpp",
+                "csrc/sm90/tmix/wkv7/pretrain_recurrent_bf16_forward.cu",
                 "csrc/sm90/tmix/a_gate/pretrain_bf16_forward.cpp",
                 "csrc/sm90/tmix/a_gate/pretrain_bf16_forward.cu",
                 "csrc/sm90/tmix/a_gate/pretrain_bf16_backward.cpp",
@@ -190,6 +183,10 @@ ext_modules = (
                 "csrc/sm90/tmix/mix6/pretrain_bf16_forward.cu",
                 "csrc/sm90/tmix/mix6/pretrain_bf16_backward.cpp",
                 "csrc/sm90/tmix/mix6/pretrain_bf16_backward.cu",
+                "csrc/sm90/tmix/mix6/statetune_bf16_forward.cpp",
+                "csrc/sm90/tmix/mix6/statetune_bf16_forward.cu",
+                "csrc/sm90/tmix/mix6/statetune_bf16_backward.cpp",
+                "csrc/sm90/tmix/mix6/statetune_bf16_backward.cu",
                 "csrc/sm90/tmix/kk_pre/pretrain_bf16_forward.cpp",
                 "csrc/sm90/tmix/kk_pre/pretrain_bf16_forward.cu",
                 "csrc/sm90/tmix/kk_pre/pretrain_bf16_backward.cpp",
@@ -212,6 +209,10 @@ ext_modules = (
                 "csrc/sm90/cmix/mix/pretrain_bf16_forward.cu",
                 "csrc/sm90/cmix/mix/pretrain_bf16_backward.cpp",
                 "csrc/sm90/cmix/mix/pretrain_bf16_backward.cu",
+                "csrc/sm90/cmix/mix/statetune_bf16_forward.cpp",
+                "csrc/sm90/cmix/mix/statetune_bf16_forward.cu",
+                "csrc/sm90/cmix/mix/statetune_bf16_backward.cpp",
+                "csrc/sm90/cmix/mix/statetune_bf16_backward.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-Wno-psabi"],

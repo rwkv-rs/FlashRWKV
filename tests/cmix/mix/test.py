@@ -11,6 +11,7 @@ from flashrwkv2.cmix.mix import (
     infer_cmix_mix_forward_varlen,
     infer_cmix_relu_square_forward_varlen,
     pretrain_cmix_bf16,
+    statetune_cmix_bf16,
 )
 from flashrwkv2.tmix.wkv7 import prepare_recurrent_metadata
 
@@ -63,8 +64,16 @@ def test_pretrain_cmix_forward_backward() -> None:
     b, t, c = 1, 3, 4
     x = (torch.randn(b, t, c, device=device) * 0.03).to(torch.bfloat16).requires_grad_()
     x_k = (torch.randn(c, device=device) * 0.1).to(torch.bfloat16).requires_grad_()
-    key = (torch.randn(4 * c, c, device=device) * 0.05).to(torch.bfloat16).requires_grad_()
-    value = (torch.randn(c, 4 * c, device=device) * 0.05).to(torch.bfloat16).requires_grad_()
+    key = (
+        (torch.randn(4 * c, c, device=device) * 0.05)
+        .to(torch.bfloat16)
+        .requires_grad_()
+    )
+    value = (
+        (torch.randn(c, 4 * c, device=device) * 0.05)
+        .to(torch.bfloat16)
+        .requires_grad_()
+    )
     output = pretrain_cmix_bf16(x, x_k, key, value)
     previous = torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
     mixed = x + (previous - x) * x_k
@@ -91,10 +100,185 @@ def test_pretrain_cmix_forward_backward() -> None:
     # test only observes the exact GEMM result, not a forced algorithm API.
     rows, hidden, channels = 48, 16384, 4096
     down_x = torch.randn(rows, hidden, device=device, dtype=torch.float16) * 0.01
-    down_weight = torch.randn(hidden, channels, device=device, dtype=torch.float16) * 0.01
+    down_weight = (
+        torch.randn(hidden, channels, device=device, dtype=torch.float16) * 0.01
+    )
     down_output = infer_cmix_linear_ffn_down_forward_varlen(down_x, down_weight)
     expected_down = down_x.float() @ down_weight.float()
     assert torch.allclose(down_output.float(), expected_down, atol=0.04, rtol=0.04)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("batch_size", (1, 2))
+@pytest.mark.parametrize("seqlen", (1, 2, 7, 16, 31))
+@pytest.mark.parametrize("zero_shift", (False, True))
+def test_statetune_cmix_matches_torch_forward_backward(
+    batch_size: int, seqlen: int, zero_shift: bool
+) -> None:
+    torch.manual_seed(2000 + batch_size * 100 + seqlen)
+    device = torch.device("cuda")
+    channels = 16
+    x = (
+        (torch.randn(batch_size, seqlen, channels, device=device) * 0.05)
+        .to(torch.bfloat16)
+        .requires_grad_()
+    )
+    initial = (torch.randn(batch_size, channels, device=device) * 0.05).to(
+        torch.bfloat16
+    )
+    if zero_shift:
+        initial.zero_()
+    initial.requires_grad_()
+    x_k = (
+        (torch.randn(channels, device=device) * 0.1).to(torch.bfloat16).requires_grad_()
+    )
+    key = (
+        (torch.randn(4 * channels, channels, device=device) * 0.05)
+        .to(torch.bfloat16)
+        .requires_grad_()
+    )
+    value = (
+        (torch.randn(channels, 4 * channels, device=device) * 0.05)
+        .to(torch.bfloat16)
+        .requires_grad_()
+    )
+    actual = statetune_cmix_bf16(x, initial, x_k, key, value)
+
+    x_ref = x.detach().clone().requires_grad_()
+    initial_ref = initial.detach().clone().requires_grad_()
+    x_k_ref = x_k.detach().clone().requires_grad_()
+    key_ref = key.detach().clone().requires_grad_()
+    value_ref = value.detach().clone().requires_grad_()
+    previous = torch.cat((initial_ref[:, None, :], x_ref[:, :-1, :]), dim=1)
+    mixed = x_ref + (previous - x_ref) * x_k_ref
+    activation = torch.relu(mixed @ key_ref.t()).square()
+    expected = (activation @ value_ref.t(), x_ref[:, -1, :].contiguous())
+    upstream = [torch.randn_like(output) for output in actual]
+    actual_grads = torch.autograd.grad(
+        actual, (x, initial, x_k, key, value), grad_outputs=upstream
+    )
+    expected_grads = torch.autograd.grad(
+        expected,
+        (x_ref, initial_ref, x_k_ref, key_ref, value_ref),
+        grad_outputs=upstream,
+    )
+    for output, reference in zip(actual, expected, strict=True):
+        assert torch.allclose(output, reference, atol=0.03, rtol=0.03)
+    for gradient, reference in zip(actual_grads, expected_grads, strict=True):
+        assert torch.allclose(gradient, reference, atol=0.06, rtol=0.06)
+
+    if zero_shift:
+        pretrain = pretrain_cmix_bf16(
+            x.detach(), x_k.detach(), key.detach(), value.detach()
+        )
+        assert torch.equal(actual[0], pretrain)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_statetune_cmix_chunk_composition() -> None:
+    torch.manual_seed(29)
+    device = torch.device("cuda")
+    b, t, c, split = 2, 7, 16, 3
+    x = torch.randn(b, t, c, device=device, dtype=torch.bfloat16).requires_grad_()
+    initial = torch.randn(b, c, device=device, dtype=torch.bfloat16).requires_grad_()
+    x_k = torch.randn(c, device=device, dtype=torch.bfloat16).requires_grad_()
+    key = torch.randn(4 * c, c, device=device, dtype=torch.bfloat16).requires_grad_()
+    value = torch.randn(c, 4 * c, device=device, dtype=torch.bfloat16).requires_grad_()
+    whole = statetune_cmix_bf16(x, initial, x_k, key, value)
+    upstream = [torch.randn_like(output) for output in whole]
+    whole_grads = torch.autograd.grad(
+        whole, (x, initial, x_k, key, value), grad_outputs=upstream
+    )
+
+    x_chunked = x.detach().clone().requires_grad_()
+    initial_chunked = initial.detach().clone().requires_grad_()
+    x_k_chunked = x_k.detach().clone().requires_grad_()
+    key_chunked = key.detach().clone().requires_grad_()
+    value_chunked = value.detach().clone().requires_grad_()
+    first = statetune_cmix_bf16(
+        x_chunked[:, :split].contiguous(),
+        initial_chunked,
+        x_k_chunked,
+        key_chunked,
+        value_chunked,
+    )
+    second = statetune_cmix_bf16(
+        x_chunked[:, split:].contiguous(),
+        first[1],
+        x_k_chunked,
+        key_chunked,
+        value_chunked,
+    )
+    chunked = (torch.cat((first[0], second[0]), dim=1), second[1])
+    chunked_grads = torch.autograd.grad(
+        chunked,
+        (x_chunked, initial_chunked, x_k_chunked, key_chunked, value_chunked),
+        grad_outputs=upstream,
+    )
+    for expected, actual in zip(whole, chunked, strict=True):
+        assert torch.equal(expected, actual)
+    for expected, actual in zip(whole_grads, chunked_grads, strict=True):
+        assert torch.allclose(expected, actual, atol=0.06, rtol=0.06)
+
+
+def test_statetune_cmix_rejects_cpu_and_invalid_shape() -> None:
+    x = torch.zeros(1, 1, 8, dtype=torch.bfloat16)
+    initial = torch.zeros(1, 8, dtype=torch.bfloat16)
+    x_k = torch.zeros(8, dtype=torch.bfloat16)
+    key = torch.zeros(32, 8, dtype=torch.bfloat16)
+    value = torch.zeros(8, 32, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="CUDA"):
+        statetune_cmix_bf16(x, initial, x_k, key, value)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_statetune_cmix_rejects_misaligned_vec2_input() -> None:
+    device = torch.device("cuda")
+    x = torch.zeros(1, 2, 8, device=device, dtype=torch.bfloat16)
+    initial = torch.empty(1 * 8 + 1, device=device, dtype=torch.bfloat16)[1:].view(
+        1, 8
+    )
+    x_k = torch.zeros(8, device=device, dtype=torch.bfloat16)
+    key = torch.zeros(32, 8, device=device, dtype=torch.bfloat16)
+    value = torch.zeros(8, 32, device=device, dtype=torch.bfloat16)
+    assert initial.is_contiguous() and initial.data_ptr() % 4 == 2
+    with pytest.raises(ValueError, match="initial_shift must be 4-byte aligned"):
+        statetune_cmix_bf16(x, initial, x_k, key, value)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_statetune_cmix_rejects_invalid_cuda_contracts() -> None:
+    device = torch.device("cuda")
+    x = torch.zeros(1, 2, 8, device=device, dtype=torch.bfloat16)
+    initial = torch.zeros(1, 8, device=device, dtype=torch.bfloat16)
+    x_k = torch.zeros(8, device=device, dtype=torch.bfloat16)
+    key = torch.zeros(32, 8, device=device, dtype=torch.bfloat16)
+    value = torch.zeros(8, 32, device=device, dtype=torch.bfloat16)
+    with pytest.raises(TypeError, match="x must have dtype"):
+        statetune_cmix_bf16(x.float(), initial, x_k, key, value)
+    with pytest.raises(TypeError, match="initial_shift must have dtype"):
+        statetune_cmix_bf16(x, initial.half(), x_k, key, value)
+    with pytest.raises(ValueError, match="x must be contiguous"):
+        statetune_cmix_bf16(x.transpose(1, 2), initial, x_k, key, value)
+    with pytest.raises(ValueError, match="non-empty"):
+        statetune_cmix_bf16(x[:, :0], initial, x_k, key, value)
+    with pytest.raises(ValueError, match="initial_shift must have shape"):
+        statetune_cmix_bf16(x, initial[:, :-2].contiguous(), x_k, key, value)
+    with pytest.raises(ValueError, match="key_weight must have shape"):
+        statetune_cmix_bf16(x, initial, x_k, key[:-1].contiguous(), value)
+
+    odd_x = torch.zeros(1, 2, 7, device=device, dtype=torch.bfloat16)
+    odd_initial = torch.zeros(1, 7, device=device, dtype=torch.bfloat16)
+    odd_x_k = torch.zeros(7, device=device, dtype=torch.bfloat16)
+    odd_key = torch.zeros(28, 7, device=device, dtype=torch.bfloat16)
+    odd_value = torch.zeros(7, 28, device=device, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="divisible by 2"):
+        statetune_cmix_bf16(odd_x, odd_initial, odd_x_k, odd_key, odd_value)
+
+    if torch.cuda.device_count() > 1:
+        foreign = x_k.to("cuda:1")
+        with pytest.raises(ValueError, match="x_k must share x's device"):
+            statetune_cmix_bf16(x, initial, foreign, key, value)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -213,7 +397,9 @@ def test_infer_cmix_fused_add_layer_norm_matches_albatross_t1_path() -> None:
     summed = x.float() + residual.float()
     mean = summed.mean(dim=-1, keepdim=True)
     rstd = torch.rsqrt((summed - mean).square().mean(dim=-1, keepdim=True) + eps)
-    normalized = ((summed - mean) * rstd * weight.float() + bias.float()).to(torch.float16)
+    normalized = ((summed - mean) * rstd * weight.float() + bias.float()).to(
+        torch.float16
+    )
     expected_mixed = (
         normalized.float()
         + (initial[state_indices.long()].float() - normalized.float()) * x_k.float()

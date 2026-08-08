@@ -42,8 +42,14 @@ def infer_cmix_sparse_forward_varlen(
     state_indices: torch.Tensor,
     max_seqlen: int | None = None,
     validated_metadata: object | None = None,
+    deterministic: bool = False,
 ) -> torch.Tensor:
-    """Run the canonical no-fc CMix sparse path on packed requests."""
+    """Run the no-fc CMix sparse path on packed requests.
+
+    The default canonical Albatross down projection uses FP16 atomics and is
+    not bitwise deterministic.  Set ``deterministic=True`` to use a slower,
+    fixed-order reduction on the same GPU and software build.
+    """
 
     _check_half(x, "x", x)
     for name, tensor in (("x_k", x_k), ("key_fc", key_fc), ("value_fc", value_fc)):
@@ -59,6 +65,8 @@ def infer_cmix_sparse_forward_varlen(
         raise ValueError("value_fc must have shape [F,C]")
     if shift_state_pool.ndim != 2 or shift_state_pool.shape[1] != x.shape[1]:
         raise ValueError("shift_state_pool must have shape [slots,C]")
+    if not isinstance(deterministic, bool):
+        raise TypeError("deterministic must be a bool")
     _check_sparse_grid_rows(x.shape[0], "cmix sparse combined", "grid.y/grid.z")
     _check_metadata_inputs(cu_seqlens, state_indices)
     if max_seqlen is None:
@@ -94,6 +102,7 @@ def infer_cmix_sparse_forward_varlen(
         state_indices,
         launch_max_seqlen,
         ticket,
+        deterministic,
     )
 
 
@@ -160,8 +169,14 @@ def infer_cmix_sparse_down_relu_forward_varlen(
     *,
     batch_size: int | None = None,
     max_seqlen: int | None = None,
+    deterministic: bool = False,
 ) -> torch.Tensor:
-    """Run the Albatross sparse ReLU-square/down family with caller dispatch."""
+    """Run sparse ReLU-square/down with caller dispatch.
+
+    The default canonical Albatross kernels use FP16 atomics and are not
+    bitwise deterministic.  Set ``deterministic=True`` to use a slower,
+    fixed-order reduction on the same GPU and software build.
+    """
 
     _check_half(preact, "preact", preact)
     _check_half(value_fc, "value_fc", preact)
@@ -169,6 +184,8 @@ def infer_cmix_sparse_down_relu_forward_varlen(
         raise ValueError("preact must be [rows,F] and value_fc must be [F,C]")
     if value_fc.shape[1] <= 0 or value_fc.shape[1] % 2:
         raise ValueError("value_fc must have an even C in shape [F,C]")
+    if not isinstance(deterministic, bool):
+        raise TypeError("deterministic must be a bool")
     _check_sparse_grid_rows(preact.shape[0], "cmix sparse down", "grid.y/grid.z")
     if (batch_size is None) != (max_seqlen is None):
         raise ValueError("batch_size and max_seqlen must be provided together")
@@ -189,12 +206,12 @@ def infer_cmix_sparse_down_relu_forward_varlen(
         launch_batch = batch_size
         launch_max_seqlen = max_seqlen
     return _extension().cmix_sparse_down_relu_forward_varlen(
-        preact, value_fc, launch_batch, launch_max_seqlen
+        preact, value_fc, launch_batch, launch_max_seqlen, deterministic
     )
 
 
 __all__ = [
+    "infer_cmix_sparse_down_relu_forward_varlen",
     "infer_cmix_sparse_forward_varlen",
     "infer_cmix_sparse_up_forward_varlen",
-    "infer_cmix_sparse_down_relu_forward_varlen",
 ]

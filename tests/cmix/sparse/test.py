@@ -26,6 +26,21 @@ def test_cmix_sparse_down_dispatch_uses_batch_max_metadata() -> None:
     assert "} else if (dispatch_rows == 1)" in source
 
 
+def test_cmix_sparse_deterministic_kernel_has_one_launch_owner_and_no_atomics() -> None:
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "csrc/sm120/cmix/sparse/infer_fp16_forward_varlen.cu"
+    ).read_text()
+    symbol = "cmix_sparse_spmv_deterministic_rows_kernel"
+    kernel_start = source.index(f"void {symbol}")
+    launcher_start = source.index("void launch_sparse_down_deterministic", kernel_start)
+    kernel = source[kernel_start:launcher_start]
+    assert "atomicAdd(" not in kernel
+    assert "for (int start_f = 0; start_f < F; start_f += FFN_TILE)" in kernel
+    assert source.count(f"void {symbol}") == 1
+    assert source.count(f"{symbol}<") == 2
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_cmix_sparse_rejects_rows_beyond_cuda_grid_extent_before_launch() -> None:
     device = torch.device("cuda")
@@ -215,3 +230,131 @@ def test_cmix_sparse_one_and_t512_dispatch() -> None:
         preact_rows, value_fc, batch_size=2, max_seqlen=2
     )
     assert torch.allclose(actual_rows.float(), expected_rows, atol=128.0, rtol=0.12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("tokens", [1, 16])
+def test_cmix_sparse_deterministic_combined_is_bitwise_repeatable(tokens: int) -> None:
+    torch.manual_seed(47 + tokens)
+    device = torch.device("cuda")
+    channels, features = 256, 256  # Two feature tiles exercise the former atomic race.
+    x = torch.randn(tokens, channels, device=device, dtype=torch.float16) * 0.1
+    x_k = torch.randn(channels, device=device, dtype=torch.float16) * 0.1
+    key_fc = torch.randn(features, channels, device=device, dtype=torch.float16) * 0.1
+    value_fc = torch.randn(features, channels, device=device, dtype=torch.float16) * 0.1
+    initial_shift = torch.randn(1, channels, device=device, dtype=torch.float16) * 0.1
+    cu = torch.tensor([0, tokens], device=device, dtype=torch.int32)
+    slots = torch.tensor([0], device=device, dtype=torch.int32)
+
+    mixed = x.float().clone()
+    previous = initial_shift[0].float()
+    for row in range(tokens):
+        current = x[row].float()
+        mixed[row] = current + (previous - current) * x_k.float()
+        previous = current
+    expected = torch.relu(mixed @ key_fc.float().t()).square() @ value_fc.float()
+
+    outputs = []
+    states = []
+    for _ in range(8):
+        shift = initial_shift.clone()
+        outputs.append(
+            infer_cmix_sparse_forward_varlen(
+                x,
+                x_k,
+                key_fc,
+                value_fc,
+                shift_state_pool=shift,
+                cu_seqlens=cu,
+                state_indices=slots,
+                max_seqlen=tokens,
+                deterministic=True,
+            )
+        )
+        states.append(shift)
+
+    assert all(torch.equal(outputs[0], output) for output in outputs[1:])
+    assert all(torch.equal(states[0], state) for state in states[1:])
+    assert torch.isfinite(outputs[0]).all()
+    assert torch.allclose(outputs[0].float(), expected, atol=0.5, rtol=0.1)
+    assert torch.equal(states[0][0], x[-1])
+
+    default_shift = initial_shift.clone()
+    explicit_shift = initial_shift.clone()
+    default_output = infer_cmix_sparse_forward_varlen(
+        x,
+        x_k,
+        key_fc,
+        value_fc,
+        shift_state_pool=default_shift,
+        cu_seqlens=cu,
+        state_indices=slots,
+        max_seqlen=tokens,
+    )
+    explicit_output = infer_cmix_sparse_forward_varlen(
+        x,
+        x_k,
+        key_fc,
+        value_fc,
+        shift_state_pool=explicit_shift,
+        cu_seqlens=cu,
+        state_indices=slots,
+        max_seqlen=tokens,
+        deterministic=False,
+    )
+    assert torch.equal(default_shift, explicit_shift)
+    assert torch.allclose(default_output, explicit_output, atol=0.5, rtol=0.1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("rows", [1, 16])
+def test_cmix_sparse_deterministic_down_is_bitwise_repeatable(rows: int) -> None:
+    torch.manual_seed(71 + rows)
+    device = torch.device("cuda")
+    channels, features = 256, 256
+    preact = torch.randn(rows, features, device=device, dtype=torch.float16) * 0.1
+    value_fc = torch.randn(features, channels, device=device, dtype=torch.float16) * 0.1
+    expected = torch.relu(preact.float()).square() @ value_fc.float()
+
+    outputs = [
+        infer_cmix_sparse_down_relu_forward_varlen(
+            preact,
+            value_fc,
+            batch_size=1,
+            max_seqlen=rows,
+            deterministic=True,
+        )
+        for _ in range(8)
+    ]
+    assert all(torch.equal(outputs[0], output) for output in outputs[1:])
+    assert torch.isfinite(outputs[0]).all()
+    assert torch.allclose(outputs[0].float(), expected, atol=0.5, rtol=0.1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cmix_sparse_rejects_non_bool_deterministic_before_launch() -> None:
+    device = torch.device("cuda")
+    channels, features = 256, 256
+    x = torch.zeros(1, channels, device=device, dtype=torch.float16)
+    x_k = torch.zeros(channels, device=device, dtype=torch.float16)
+    key_fc = torch.zeros(features, channels, device=device, dtype=torch.float16)
+    value_fc = torch.zeros(features, channels, device=device, dtype=torch.float16)
+    shift = torch.zeros(1, channels, device=device, dtype=torch.float16)
+    cu = torch.tensor([0, 1], device=device, dtype=torch.int32)
+    slots = torch.tensor([0], device=device, dtype=torch.int32)
+
+    with pytest.raises(TypeError, match="deterministic must be a bool"):
+        infer_cmix_sparse_forward_varlen(
+            x,
+            x_k,
+            key_fc,
+            value_fc,
+            shift_state_pool=shift,
+            cu_seqlens=cu,
+            state_indices=slots,
+            deterministic=1,
+        )
+    with pytest.raises(TypeError, match="deterministic must be a bool"):
+        infer_cmix_sparse_down_relu_forward_varlen(
+            x, value_fc, deterministic=torch.tensor(True, device=device)
+        )

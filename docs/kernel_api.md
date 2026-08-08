@@ -517,6 +517,22 @@ outputs for their floating-point inputs unless an entry states otherwise.
 
 ## StateTune
 
+### `statetune_tmix_mix6_bf16`
+
+- Import: `from flashrwkv2 import statetune_tmix_mix6_bf16`
+- Owner: `flashrwkv2.tmix.mix6`
+- Signature: `statetune_tmix_mix6_bf16(x, initial_shift, x_r, x_w, x_k, x_v, x_a, x_g) -> tuple[torch.Tensor, ...]`
+- Contract: contiguous CUDA BF16 `x [B,T,C]`, BF16 `initial_shift [B,C]`, and six BF16 coefficient vectors `[C]`; `B,T,C` are positive and `C` is even.
+- Result and autograd: returns six mixed tensors `[B,T,C]` plus `next_shift = x[:,-1] [B,C]`. Gradients cover `x`, `initial_shift`, and all coefficient vectors, including the `next_shift` contribution to the last token. Inputs are not mutated.
+
+### `statetune_cmix_bf16`
+
+- Import: `from flashrwkv2 import statetune_cmix_bf16`
+- Owner: `flashrwkv2.cmix.mix`
+- Signature: `statetune_cmix_bf16(x, initial_shift, x_k, key_weight, value_weight) -> tuple[torch.Tensor, torch.Tensor]`
+- Contract: contiguous CUDA BF16 `x [B,T,C]`, `initial_shift [B,C]`, `x_k [C]`, `key_weight [4C,C]`, and `value_weight [C,4C]`; `B,T,C` are positive and `C` is even.
+- Result and autograd: returns the complete BF16 ChannelMix output `[B,T,C]` and `next_shift = x[:,-1] [B,C]`. Gradients cover all five inputs, including both state boundaries. Inputs are not mutated.
+
 ### `statetune_recurrent_fp32io16`
 
 - Import: `from flashrwkv2 import statetune_recurrent_fp32io16`

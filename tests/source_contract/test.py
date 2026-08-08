@@ -7,7 +7,6 @@ import importlib
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 NATIVE_ROOTS = (ROOT / "csrc" / "sm90", ROOT / "csrc" / "sm120")
 GLOBAL_NATIVE = {
@@ -112,9 +111,9 @@ def test_module_paths_are_mirrored() -> None:
         assert (ROOT / "flashrwkv2" / module).exists(), module
         assert (ROOT / "tests" / module).exists(), module
         assert (ROOT / "benchmarks" / module).exists(), module
-        assert any(
-            (native_root / module).exists() for native_root in NATIVE_ROOTS
-        ), module
+        assert any((native_root / module).exists() for native_root in NATIVE_ROOTS), (
+            module
+        )
 
 
 def test_forbidden_global_and_legacy_paths_are_absent_from_active_tree() -> None:
@@ -159,8 +158,13 @@ def test_python_surface_stays_operator_only() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
-                assert not re.search(r"(?:rwkv|transformer|model)", node.name, re.I), path
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "forward":
+                assert not re.search(r"(?:rwkv|transformer|model)", node.name, re.IGNORECASE), (
+                    path
+                )
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "forward"
+            ):
                 argument_names = {argument.arg for argument in node.args.args}
                 assert not argument_names.intersection(
                     {"input_ids", "attention_mask", "position_ids"}
@@ -206,11 +210,9 @@ def test_root_exports_all_public_training_operators() -> None:
             )
             expected[name] = getattr(module, name)
 
-    assert len(expected) == 12
+    assert len(expected) == 14
     root_training_names = {
-        name
-        for name in flashrwkv2.__all__
-        if name.startswith(PUBLIC_TRAINING_PREFIXES)
+        name for name in flashrwkv2.__all__ if name.startswith(PUBLIC_TRAINING_PREFIXES)
     }
     assert root_training_names == set(expected)
     for name, operator in expected.items():
@@ -227,12 +229,10 @@ def test_root_exports_sampling_state_setup() -> None:
 
 def test_fp16_elapsed_advance_stays_in_the_wkv7_owner() -> None:
     cuda_source = (
-        ROOT
-        / "csrc/sm120/tmix/wkv7/infer_recurrent_fp16_forward_varlen.cu"
+        ROOT / "csrc/sm120/tmix/wkv7/infer_recurrent_fp16_forward_varlen.cu"
     ).read_text()
     cpp_source = (
-        ROOT
-        / "csrc/sm120/tmix/wkv7/infer_recurrent_fp16_forward_varlen.cpp"
+        ROOT / "csrc/sm120/tmix/wkv7/infer_recurrent_fp16_forward_varlen.cpp"
     ).read_text()
     python_source = (ROOT / "flashrwkv2/tmix/wkv7/__init__.py").read_text()
 
@@ -302,7 +302,9 @@ def test_sm120_has_no_hardcoded_false_runtime_dispatch() -> None:
     assert not offenders
 
 
-def test_sm120_active_kernels_have_launch_owners_and_disabled_allowlist_is_exact() -> None:
+def test_sm120_active_kernels_have_launch_owners_and_disabled_allowlist_is_exact() -> (
+    None
+):
     kernel_definition = re.compile(
         r"__global__\s+(?:void\s+)?"
         r"(?:__launch_bounds__\s*\([^)]*\)\s*)?"
@@ -341,9 +343,14 @@ def test_sm120_active_kernels_have_launch_owners_and_disabled_allowlist_is_exact
         active, disabled_regions = split_disabled_if0(source)
         for region in disabled_regions:
             disabled_symbols.update(kernel_definition.findall(region))
-        active_without_comments = re.sub(r"//.*?$|/\*.*?\*/", "", active, flags=re.MULTILINE | re.DOTALL)
+        active_without_comments = re.sub(
+            r"//.*?$|/\*.*?\*/", "", active, flags=re.MULTILINE | re.DOTALL
+        )
         for symbol in kernel_definition.findall(active_without_comments):
-            if len(re.findall(rf"\b{re.escape(symbol)}\b", active_without_comments)) < 2:
+            if (
+                len(re.findall(rf"\b{re.escape(symbol)}\b", active_without_comments))
+                < 2
+            ):
                 unreachable.append((path.relative_to(ROOT), symbol))
 
     assert disabled_symbols == {
@@ -357,4 +364,6 @@ def test_sm120_active_kernels_have_launch_owners_and_disabled_allowlist_is_exact
         "tmix_lnx_rkvres_xg_warp_2d_kernel",
         "wkv_fp32_v2_short_block_kernel",
     }
-    assert not unreachable, "\n".join(f"{path}: {symbol}" for path, symbol in unreachable)
+    assert not unreachable, "\n".join(
+        f"{path}: {symbol}" for path, symbol in unreachable
+    )

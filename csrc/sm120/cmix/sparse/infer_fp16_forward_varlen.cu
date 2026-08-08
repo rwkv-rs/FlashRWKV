@@ -9,6 +9,11 @@
 // accumulators, and T512 kernels are copied from the canonical source.  The
 // packed adaptation only changes request-boundary address calculation and
 // moves the final shift-state copy into an ordered closure launch.
+//
+// cmix_sparse_spmv_deterministic_rows_kernel is a FlashRWKV2 extension.  It
+// preserves the canonical FP16 tile arithmetic but assigns each output tile
+// to one CTA and visits feature tiles in a fixed order, avoiding the canonical
+// kernels' cross-CTA FP16 atomicAdd ordering.
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -790,6 +795,122 @@ __global__ __launch_bounds__(256, 2) void cmix_sparse_spmv_relu_rows_t512_reuse_
       acc);
 }
 
+template <bool ApplyReluSquare>
+__global__ __launch_bounds__(FFN_SPMV_THREADS, 4)
+void cmix_sparse_spmv_deterministic_rows_kernel(
+    int C,
+    int F,
+    const dtype* __restrict__ input,
+    const dtype* __restrict__ value_fc,
+    dtype* __restrict__ out) {
+  // FlashRWKV2 deterministic extension: a single CTA owns every half2 in its
+  // output tile.  Feature-tile partials retain the canonical FP16 association
+  // and are combined in monotonically increasing f_block order.
+  __shared__ __align__(256) __half vec_slice[FFN_TILE];
+  __shared__ __align__(256) int nnz_ids[FFN_TILE];
+  __shared__ int nnz_count;
+  __shared__ int warp_counts[FFN_TILE / 32];
+  __shared__ int warp_prefix[FFN_TILE / 32];
+
+  const int c_block = blockIdx.x;
+  const int row = blockIdx.y;
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int warp_id = tid >> 5;
+  const dtype* input_row = input + static_cast<int64_t>(row) * F;
+
+  __half2 total;
+  *reinterpret_cast<int*>(&total) = 0;
+  for (int start_f = 0; start_f < F; start_f += FFN_TILE) {
+    if constexpr (ApplyReluSquare) {
+      const float value = fmaxf(load_h1(input_row + start_f + tid), 0.0f);
+      vec_slice[tid] = __float2half_rn(value * value);
+    } else {
+      vec_slice[tid] = *reinterpret_cast<const __half*>(
+          input_row + start_f + tid);
+    }
+    __syncthreads();
+
+    const bool nonzero = bool(__half_as_ushort(vec_slice[tid]) << 1);
+    const unsigned mask = __ballot_sync(0xffffffffu, nonzero);
+    const int local_pos = __popc(mask & ((1u << lane) - 1u));
+    if (lane == 0) {
+      warp_counts[warp_id] = __popc(mask);
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+      int prefix = 0;
+#pragma unroll
+      for (int warp = 0; warp < FFN_TILE / 32; ++warp) {
+        warp_prefix[warp] = prefix;
+        prefix += warp_counts[warp];
+      }
+      nnz_count = prefix;
+    }
+    __syncthreads();
+
+    if (nonzero) {
+      nnz_ids[warp_prefix[warp_id] + local_pos] = tid;
+    }
+    __syncthreads();
+
+    __half2 tile;
+    *reinterpret_cast<int*>(&tile) = 0;
+    for (int i = 0; i < nnz_count; ++i) {
+      const int actual_f = start_f + nnz_ids[i];
+      const __half2 mat = *reinterpret_cast<const __half2*>(
+          value_fc + static_cast<int64_t>(actual_f) * C +
+          c_block * (2 * FFN_SPMV_THREADS) + tid * 2);
+      tile = __hfma2(__half2half2(vec_slice[nnz_ids[i]]), mat, tile);
+    }
+    total = __hadd2(total, tile);
+    __syncthreads();
+  }
+
+  *reinterpret_cast<__half2*>(
+      out + static_cast<int64_t>(row) * C +
+      c_block * (2 * FFN_SPMV_THREADS) + tid * 2) = total;
+}
+
+void launch_sparse_down_deterministic(
+    int rows,
+    int channels,
+    int features,
+    torch::Tensor input,
+    torch::Tensor value_fc,
+    torch::Tensor output,
+    bool apply_relu_square) {
+  TORCH_CHECK(
+      channels % (2 * FFN_SPMV_THREADS) == 0,
+      "deterministic CMix sparse output channels must be divisible by 256");
+  TORCH_CHECK(
+      features % FFN_TILE == 0,
+      "deterministic CMix sparse features must be divisible by 128");
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  const dim3 grid(
+      static_cast<unsigned int>(channels / (2 * FFN_SPMV_THREADS)),
+      static_cast<unsigned int>(rows));
+  if (apply_relu_square) {
+    cmix_sparse_spmv_deterministic_rows_kernel<true><<<
+        grid, FFN_SPMV_THREADS, 0, stream>>>(
+        channels,
+        features,
+        reinterpret_cast<const dtype*>(input.data_ptr()),
+        reinterpret_cast<const dtype*>(value_fc.data_ptr()),
+        reinterpret_cast<dtype*>(output.data_ptr()));
+  } else {
+    cmix_sparse_spmv_deterministic_rows_kernel<false><<<
+        grid, FFN_SPMV_THREADS, 0, stream>>>(
+        channels,
+        features,
+        reinterpret_cast<const dtype*>(input.data_ptr()),
+        reinterpret_cast<const dtype*>(value_fc.data_ptr()),
+        reinterpret_cast<dtype*>(output.data_ptr()));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void launch_sparse_up(
     int batch_size,
     int total_tokens,
@@ -1003,11 +1124,18 @@ torch::Tensor cmix_sparse_down_relu_forward_varlen_cuda(
     torch::Tensor preact,
     torch::Tensor value_fc,
     int64_t batch_size,
-    int64_t max_seqlen) {
+    int64_t max_seqlen,
+    bool deterministic) {
   const int rows = static_cast<int>(preact.size(0));
   const int features = static_cast<int>(preact.size(1));
   const int channels = static_cast<int>(value_fc.size(1));
   auto output = torch::empty({rows, channels}, preact.options());
+
+  if (deterministic) {
+    launch_sparse_down_deterministic(
+        rows, channels, features, preact, value_fc, output, true);
+    return output;
+  }
 
   // Canonical Albatross caller policy.  The direct public entry point does
   // not expose accumulator/reuse selectors; a caller that knows B/T supplies
@@ -1103,7 +1231,8 @@ torch::Tensor cmix_sparse_forward_varlen_cuda(
     torch::Tensor value_fc,
     torch::Tensor query_start_loc,
     torch::Tensor state_indices,
-    torch::Tensor metadata_status) {
+    torch::Tensor metadata_status,
+    bool deterministic) {
   auto act = torch::empty({total_tokens, features}, x.options());
   launch_sparse_up(
       batch_size,
@@ -1121,6 +1250,11 @@ torch::Tensor cmix_sparse_forward_varlen_cuda(
       metadata_status);
 
   auto output = torch::empty({total_tokens, channels}, x.options());
+  if (deterministic) {
+    launch_sparse_down_deterministic(
+        total_tokens, channels, features, act, value_fc, output, false);
+    return output;
+  }
   const auto stream = at::cuda::getCurrentCUDAStream();
   const int c_blocks = channels / (2 * FFN_SPMV_THREADS);
   TORCH_CHECK(c_blocks > 0, "CMix sparse output channels are too small");

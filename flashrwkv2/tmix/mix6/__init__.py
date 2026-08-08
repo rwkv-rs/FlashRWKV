@@ -122,7 +122,18 @@ def infer_tmix_mix6_add_layer_norm_forward_varlen(
     """Run Albatross's fused B==1,T==1 TMix add-layer-norm path."""
 
     tensors = (x, residual, weight, bias, x_r, x_w, x_k, x_v, x_a, x_g)
-    names = ("x", "residual", "weight", "bias", "x_r", "x_w", "x_k", "x_v", "x_a", "x_g")
+    names = (
+        "x",
+        "residual",
+        "weight",
+        "bias",
+        "x_r",
+        "x_w",
+        "x_k",
+        "x_v",
+        "x_a",
+        "x_g",
+    )
     for name, tensor in zip(names, tensors, strict=True):
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"{name} must be a torch.Tensor")
@@ -148,8 +159,14 @@ def infer_tmix_mix6_add_layer_norm_forward_varlen(
         or shift_state_pool.shape[1] != x.shape[1]
         or shift_state_pool.device != x.device
     ):
-        raise ValueError("shift_state_pool must be contiguous CUDA float16 [slots,4096]")
-    if not isinstance(eps, (float, int)) or isinstance(eps, bool) or not math.isfinite(float(eps)):
+        raise ValueError(
+            "shift_state_pool must be contiguous CUDA float16 [slots,4096]"
+        )
+    if (
+        not isinstance(eps, (float, int))
+        or isinstance(eps, bool)
+        or not math.isfinite(float(eps))
+    ):
         raise ValueError("eps must be finite")
     if float(eps) <= 0.0:
         raise ValueError("eps must be positive")
@@ -224,6 +241,27 @@ class _PretrainMix6(torch.autograd.Function):
         )
 
 
+class _StatetuneMix6(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, initial_shift, x_r, x_w, x_k, x_v, x_a, x_g):
+        outputs = tuple(
+            _extension().statetune_tmix_mix6_forward(
+                x, initial_shift, x_r, x_w, x_k, x_v, x_a, x_g
+            )
+        )
+        ctx.save_for_backward(x, initial_shift, x_r, x_w, x_k, x_v, x_a, x_g)
+        return outputs
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        return tuple(
+            _extension().statetune_tmix_mix6_backward(
+                *(gradient.contiguous() for gradient in grad_outputs),
+                *ctx.saved_tensors,
+            )
+        )
+
+
 def pretrain_tmix_mix6_bf16(
     x: torch.Tensor,
     x_r: torch.Tensor,
@@ -236,18 +274,75 @@ def pretrain_tmix_mix6_bf16(
     """Train-temp BF16 six-way shifted TimeMix preparation."""
 
     tensors = (x, x_r, x_w, x_k, x_v, x_a, x_g)
-    if not isinstance(x, torch.Tensor) or x.dtype != torch.bfloat16 or not x.is_cuda or not x.is_contiguous():
+    if (
+        not isinstance(x, torch.Tensor)
+        or x.dtype != torch.bfloat16
+        or not x.is_cuda
+        or not x.is_contiguous()
+    ):
         raise ValueError("x must be contiguous CUDA bfloat16 [B,T,C]")
     if x.ndim != 3 or x.numel() == 0:
         raise ValueError("x must have shape [B,T,C]")
-    for name, tensor in zip(("x_r", "x_w", "x_k", "x_v", "x_a", "x_g"), tensors[1:], strict=True):
-        if tensor.dtype != torch.bfloat16 or not tensor.is_cuda or not tensor.is_contiguous() or tensor.shape != (x.shape[-1],) or tensor.device != x.device:
+    for name, tensor in zip(
+        ("x_r", "x_w", "x_k", "x_v", "x_a", "x_g"), tensors[1:], strict=True
+    ):
+        if (
+            tensor.dtype != torch.bfloat16
+            or not tensor.is_cuda
+            or not tensor.is_contiguous()
+            or tensor.shape != (x.shape[-1],)
+            or tensor.device != x.device
+        ):
             raise ValueError(f"{name} must be contiguous CUDA bfloat16 [C]")
     return _PretrainMix6.apply(*tensors)
 
 
+def statetune_tmix_mix6_bf16(
+    x: torch.Tensor,
+    initial_shift: torch.Tensor,
+    x_r: torch.Tensor,
+    x_w: torch.Tensor,
+    x_k: torch.Tensor,
+    x_v: torch.Tensor,
+    x_a: torch.Tensor,
+    x_g: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """BF16 six-way TimeMix with differentiable chunk-boundary shift state."""
+
+    if not isinstance(x, torch.Tensor):
+        raise TypeError("x must be a torch.Tensor")
+    if x.dtype != torch.bfloat16:
+        raise TypeError("x must have dtype torch.bfloat16")
+    if not x.is_cuda or not x.is_contiguous():
+        raise ValueError("x must be contiguous CUDA bfloat16 [B,T,C]")
+    if x.data_ptr() % 4:
+        raise ValueError("x must be 4-byte aligned for BF16 vec2 access")
+    if x.ndim != 3 or any(size <= 0 for size in x.shape):
+        raise ValueError("x must have non-empty shape [B,T,C]")
+    if x.shape[2] % 2:
+        raise ValueError("x channel dimension C must be divisible by 2")
+    tensors = (initial_shift, x_r, x_w, x_k, x_v, x_a, x_g)
+    names = ("initial_shift", "x_r", "x_w", "x_k", "x_v", "x_a", "x_g")
+    expected_shapes = ((x.shape[0], x.shape[2]),) + ((x.shape[2],),) * 6
+    for name, tensor, shape in zip(names, tensors, expected_shapes, strict=True):
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor")
+        if tensor.dtype != torch.bfloat16:
+            raise TypeError(f"{name} must have dtype torch.bfloat16")
+        if not tensor.is_cuda or not tensor.is_contiguous():
+            raise ValueError(f"{name} must be contiguous CUDA bfloat16")
+        if tensor.data_ptr() % 4:
+            raise ValueError(f"{name} must be 4-byte aligned for BF16 vec2 access")
+        if tensor.shape != shape:
+            raise ValueError(f"{name} must have shape {shape}")
+        if tensor.device != x.device:
+            raise ValueError(f"{name} must share x's device")
+    return _StatetuneMix6.apply(x, *tensors)
+
+
 __all__ = [
-    "infer_tmix_mix6_forward_varlen",
     "infer_tmix_mix6_add_layer_norm_forward_varlen",
+    "infer_tmix_mix6_forward_varlen",
     "pretrain_tmix_mix6_bf16",
+    "statetune_tmix_mix6_bf16",
 ]

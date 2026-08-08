@@ -85,6 +85,49 @@ def test_fp16_elapsed_state_varlen_reuses_ticket_fail_closed() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_recurrent_metadata_ticket_supports_same_stream_cuda_graph() -> None:
+    stream = torch.cuda.Stream()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.stream(stream):
+        initial_state = torch.tensor([2, 5, 7, 11], device="cuda", dtype=torch.int32)
+        elapsed_state = initial_state.clone()
+        cu_seqlens = torch.tensor([0, 2, 5], device="cuda", dtype=torch.int32)
+        state_indices = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
+        ticket = prepare_recurrent_metadata(
+            cu_seqlens,
+            state_indices,
+            total_tokens=5,
+            state_pool_size=elapsed_state.shape[0],
+        )
+        infer_recurrent_fp16_advance_i32_varlen(
+            elapsed_state,
+            cu_seqlens,
+            state_indices,
+            total_tokens=5,
+            validated_metadata=ticket,
+        )
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.cuda.synchronize()
+
+    with torch.cuda.graph(graph, stream=stream):
+        elapsed_state.copy_(initial_state)
+        infer_recurrent_fp16_advance_i32_varlen(
+            elapsed_state,
+            cu_seqlens,
+            state_indices,
+            total_tokens=5,
+            validated_metadata=ticket,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert torch.equal(
+        elapsed_state,
+        torch.tensor([2, 8, 7, 13], device="cuda", dtype=torch.int32),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_albatross_add_vec_flat_and_2d_dispatch() -> None:
     device = torch.device("cuda")
     for rows, channels in ((3, 8), (17, 4096)):
@@ -1250,6 +1293,14 @@ def test_module_paths_and_setup_source_set_are_minimal() -> None:
         "csrc/sm90/cmix/mix/pretrain_bf16_forward.cu",
         "csrc/sm90/cmix/mix/pretrain_bf16_backward.cpp",
         "csrc/sm90/cmix/mix/pretrain_bf16_backward.cu",
+        "csrc/sm90/cmix/mix/statetune_bf16_forward.cpp",
+        "csrc/sm90/cmix/mix/statetune_bf16_forward.cu",
+        "csrc/sm90/cmix/mix/statetune_bf16_backward.cpp",
+        "csrc/sm90/cmix/mix/statetune_bf16_backward.cu",
+        "csrc/sm90/tmix/mix6/statetune_bf16_forward.cpp",
+        "csrc/sm90/tmix/mix6/statetune_bf16_forward.cu",
+        "csrc/sm90/tmix/mix6/statetune_bf16_backward.cpp",
+        "csrc/sm90/tmix/mix6/statetune_bf16_backward.cu",
     }
     assert _extension_sources() == expected
     assert TARGET_CUDA.is_file()

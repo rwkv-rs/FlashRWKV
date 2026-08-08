@@ -29,7 +29,8 @@ torch::Tensor cmix_sparse_down_relu_forward_varlen_cuda(
     torch::Tensor preact,
     torch::Tensor value_fc,
     int64_t batch_size,
-    int64_t max_seqlen);
+    int64_t max_seqlen,
+    bool deterministic);
 torch::Tensor cmix_sparse_forward_varlen_cuda(
     int batch_size,
     int total_tokens,
@@ -43,7 +44,8 @@ torch::Tensor cmix_sparse_forward_varlen_cuda(
     torch::Tensor value_fc,
     torch::Tensor query_start_loc,
     torch::Tensor state_indices,
-    torch::Tensor metadata_status);
+    torch::Tensor metadata_status,
+    bool deterministic);
 
 using flashrwkv2::validation::check_cuda_contiguous;
 using flashrwkv2::validation::check_same_device;
@@ -198,7 +200,8 @@ torch::Tensor cmix_sparse_down_relu_forward_varlen(
     torch::Tensor preact,
     torch::Tensor value_fc,
     int64_t batch_size,
-    int64_t max_seqlen) {
+    int64_t max_seqlen,
+    bool deterministic) {
   check_half(preact, preact, "preact");
   check_half(value_fc, preact, "value_fc");
   TORCH_CHECK(
@@ -221,7 +224,7 @@ torch::Tensor cmix_sparse_down_relu_forward_varlen(
         "batch_size * max_seqlen must cover packed rows");
   }
   return cmix_sparse_down_relu_forward_varlen_cuda(
-      preact, value_fc, batch_size, max_seqlen);
+      preact, value_fc, batch_size, max_seqlen, deterministic);
 }
 
 torch::Tensor cmix_sparse_forward_varlen(
@@ -233,7 +236,8 @@ torch::Tensor cmix_sparse_forward_varlen(
     torch::Tensor cu_seqlens,
     torch::Tensor state_indices,
     int64_t max_seqlen,
-    py::object validated_metadata) {
+    py::object validated_metadata,
+    bool deterministic) {
   check_half(x, x, "x");
   TORCH_CHECK(
       x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0,
@@ -280,7 +284,8 @@ torch::Tensor cmix_sparse_forward_varlen(
       value_fc,
       metadata.query_start_loc,
       metadata.state_indices,
-      metadata.status);
+      metadata.status,
+      deterministic);
 }
 
 void register_cmix_sparse_bindings(py::module_& module) {
@@ -303,7 +308,8 @@ void register_cmix_sparse_bindings(py::module_& module) {
       py::arg("preact"),
       py::arg("value_fc"),
       py::arg("batch_size") = -1,
-      py::arg("max_seqlen") = -1);
+      py::arg("max_seqlen") = -1,
+      py::arg("deterministic") = false);
   module.def(
       "cmix_sparse_forward_varlen",
       &cmix_sparse_forward_varlen,
@@ -316,5 +322,6 @@ void register_cmix_sparse_bindings(py::module_& module) {
       py::arg("cu_seqlens"),
       py::arg("state_indices"),
       py::arg("max_seqlen") = -1,
-      py::arg("validated_metadata") = py::none());
+      py::arg("validated_metadata") = py::none(),
+      py::arg("deterministic") = false);
 }
