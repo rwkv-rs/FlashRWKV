@@ -5,7 +5,7 @@
 // Local adaptation:
 //   - D=64 preserves the train_temp clampw-v3 implementation;
 //   - D=128 follows rwkv7_clampw128_v2's 64-wide segmented recurrence;
-//   - D=256 is a local extension of the same segmented math and layout.
+//   - D=256 is a local warp-tiled extension of the same math and layout.
 
 #include <assert.h>
 #include <cuda_runtime.h>
@@ -383,6 +383,104 @@ __global__ void backward_kernel_split64(int T,int H,F_ r_,F_ w_,F_ k_,F_ v_,F_ a
 void cuda_backward_split(int B,int T,int H,int N,bf*r,bf*w,bf*k,bf*v,bf*a,bf*b,bf*dy,float*s,float*sa,bf*dr,bf*dw,bf*dk,bf*dv,bf*da,bf*db)
 {
     assert(T%_CHUNK_LEN_==0);
-    if (N==128) backward_kernel_split64<128,2><<<dim3(H,B),dim3(128,2)>>>(T,H,r,w,k,v,a,b,dy,s,sa,dr,dw,dk,dv,da,db);
-    else backward_kernel_split64<256,4><<<dim3(H,B),dim3(256,4)>>>(T,H,r,w,k,v,a,b,dy,s,sa,dr,dw,dk,dv,da,db);
+    assert(N==128);
+    backward_kernel_split64<128,2><<<dim3(H,B),dim3(128,2)>>>(T,H,r,w,k,v,a,b,dy,s,sa,dr,dw,dk,dv,da,db);
+}
+
+// D256 local backward specialization. The value-column recurrence that
+// produces dv/dSb is independent from the key-row recurrence that produces
+// dr/dw/dk/db/da once dSb is materialized. Splitting those two scans keeps
+// only 8 or 16 floats per lane instead of three float[64] arrays in a
+// 1024-thread CTA, and creates D warps per head for enough SM120 parallelism.
+template<int N> __launch_bounds__(32,4)
+__global__ void backward_value_columns(
+    int T,int H,F_ r_,F_ w_,F_ k_,F_ b_,F_ a_,F_ dy_,bf* dv_,float* dsb_)
+{
+    constexpr int ITEMS=N/32;
+    const int value=blockIdx.x,hh=blockIdx.y,bb=blockIdx.z,lane=threadIdx.x;
+    float dstate[ITEMS]={0};
+    for(int t=T-1;t>=0;--t) {
+        const i64 base=(i64(bb*T+t)*H+hh)*N;
+        const float dyi=to_float(dy_[base+value]);
+        float dv=0.0f,dSb=0.0f;
+#pragma unroll
+        for(int q=0;q<ITEMS;++q) {
+            const int key=lane+q*32;
+            dstate[q]=fmaf(dyi,to_float(r_[base+key]),dstate[q]);
+            dv=fmaf(dstate[q],to_float(k_[base+key]),dv);
+            dSb=fmaf(dstate[q],to_float(b_[base+key]),dSb);
+        }
+        dv=warp_sum(dv); dSb=warp_sum(dSb);
+        dSb=__shfl_sync(0xffffffffu,dSb,0);
+        if(lane==0) {
+            dv_[base+value]=to_bf(dv);
+            dsb_[base+value]=dSb;
+        }
+#pragma unroll
+        for(int q=0;q<ITEMS;++q) {
+            const int key=lane+q*32;
+            const float sig=1.0f/(1.0f+__expf(-to_float(w_[base+key])));
+            const float wi=__expf(W_SCALE*sig);
+            dstate[q]=fmaf(dSb,to_float(a_[base+key]),dstate[q]*wi);
+        }
+    }
+}
+
+template<int N> __launch_bounds__(32,4)
+__global__ void backward_key_rows(
+    int T,int H,F_ r_,F_ w_,F_ k_,F_ v_,F_ a_,F_ b_,F_ dy_,
+    float* s__,float* sa_,float* dsb_,bf* dr_,bf* dw_,bf* dk_,bf* da_,bf* db_)
+{
+    constexpr int ITEMS=N/32;
+    const int key=blockIdx.x,hh=blockIdx.y,bb=blockIdx.z,lane=threadIdx.x;
+    float dstateT[ITEMS]={0};
+    float* s_=s__+i64(bb*H+hh)*i64((T/_CHUNK_LEN_)*N*N);
+    for(int t0=T-_CHUNK_LEN_;t0>=0;t0-=_CHUNK_LEN_) {
+        float stateT[ITEMS];
+        const i64 chunk_base=i64(t0/_CHUNK_LEN_)*N*N+i64(key)*N;
+#pragma unroll
+        for(int q=0;q<ITEMS;++q) stateT[q]=s_[chunk_base+lane+q*32];
+        for(int tt=_CHUNK_LEN_-1;tt>=0;--tt) {
+            const int t=t0+tt; const i64 base=(i64(bb*T+t)*H+hh)*N;
+            const float ri=to_float(r_[base+key]);
+            const float sig=1.0f/(1.0f+__expf(-to_float(w_[base+key])));
+            const float wi=__expf(W_SCALE*sig),iwi=1.0f/wi;
+            const float ki=to_float(k_[base+key]);
+            const float ai=to_float(a_[base+key]);
+            const float bi=to_float(b_[base+key]);
+            float dr=0.0f,dw=0.0f,dk=0.0f,db=0.0f,da=0.0f;
+#pragma unroll
+            for(int q=0;q<ITEMS;++q) {
+                const int value=lane+q*32;
+                dr=fmaf(stateT[q],to_float(dy_[base+value]),dr);
+                stateT[q]=(stateT[q]-ki*to_float(v_[base+value])-bi*sa_[base+value])*iwi;
+                dstateT[q]=fmaf(ri,to_float(dy_[base+value]),dstateT[q]);
+                dw=fmaf(dstateT[q],stateT[q],dw);
+                dk=fmaf(dstateT[q],to_float(v_[base+value]),dk);
+                db=fmaf(dstateT[q],sa_[base+value],db);
+                da=fmaf(stateT[q],dsb_[base+value],da);
+            }
+            dr=warp_sum(dr); dw=warp_sum(dw); dk=warp_sum(dk);
+            db=warp_sum(db); da=warp_sum(da);
+            if(lane==0) {
+                dr_[base+key]=to_bf(dr);
+                dw_[base+key]=to_bf(dw*W_SCALE*wi*sig*(1.0f-sig));
+                dk_[base+key]=to_bf(dk); db_[base+key]=to_bf(db);
+                da_[base+key]=to_bf(da);
+            }
+#pragma unroll
+            for(int q=0;q<ITEMS;++q) {
+                const int value=lane+q*32;
+                dstateT[q]=fmaf(ai,dsb_[base+value],dstateT[q]*wi);
+            }
+        }
+    }
+}
+
+void cuda_backward_tiled256(int B,int T,int H,bf*r,bf*w,bf*k,bf*v,bf*a,bf*b,bf*dy,float*s,float*sa,float*dsb,bf*dr,bf*dw,bf*dk,bf*dv,bf*da,bf*db)
+{
+    assert(T%_CHUNK_LEN_==0);
+    const dim3 grid(256,H,B);
+    backward_value_columns<256><<<grid,32>>>(T,H,r,w,k,b,a,dy,dv,dsb);
+    backward_key_rows<256><<<grid,32>>>(T,H,r,w,k,v,a,b,dy,s,sa,dsb,dr,dw,dk,da,db);
 }

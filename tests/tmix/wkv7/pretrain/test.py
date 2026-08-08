@@ -76,7 +76,8 @@ def test_native_bodies_record_authority_and_local_generalization() -> None:
     assert "forward_kernel_split64<128>" in source
     assert "forward_kernel_split64<256>" in source
     assert "backward_kernel_split64<128,2>" in source
-    assert "backward_kernel_split64<256,4>" in source
+    assert "backward_value_columns<256>" in source
+    assert "backward_key_rows<256>" in source
 
 
 def test_public_contract_matches_clampw_v3() -> None:

@@ -449,7 +449,7 @@ outputs for their floating-point inputs unless an entry states otherwise.
 - Import: `from flashrwkv2 import pretrain_recurrent_bf16`
 - Owner: `flashrwkv2.tmix.wkv7.pretrain`
 - Signature: `pretrain_recurrent_bf16(r, w, k, v, a, b, *, head_size=64) -> torch.Tensor`
-- Contract: six matching contiguous CUDA BF16 tensors `[B,T,C]`; `head_size` is one of 64, 128, or 256 and divides `C`; `T` is divisible by the canonical chunk length 16. `w` is the clampw-v3 input, not raw `decay_logits`. D64 retains clampw-v3, D128 follows RWKV-LM `rwkv7_clampw128_v2`, and D256 is a local four-segment generalization of the same recurrence and storage contract.
+- Contract: six matching contiguous CUDA BF16 tensors `[B,T,C]`; `head_size` is one of 64, 128, or 256 and divides `C`; `T` is divisible by the canonical chunk length 16. `w` is the clampw-v3 input, not raw `decay_logits`. D64 retains clampw-v3, D128 follows RWKV-LM `rwkv7_clampw128_v2`, and D256 is a local warp-tiled generalization of the same recurrence and storage contract. Its backward materializes only the FP32 `dSb [B,T,H,D]` intermediate and runs independent value-column and key-row scans; no FP32-state fallback is used.
 - Result and autograd: returns BF16 `[B,T,C]` and supplies gradients for all six inputs. No caller-owned state is mutated.
 
 ### `pretrain_tmix_a_gate_bf16`
