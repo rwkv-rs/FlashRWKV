@@ -98,12 +98,25 @@ __global__ void statetune_tmix_mix6_backward_kernel(
     ACCUM_DX(gv, mv); ACCUM_DX(ga, ma); ACCUM_DX(gg, mg);
     if (t + 1 < t_size) {
       const int64_t next = idx + c_size;
-      ACCUM_DX(load_bf16x2(grad_r + next), pr);
-      ACCUM_DX(load_bf16x2(grad_w + next), pw);
-      ACCUM_DX(load_bf16x2(grad_k + next), pk);
-      ACCUM_DX(load_bf16x2(grad_v + next), pv);
-      ACCUM_DX(load_bf16x2(grad_a + next), pa);
-      ACCUM_DX(load_bf16x2(grad_g + next), pg);
+      // Form the recurrent contribution with exactly the same BF16 grouping
+      // used by grad_initial below.  A whole sequence and two autograd-linked
+      // chunks then see the same rounded boundary gradient before it is added
+      // to the six current-token branches.
+      __nv_bfloat162 recurrent =
+          __hmul2(load_bf16x2(grad_r + next), pr);
+      recurrent = __hadd2(
+          recurrent, __hmul2(load_bf16x2(grad_w + next), pw));
+      recurrent = __hadd2(
+          recurrent, __hmul2(load_bf16x2(grad_k + next), pk));
+      recurrent = __hadd2(
+          recurrent, __hmul2(load_bf16x2(grad_v + next), pv));
+      recurrent = __hadd2(
+          recurrent, __hmul2(load_bf16x2(grad_a + next), pa));
+      recurrent = __hadd2(
+          recurrent, __hmul2(load_bf16x2(grad_g + next), pg));
+      const float2 recurrent_float = __bfloat1622float2(recurrent);
+      dx.x += recurrent_float.x;
+      dx.y += recurrent_float.y;
     } else {
       const float2 next = __bfloat1622float2(
           load_bf16x2(grad_next + b * c_size + c));
