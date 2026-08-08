@@ -81,24 +81,37 @@ __global__ void statetune_tmix_mix6_backward_kernel(
     const __nv_bfloat162 gv = load_bf16x2(grad_v + idx);
     const __nv_bfloat162 ga = load_bf16x2(grad_a + idx);
     const __nv_bfloat162 gg = load_bf16x2(grad_g + idx);
-    __nv_bfloat162 dx = __hmul2(gr, mr);
-    dx = __hadd2(dx, __hmul2(gw, mw));
-    dx = __hadd2(dx, __hmul2(gk, mk));
-    dx = __hadd2(dx, __hmul2(gv, mv));
-    dx = __hadd2(dx, __hmul2(ga, ma));
-    dx = __hadd2(dx, __hmul2(gg, mg));
+    // Keep the canonical BF16 products, but accumulate the six independent
+    // autograd branches in FP32 before the single BF16 store.  Chaining the
+    // additions through __hadd2 rounds after every branch and can exceed the
+    // BF16 oracle tolerance for longer sequences even though every product is
+    // individually correct.
+    float2 dx = make_float2(0.0f, 0.0f);
+#define ACCUM_DX(GRAD, COEFFICIENT)                                           \
+  do {                                                                        \
+    const float2 product =                                                    \
+        __bfloat1622float2(__hmul2((GRAD), (COEFFICIENT)));                   \
+    dx.x += product.x;                                                        \
+    dx.y += product.y;                                                        \
+  } while (0)
+    ACCUM_DX(gr, mr); ACCUM_DX(gw, mw); ACCUM_DX(gk, mk);
+    ACCUM_DX(gv, mv); ACCUM_DX(ga, ma); ACCUM_DX(gg, mg);
     if (t + 1 < t_size) {
       const int64_t next = idx + c_size;
-      dx = __hadd2(dx, __hmul2(load_bf16x2(grad_r + next), pr));
-      dx = __hadd2(dx, __hmul2(load_bf16x2(grad_w + next), pw));
-      dx = __hadd2(dx, __hmul2(load_bf16x2(grad_k + next), pk));
-      dx = __hadd2(dx, __hmul2(load_bf16x2(grad_v + next), pv));
-      dx = __hadd2(dx, __hmul2(load_bf16x2(grad_a + next), pa));
-      dx = __hadd2(dx, __hmul2(load_bf16x2(grad_g + next), pg));
+      ACCUM_DX(load_bf16x2(grad_r + next), pr);
+      ACCUM_DX(load_bf16x2(grad_w + next), pw);
+      ACCUM_DX(load_bf16x2(grad_k + next), pk);
+      ACCUM_DX(load_bf16x2(grad_v + next), pv);
+      ACCUM_DX(load_bf16x2(grad_a + next), pa);
+      ACCUM_DX(load_bf16x2(grad_g + next), pg);
     } else {
-      dx = __hadd2(dx, load_bf16x2(grad_next + b * c_size + c));
+      const float2 next = __bfloat1622float2(
+          load_bf16x2(grad_next + b * c_size + c));
+      dx.x += next.x;
+      dx.y += next.y;
     }
-    store_bf16x2(grad_x + idx, dx);
+    store_bf16x2(grad_x + idx, __floats2bfloat162_rn(dx.x, dx.y));
+#undef ACCUM_DX
 
     const __nv_bfloat162 previous =
         t == 0 ? load_bf16x2(initial_shift + b * c_size + c)

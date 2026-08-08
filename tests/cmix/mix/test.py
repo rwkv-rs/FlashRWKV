@@ -179,11 +179,15 @@ def test_statetune_cmix_chunk_composition() -> None:
     torch.manual_seed(29)
     device = torch.device("cuda")
     b, t, c, split = 2, 7, 16, 3
-    x = torch.randn(b, t, c, device=device, dtype=torch.bfloat16).requires_grad_()
-    initial = torch.randn(b, c, device=device, dtype=torch.bfloat16).requires_grad_()
-    x_k = torch.randn(c, device=device, dtype=torch.bfloat16).requires_grad_()
-    key = torch.randn(4 * c, c, device=device, dtype=torch.bfloat16).requires_grad_()
-    value = torch.randn(c, 4 * c, device=device, dtype=torch.bfloat16).requires_grad_()
+    # Keep the chunk test in the operator's normal activation/weight range.
+    # Unit-scale BF16 FFN matrices make whole-vs-split GEMM weight gradients
+    # differ at cancellation points solely because each chunk is rounded before
+    # autograd adds it, which does not exercise the recurrent shift contract.
+    x = (torch.randn(b, t, c, device=device) * 0.05).to(torch.bfloat16).requires_grad_()
+    initial = (torch.randn(b, c, device=device) * 0.05).to(torch.bfloat16).requires_grad_()
+    x_k = (torch.randn(c, device=device) * 0.1).to(torch.bfloat16).requires_grad_()
+    key = (torch.randn(4 * c, c, device=device) * 0.05).to(torch.bfloat16).requires_grad_()
+    value = (torch.randn(c, 4 * c, device=device) * 0.05).to(torch.bfloat16).requires_grad_()
     whole = statetune_cmix_bf16(x, initial, x_k, key, value)
     upstream = [torch.randn_like(output) for output in whole]
     whole_grads = torch.autograd.grad(
