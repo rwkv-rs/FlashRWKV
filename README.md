@@ -12,7 +12,7 @@ training frameworks remain the responsibility of downstream projects.
 - SM120 or newer for the current native build
 
 The runtime and reproducible source-build contracts currently pin PyTorch
-2.11.0. When the build cannot detect a local GPU, set
+2.13.0. When the build cannot detect a local GPU, set
 `TORCH_CUDA_ARCH_LIST=12.0` explicitly.
 
 ## Installation

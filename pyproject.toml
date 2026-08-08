@@ -2,19 +2,19 @@
 requires = [
   "ninja",
   "setuptools>=77.0.3,<81.0.0",
-  "torch==2.11.0",
+  "torch==2.13.0",
   "wheel",
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "FlashRWKV2"
-version = "0.1.0a2"
+version = "0.1.0a3"
 description = "High-performance CUDA operator library for RWKV-7"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "torch==2.11.0",
+  "torch==2.13.0",
 ]
 license = "MIT"
 
@@ -22,7 +22,7 @@ license = "MIT"
 dev = [
   "pytest>=8",
   "ruff>=0.12",
-  "torch==2.11.0",
+  "torch==2.13.0",
 ]
 
 [project.urls]
