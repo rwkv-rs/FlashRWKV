@@ -17,8 +17,16 @@ The runtime and reproducible source-build contracts currently pin PyTorch
 
 ## Installation
 
-The current alpha is distributed as source and builds the CUDA extension on the
-target machine:
+The current alpha publishes a prebuilt CPython 3.12 Linux x86_64 wheel for
+SM120 GPUs. The wheel requires glibc 2.38 or newer, PyTorch 2.13.0, and a CUDA
+13 runtime supplied through PyTorch's dependencies:
+
+```bash
+python -m pip install --pre FlashRWKV2
+```
+
+Other Python or platform combinations install from the source distribution and
+build the CUDA extension on the target machine:
 
 ```bash
 TORCH_CUDA_ARCH_LIST=12.0 \

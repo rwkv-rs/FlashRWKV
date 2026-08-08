@@ -95,7 +95,106 @@ jobs:
       - name: Upload immutable release distributions
         uses: actions/upload-artifact@v4
         with:
-          name: flashrwkv2-pypi-${{ steps.identity.outputs.version }}
+          name: flashrwkv2-sdist-${{ steps.identity.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
+
+  wheel:
+    name: Build tested SM120 wheel
+    needs: prepare
+    runs-on: [self-hosted, linux, x64, rwkv-sha-pro6000x8]
+    timeout-minutes: 120
+    concurrency:
+      group: flashrwkv2-pro6000-exclusive
+      cancel-in-progress: false
+    env:
+      TORCH_CUDA_ARCH_LIST: "12.0"
+      CUDA_VISIBLE_DEVICES: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - name: Verify exact tagged source
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$RELEASE_TAG")"
+          test -z "$(git status --short --untracked-files=no)"
+      - name: Build and repair CPython 3.12 SM120 wheel
+        run: |
+          mkdir -p dist raw-wheel
+          uv sync --frozen --no-install-project --group dev
+          uv export --frozen --group dev --no-emit-project \
+            --output-file locked-requirements.txt
+          uv build --wheel --out-dir raw-wheel
+          test "$(find raw-wheel -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          uv tool run --with patchelf auditwheel repair \
+            --plat manylinux_2_38_x86_64 \
+            --exclude 'libtorch*.so' \
+            --exclude libc10.so \
+            --exclude libc10_cuda.so \
+            --exclude libcudart.so.13 \
+            --wheel-dir dist \
+            raw-wheel/*.whl
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          uvx twine check dist/*
+          uv tool run auditwheel show dist/*.whl | tee wheel-audit.txt
+          grep -q 'manylinux_2_38_x86_64' wheel-audit.txt
+      - name: Install and smoke-test repaired wheel
+        run: |
+          uv venv --python 3.12 .release-runtime
+          uv pip install --python .release-runtime/bin/python \
+            -r locked-requirements.txt
+          uv pip install --python .release-runtime/bin/python --no-deps \
+            dist/*.whl
+          smoke_root="$RUNNER_TEMP/flashrwkv2-release-smoke-$GITHUB_RUN_ID"
+          mkdir -p "$smoke_root"
+          cd "$smoke_root"
+          "$GITHUB_WORKSPACE/.release-runtime/bin/python" - <<'PY'
+          import flashrwkv2
+          import torch
+
+          if flashrwkv2.__version__ != "${{ needs.prepare.outputs.version }}":
+              raise SystemExit(f"unexpected version: {flashrwkv2.__version__}")
+          if flashrwkv2._C is None:
+              raise SystemExit("flashrwkv2._C did not load from the repaired wheel")
+          if torch.cuda.get_device_capability(0) != (12, 0):
+              raise SystemExit(
+                  f"unexpected capability: {torch.cuda.get_device_capability(0)}"
+              )
+          print(flashrwkv2._C.__file__)
+          PY
+      - name: Record immutable wheel identity
+        run: |
+          .release-runtime/bin/python - <<'PY'
+          import hashlib
+          import json
+          import subprocess
+          from pathlib import Path
+
+          wheel = next(Path("dist").glob("*.whl"))
+          identity = {
+              "head_sha": subprocess.check_output(
+                  ("git", "rev-parse", "HEAD"), text=True
+              ).strip(),
+              "wheel": wheel.name,
+              "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+          }
+          Path("wheel-identity.json").write_text(
+              json.dumps(identity, indent=2) + "\n"
+          )
+          print(json.dumps(identity, indent=2))
+          PY
+      - name: Upload tested SM120 wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashrwkv2-wheel-${{ needs.prepare.outputs.version }}
           path: dist/
           if-no-files-found: error
           retention-days: 90
@@ -103,7 +202,7 @@ jobs:
   publish:
     name: Publish to PyPI
     if: github.event_name == 'release'
-    needs: prepare
+    needs: [prepare, wheel]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -113,7 +212,15 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: flashrwkv2-pypi-${{ needs.prepare.outputs.version }}
+          name: flashrwkv2-sdist-${{ needs.prepare.outputs.version }}
           path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: flashrwkv2-wheel-${{ needs.prepare.outputs.version }}
+          path: dist/
+      - name: Verify publish payload
+        run: |
+          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
       - name: Publish distributions with OIDC
         uses: pypa/gh-action-pypi-publish@release/v1

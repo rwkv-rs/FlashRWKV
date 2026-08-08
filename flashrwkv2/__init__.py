@@ -156,4 +156,4 @@ __all__ = [
     "setup_sampling_states",
 ]
 
-__version__ = "0.1.0a3"
+__version__ = "0.1.0a4"
