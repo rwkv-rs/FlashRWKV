@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
-// RL/Infctx binding mechanically restores the retained materialized and
-// factor-recompute CUDA families.  The public decay boundary is raw logits.
+// RL/Infctx binding restores the retained D64 materialized and factor-recompute
+// families and dispatches D128/256 to the local 64-wide tiled recurrence. The
+// public decay boundary is raw logits.
 
 #include "../../../validation.h"
 
@@ -53,13 +54,18 @@ void recompute_chunk_fp32_from_decay_logits_cuda(
     torch::Tensor boundary,
     double scale);
 
+void tiled_chunk_fp32_from_decay_logits_cuda(
+    torch::Tensor sequence_chunk_offsets,torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,torch::Tensor state_indices,torch::Tensor state,
+    torch::Tensor r,torch::Tensor decay_logits,torch::Tensor decay_bias,
+    torch::Tensor k,torch::Tensor v,torch::Tensor a,torch::Tensor b,
+    torch::Tensor output,torch::Tensor boundary,torch::Tensor state_dot_a,double scale);
+
 using flashrwkv2::validation::check_cuda_contiguous;
 using flashrwkv2::validation::check_recurrent_layout;
 using flashrwkv2::validation::check_same_device;
 
 namespace {
-
-constexpr int64_t kHeadSize = 64;
 
 void check_chunk_metadata(
     const torch::Tensor& sequence_chunk_offsets,
@@ -140,10 +146,10 @@ void check_decay_bias(
               "decay_bias must match token dtype");
   TORCH_CHECK(
       (decay_bias->dim() == 1 &&
-       decay_bias->numel() == state.size(1) * kHeadSize) ||
+       decay_bias->numel() == state.size(1) * state.size(2)) ||
           (decay_bias->dim() == 2 && decay_bias->size(0) == state.size(1) &&
-           decay_bias->size(1) == kHeadSize),
-      "decay_bias must have shape [H*64] or [H,64]");
+           decay_bias->size(1) == state.size(2)),
+      "decay_bias must have shape [H*D] or [H,D]");
 }
 
 }  // namespace
@@ -168,8 +174,9 @@ py::tuple rl_infctx_chunk_fp32io16_forward(
                   state.scalar_type() == torch::kFloat32,
               "RL/Infctx state must be contiguous CUDA float32");
   TORCH_CHECK(state.dim() == 4 && state.size(0) > 0 && state.size(1) > 0 &&
-                  state.size(2) == kHeadSize && state.size(3) == kHeadSize,
-              "canonical RL/Infctx source supports state [B,H,64,64]");
+                  state.size(2) == state.size(3) &&
+                  (state.size(2) == 64 || state.size(2) == 128 || state.size(2) == 256),
+              "RL/Infctx state must have shape [B,H,D,D], D in {64,128,256}");
 
   auto working_state = state.clone();
   auto output = torch::empty_like(v);
@@ -186,10 +193,19 @@ py::tuple rl_infctx_chunk_fp32io16_forward(
 
   const int64_t num_chunks = chunk_token_starts.numel();
   auto boundary = torch::empty(
-      {num_chunks, state.size(1), kHeadSize, kHeadSize},
+      {num_chunks, state.size(1), state.size(2), state.size(2)},
       torch::TensorOptions().device(state.device()).dtype(torch::kFloat32));
 
-  if (strategy == 0) {
+  if (state.size(2) != 64) {
+    auto state_dot_a = strategy == 0
+        ? torch::empty(r.sizes(), r.options().dtype(torch::kFloat32))
+        : torch::Tensor();
+    tiled_chunk_fp32_from_decay_logits_cuda(
+        sequence_chunk_offsets, chunk_token_starts, chunk_token_ends,
+        internal_state_indices, working_state, r, decay_logits,
+        decay_bias.value_or(torch::Tensor()), k, v, a, b, output, boundary,
+        state_dot_a, scale);
+  } else if (strategy == 0) {
     auto transform = torch::empty_like(boundary);
     auto bias = torch::empty_like(boundary);
     auto state_dot_a = torch::empty(

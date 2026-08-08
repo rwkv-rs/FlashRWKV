@@ -19,7 +19,8 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_backward_cuda(
     torch::Tensor bias,
     torch::Tensor g,
     torch::Tensor mean,
-    torch::Tensor rstd);
+    torch::Tensor rstd,
+    int64_t head_size);
 
 namespace {
 
@@ -41,7 +42,10 @@ void check_inputs(
     const torch::Tensor& bias,
     const torch::Tensor& g,
     const torch::Tensor& mean,
-    const torch::Tensor& rstd) {
+    const torch::Tensor& rstd,
+    int64_t head_size) {
+  TORCH_CHECK(head_size == 64 || head_size == 128 || head_size == 256,
+              "head_size must be one of 64, 128, or 256");
   for (const auto& item : {
            std::pair<const torch::Tensor*, const char*>{&grad_output, "grad_output"},
            {&x, "x"}, {&r, "r"}, {&k, "k"}, {&v, "v"},
@@ -50,18 +54,18 @@ void check_inputs(
        }) {
     check_bf16_cuda(*item.first, item.second);
   }
-  TORCH_CHECK(x.dim() == 3 && x.size(2) > 0 && x.size(2) % 64 == 0,
-              "x must have shape [B,T,C] with C divisible by 64");
+  TORCH_CHECK(x.dim() == 3 && x.size(2) > 0 && x.size(2) % head_size == 0,
+              "x must have shape [B,T,C] with C divisible by head_size");
   for (const auto& item : {&grad_output, &r, &k, &v, &g}) {
     TORCH_CHECK(item->sizes() == x.sizes(), "lnx token tensors must match x");
   }
-  const int64_t heads = x.size(2) / 64;
-  const auto expected_residual_shape = std::vector<int64_t>{heads, 64};
+  const int64_t heads = x.size(2) / head_size;
+  const auto expected_residual_shape = std::vector<int64_t>{heads, head_size};
   const auto expected_weight_shape = std::vector<int64_t>{x.size(2)};
   const auto expected_stats_shape =
       std::vector<int64_t>{x.size(0), x.size(1), heads};
   TORCH_CHECK(residual_scale.sizes() == expected_residual_shape,
-              "residual_scale must have shape [C/64,64]");
+              "residual_scale must have shape [C/head_size,head_size]");
   TORCH_CHECK(weight.sizes() == expected_weight_shape &&
                   bias.sizes() == weight.sizes(),
               "weight and bias must have shape [C]");
@@ -69,7 +73,7 @@ void check_inputs(
                   rstd.sizes() == mean.sizes() &&
                   mean.scalar_type() == torch::kFloat32 &&
                   rstd.scalar_type() == torch::kFloat32,
-              "mean and rstd must be float32 [B,T,C/64]");
+              "mean and rstd must be float32 [B,T,C/head_size]");
   TORCH_CHECK(x.device() == mean.device() && x.device() == rstd.device(),
               "lnx tensors must share a device");
 }
@@ -87,10 +91,11 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_backward(
     torch::Tensor bias,
     torch::Tensor g,
     torch::Tensor mean,
-    torch::Tensor rstd) {
-  check_inputs(grad_output, x, r, k, v, residual_scale, weight, bias, g, mean, rstd);
+    torch::Tensor rstd,
+    int64_t head_size) {
+  check_inputs(grad_output, x, r, k, v, residual_scale, weight, bias, g, mean, rstd, head_size);
   return pretrain_tmix_lnx_rkvres_xg_backward_cuda(
-      grad_output, x, r, k, v, residual_scale, weight, bias, g, mean, rstd);
+      grad_output, x, r, k, v, residual_scale, weight, bias, g, mean, rstd, head_size);
 }
 
 void register_pretrain_tmix_lnx_rkvres_xg_backward_bindings(py::module_& module) {
@@ -100,5 +105,6 @@ void register_pretrain_tmix_lnx_rkvres_xg_backward_bindings(py::module_& module)
       "RWKV-7 train_temp fused LN/residual/gate backward",
       py::arg("grad_output"), py::arg("x"), py::arg("r"), py::arg("k"),
       py::arg("v"), py::arg("residual_scale"), py::arg("weight"),
-      py::arg("bias"), py::arg("g"), py::arg("mean"), py::arg("rstd"));
+      py::arg("bias"), py::arg("g"), py::arg("mean"), py::arg("rstd"),
+      py::arg("head_size") = 64);
 }

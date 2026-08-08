@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: Copyright contributors to BlinkDL/RWKV-LM
 // Canonical source: RWKV-LM RWKV-v7/train_temp/cuda/rwkv7_clampw_v3.cpp
 // Source revision: 952102498e9ed367ea0a59ee64106916d474d30f.
-// Local adaptation: provenance header and build-owned source path only.
+// Local adaptation: runtime D=64/128/256 dispatch. D64 keeps clampw-v3,
+// D128 follows rwkv7_clampw128_v2, and D256 extends the 64-wide segmentation.
 
 #include <torch/extension.h>
 
@@ -14,18 +15,29 @@
 #endif
 
 void cuda_forward_v3(int B, int T, int H, bf*r, bf*w, bf*k, bf*v, bf*a, bf*b, bf*y, float*s, float*sa);
+void cuda_forward_split(int B, int T, int H, int N, bf*r, bf*w, bf*k, bf*v, bf*a, bf*b, bf*y, float*s, float*sa);
 
-void forward(torch::Tensor &r, torch::Tensor &w, torch::Tensor &k, torch::Tensor &v, torch::Tensor &a, torch::Tensor &b, torch::Tensor &y, torch::Tensor &s, torch::Tensor &sa) {
+void forward(torch::Tensor &r, torch::Tensor &w, torch::Tensor &k, torch::Tensor &v, torch::Tensor &a, torch::Tensor &b, torch::Tensor &y, torch::Tensor &s, torch::Tensor &sa, int64_t head_size) {
+    TORCH_CHECK(head_size == 64 || head_size == 128 || head_size == 256,
+                "head_size must be one of 64, 128, or 256");
+    TORCH_CHECK(r.size(3) == head_size, "input head dimension must equal head_size");
     int B = r.sizes()[0], T = r.sizes()[1], H = r.sizes()[2];
-    cuda_forward_v3(B, T, H, (bf*)r.data_ptr(), (bf*)w.data_ptr(), (bf*)k.data_ptr(), (bf*)v.data_ptr(), (bf*)a.data_ptr(), (bf*)b.data_ptr(), (bf*)y.data_ptr(), (float*)s.data_ptr(), (float*)sa.data_ptr());
+    if (head_size == 64) cuda_forward_v3(B, T, H, (bf*)r.data_ptr(), (bf*)w.data_ptr(), (bf*)k.data_ptr(), (bf*)v.data_ptr(), (bf*)a.data_ptr(), (bf*)b.data_ptr(), (bf*)y.data_ptr(), (float*)s.data_ptr(), (float*)sa.data_ptr());
+    else cuda_forward_split(B, T, H, head_size, (bf*)r.data_ptr(), (bf*)w.data_ptr(), (bf*)k.data_ptr(), (bf*)v.data_ptr(), (bf*)a.data_ptr(), (bf*)b.data_ptr(), (bf*)y.data_ptr(), (float*)s.data_ptr(), (float*)sa.data_ptr());
 }
 
 void cuda_backward_v3(int B, int T, int H, bf*r, bf*w, bf*k, bf*v, bf*a, bf*b, bf*dy, float*s, float*sa, bf*dr, bf*dw, bf*dk, bf*dv, bf*da, bf*db);
+void cuda_backward_split(int B, int T, int H, int N, bf*r, bf*w, bf*k, bf*v, bf*a, bf*b, bf*dy, float*s, float*sa, bf*dr, bf*dw, bf*dk, bf*dv, bf*da, bf*db);
 
 void backward(torch::Tensor &r, torch::Tensor &w, torch::Tensor &k, torch::Tensor &v, torch::Tensor &a, torch::Tensor &b, torch::Tensor &dy,
-        torch::Tensor &s, torch::Tensor &sa, torch::Tensor &dr, torch::Tensor &dw, torch::Tensor &dk, torch::Tensor &dv, torch::Tensor &da, torch::Tensor &db) {
+        torch::Tensor &s, torch::Tensor &sa, torch::Tensor &dr, torch::Tensor &dw, torch::Tensor &dk, torch::Tensor &dv, torch::Tensor &da, torch::Tensor &db, int64_t head_size) {
+    TORCH_CHECK(head_size == 64 || head_size == 128 || head_size == 256,
+                "head_size must be one of 64, 128, or 256");
+    TORCH_CHECK(r.size(3) == head_size, "input head dimension must equal head_size");
     int B = r.sizes()[0], T = r.sizes()[1], H = r.sizes()[2];
-    cuda_backward_v3(B, T, H, (bf*)r.data_ptr(), (bf*)w.data_ptr(), (bf*)k.data_ptr(), (bf*)v.data_ptr(), (bf*)a.data_ptr(), (bf*)b.data_ptr(), (bf*)dy.data_ptr(), 
+    if (head_size == 64) cuda_backward_v3(B, T, H, (bf*)r.data_ptr(), (bf*)w.data_ptr(), (bf*)k.data_ptr(), (bf*)v.data_ptr(), (bf*)a.data_ptr(), (bf*)b.data_ptr(), (bf*)dy.data_ptr(),
+            (float*)s.data_ptr(), (float*)sa.data_ptr(), (bf*)dr.data_ptr(), (bf*)dw.data_ptr(), (bf*)dk.data_ptr(), (bf*)dv.data_ptr(), (bf*)da.data_ptr(), (bf*)db.data_ptr());
+    else cuda_backward_split(B, T, H, head_size, (bf*)r.data_ptr(), (bf*)w.data_ptr(), (bf*)k.data_ptr(), (bf*)v.data_ptr(), (bf*)a.data_ptr(), (bf*)b.data_ptr(), (bf*)dy.data_ptr(),
             (float*)s.data_ptr(), (float*)sa.data_ptr(), (bf*)dr.data_ptr(), (bf*)dw.data_ptr(), (bf*)dk.data_ptr(), (bf*)dv.data_ptr(), (bf*)da.data_ptr(), (bf*)db.data_ptr());
 }
 

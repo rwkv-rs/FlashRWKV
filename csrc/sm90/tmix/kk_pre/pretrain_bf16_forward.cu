@@ -39,6 +39,20 @@ __device__ inline float warp_sum(float v) {
     return v;
 }
 
+template <int HeadSize>
+__device__ inline float block_sum(float value) {
+    __shared__ float warp_sums[HeadSize / 64];
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    value = warp_sum(value);
+    if (lane == 0) warp_sums[warp] = value;
+    __syncthreads();
+    value = lane < HeadSize / 64 ? warp_sums[lane] : 0.0f;
+    value = __shfl_sync(0xffffffffu, warp_sum(value), 0);
+    __syncthreads();
+    return value;
+}
+
 __device__ inline void atomic_add_float2(float* ptr, float x0, float x1) {
     atomicAdd(reinterpret_cast<float2*>(ptr), make_float2(x0, x1));
 }
@@ -98,6 +112,41 @@ __global__ void tmix_kk_pre_forward64_v5_kernel(
     const float kk1 = u1 * inv_d;
 
     store_bf16x2(new_k + idx, kv0 * fmaf(av0, ka0, 1.0f - ka0), kv1 * fmaf(av1, ka1, 1.0f - ka1));
+    store_bf16x2(neg_kk + idx, -kk0, -kk1);
+    store_bf16x2(kka + idx, kk0 * av0, kk1 * av1);
+}
+
+template <int HeadSize>
+__global__ void tmix_kk_pre_forward_tiled_kernel(
+    const at::BFloat16* __restrict__ k,
+    const at::BFloat16* __restrict__ k_k,
+    const at::BFloat16* __restrict__ a,
+    const at::BFloat16* __restrict__ k_a,
+    at::BFloat16* __restrict__ new_k,
+    at::BFloat16* __restrict__ neg_kk,
+    at::BFloat16* __restrict__ kka,
+    float* __restrict__ inv_d_out,
+    int64_t bth_size,
+    int64_t h_size) {
+    const int64_t bth = blockIdx.x;
+    const int pair = threadIdx.x;
+    const int64_t h = bth % h_size;
+    const int64_t idx = bth * HeadSize + pair * 2;
+    const int64_t c = h * HeadSize + pair * 2;
+    const __nv_bfloat162 kv2 = load_bf16x2(k + idx);
+    const __nv_bfloat162 ks2 = load_bf16x2(k_k + c);
+    const float kv0 = __low2float(kv2), kv1 = __high2float(kv2);
+    const float u0 = kv0 * __low2float(ks2), u1 = kv1 * __high2float(ks2);
+    const float inv_d = 1.0f / fmaxf(
+        sqrtf(block_sum<HeadSize>(u0 * u0 + u1 * u1)), kNormalizeEps);
+    if (pair == 0) inv_d_out[bth] = inv_d;
+    const __nv_bfloat162 av2 = load_bf16x2(a + idx);
+    const __nv_bfloat162 ka2 = load_bf16x2(k_a + c);
+    const float av0 = __low2float(av2), av1 = __high2float(av2);
+    const float ka0 = __low2float(ka2), ka1 = __high2float(ka2);
+    const float kk0 = u0 * inv_d, kk1 = u1 * inv_d;
+    store_bf16x2(new_k + idx, kv0 * fmaf(av0, ka0, 1.0f - ka0),
+                  kv1 * fmaf(av1, ka1, 1.0f - ka1));
     store_bf16x2(neg_kk + idx, -kk0, -kk1);
     store_bf16x2(kka + idx, kk0 * av0, kk1 * av1);
 }
@@ -194,16 +243,17 @@ std::vector<torch::Tensor> pretrain_tmix_kk_pre_cuda(
     torch::Tensor a,
     torch::Tensor k_a,
     int64_t head_size) {
-    (void)head_size;
     auto new_k = torch::empty_like(k);
     auto neg_kk = torch::empty_like(k);
     auto kka = torch::empty_like(k);
-    auto inv_d = torch::empty({k.size(0), k.size(1), k.size(2) / kHeadSize}, k.options().dtype(torch::kFloat32));
+    auto inv_d = torch::empty({k.size(0), k.size(1), k.size(2) / head_size}, k.options().dtype(torch::kFloat32));
 
-    const int64_t bth_size = k.size(0) * k.size(1) * (k.size(2) / kHeadSize);
+    const int64_t h_size = k.size(2) / head_size;
+    const int64_t bth_size = k.size(0) * k.size(1) * h_size;
     const int blocks = static_cast<int>(ceil_div(bth_size, static_cast<int64_t>(kWarpsPerBlock)));
     auto stream = at::cuda::getCurrentCUDAStream();
-    tmix_kk_pre_forward64_v5_kernel<<<blocks, kWarpsPerBlock * 32, 0, stream>>>(
+    if (head_size == 64) {
+      tmix_kk_pre_forward64_v5_kernel<<<blocks, kWarpsPerBlock * 32, 0, stream>>>(
         k.data_ptr<at::BFloat16>(),
         k_k.data_ptr<at::BFloat16>(),
         a.data_ptr<at::BFloat16>(),
@@ -213,9 +263,20 @@ std::vector<torch::Tensor> pretrain_tmix_kk_pre_cuda(
         kka.data_ptr<at::BFloat16>(),
         inv_d.data_ptr<float>(),
         bth_size,
-        k.size(2) / kHeadSize);
+        h_size);
+    } else if (head_size == 128) {
+      tmix_kk_pre_forward_tiled_kernel<128><<<bth_size, 64, 0, stream>>>(
+        k.data_ptr<at::BFloat16>(), k_k.data_ptr<at::BFloat16>(),
+        a.data_ptr<at::BFloat16>(), k_a.data_ptr<at::BFloat16>(),
+        new_k.data_ptr<at::BFloat16>(), neg_kk.data_ptr<at::BFloat16>(),
+        kka.data_ptr<at::BFloat16>(), inv_d.data_ptr<float>(), bth_size, h_size);
+    } else {
+      tmix_kk_pre_forward_tiled_kernel<256><<<bth_size, 128, 0, stream>>>(
+        k.data_ptr<at::BFloat16>(), k_k.data_ptr<at::BFloat16>(),
+        a.data_ptr<at::BFloat16>(), k_a.data_ptr<at::BFloat16>(),
+        new_k.data_ptr<at::BFloat16>(), neg_kk.data_ptr<at::BFloat16>(),
+        kka.data_ptr<at::BFloat16>(), inv_d.data_ptr<float>(), bth_size, h_size);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {new_k, neg_kk, kka, inv_d};
 }
-
-

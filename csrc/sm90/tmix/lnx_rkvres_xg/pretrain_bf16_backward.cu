@@ -43,6 +43,17 @@ __device__ inline float warp_sum(float v) {
     return v;
 }
 
+template<int HeadSize>
+__device__ inline float block_sum(float value) {
+    __shared__ float sums[HeadSize / 64];
+    const int lane=threadIdx.x&31,warp=threadIdx.x>>5;
+    value=warp_sum(value); if(lane==0)sums[warp]=value; __syncthreads();
+    value=lane<HeadSize/64?sums[lane]:0.0f;
+    value=__shfl_sync(0xffffffffu,warp_sum(value),0);
+    __syncthreads();
+    return value;
+}
+
 inline int64_t ceil_div(int64_t n, int64_t d) {
     return (n + d - 1) / d;
 }
@@ -262,6 +273,48 @@ __global__ void tmix_lnx_rkvres_xg_v1_backward_kernel(
     }
 }
 
+template<int HeadSize>
+__global__ void tmix_lnx_backward_tiled_kernel(
+    const at::BFloat16* grad_xg,const at::BFloat16* x,const at::BFloat16* r,
+    const at::BFloat16* k,const at::BFloat16* v,const at::BFloat16* r_k,
+    const at::BFloat16* weight,const at::BFloat16* bias,const at::BFloat16* g,
+    const float* mean,const float* rstd,at::BFloat16* grad_x,
+    at::BFloat16* grad_r,at::BFloat16* grad_k,at::BFloat16* grad_v,
+    float* grad_r_k,float* grad_weight,float* grad_bias,at::BFloat16* grad_g,
+    int64_t ngroups) {
+    const int64_t group=blockIdx.x,row=blockIdx.y; const int pair=threadIdx.x;
+    const int64_t c0=group*HeadSize,c=c0+pair*2,idx=row*(ngroups*HeadSize)+c;
+    const int64_t ng=row*ngroups+group;
+    const float m=mean[ng],rs=rstd[ng];
+    const __nv_bfloat162 xv=load_bf16x2(x+idx),go=load_bf16x2(grad_xg+idx);
+    const __nv_bfloat162 gv=load_bf16x2(g+idx),wv=load_bf16x2(weight+c);
+    const float x0=__low2float(xv),x1=__high2float(xv);
+    const float go0=__low2float(go),go1=__high2float(go);
+    const float gy0=go0*__low2float(gv),gy1=go1*__high2float(gv);
+    const float xh0=(x0-m)*rs,xh1=(x1-m)*rs;
+    const float dxh0=gy0*__low2float(wv),dxh1=gy1*__high2float(wv);
+    const float sx=block_sum<HeadSize>(dxh0+dxh1);
+    const float sxx=block_sum<HeadSize>(dxh0*xh0+dxh1*xh1);
+    store_bf16x2(grad_x+idx,(dxh0-sx/HeadSize-xh0*sxx/HeadSize)*rs,
+                  (dxh1-sx/HeadSize-xh1*sxx/HeadSize)*rs);
+    const __nv_bfloat162 rv=load_bf16x2(r+idx),kv=load_bf16x2(k+idx);
+    const __nv_bfloat162 rk=load_bf16x2(r_k+c),vv=load_bf16x2(v+idx);
+    const float r0=__low2float(rv),r1=__high2float(rv),k0=__low2float(kv),k1=__high2float(kv);
+    const float rk0=__low2float(rk),rk1=__high2float(rk),v0=__low2float(vv),v1=__high2float(vv);
+    const float scale=block_sum<HeadSize>(r0*k0*rk0+r1*k1*rk1);
+    const float q=block_sum<HeadSize>(gy0*v0+gy1*v1);
+    store_bf16x2(grad_v+idx,gy0*scale,gy1*scale);
+    store_bf16x2(grad_r+idx,q*k0*rk0,q*k1*rk1);
+    store_bf16x2(grad_k+idx,q*r0*rk0,q*r1*rk1);
+    const __nv_bfloat162 bv=load_bf16x2(bias+c);
+    const float y0=xh0*__low2float(wv)+__low2float(bv)+scale*v0;
+    const float y1=xh1*__high2float(wv)+__high2float(bv)+scale*v1;
+    store_bf16x2(grad_g+idx,go0*y0,go1*y1);
+    atomicAdd(grad_weight+c,gy0*xh0); atomicAdd(grad_weight+c+1,gy1*xh1);
+    atomicAdd(grad_bias+c,gy0); atomicAdd(grad_bias+c+1,gy1);
+    atomicAdd(grad_r_k+c,q*r0*k0); atomicAdd(grad_r_k+c+1,q*r1*k1);
+}
+
 __global__ void cast_float_to_bf16_kernel(
     const float* __restrict__ src,
     at::BFloat16* __restrict__ dst,
@@ -285,7 +338,8 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_backward_cuda(
     torch::Tensor bias,
     torch::Tensor g,
     torch::Tensor mean,
-    torch::Tensor rstd) {
+    torch::Tensor rstd,
+    int64_t head_size) {
     auto grad_x = torch::empty_like(x);
     auto grad_r = torch::empty_like(r);
     auto grad_k = torch::empty_like(k);
@@ -302,10 +356,11 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_backward_cuda(
     const int64_t t = x.size(1);
     const int64_t c = x.size(2);
     const int64_t nrows = b * t;
-    const int64_t ngroups = c / kHeadSize;
+    const int64_t ngroups = c / head_size;
     auto stream = at::cuda::getCurrentCUDAStream();
-    const dim3 blocks(static_cast<unsigned int>(ngroups), static_cast<unsigned int>(ceil_div(nrows, static_cast<int64_t>(kRowsPerBlock))));
-    tmix_lnx_rkvres_xg_v1_backward_kernel<<<blocks, kThreads, 0, stream>>>(
+    if (head_size == 64) {
+      const dim3 blocks(static_cast<unsigned int>(ngroups), static_cast<unsigned int>(ceil_div(nrows, static_cast<int64_t>(kRowsPerBlock))));
+      tmix_lnx_rkvres_xg_v1_backward_kernel<<<blocks, kThreads, 0, stream>>>(
         grad_xg.data_ptr<at::BFloat16>(),
         x.data_ptr<at::BFloat16>(),
         r.data_ptr<at::BFloat16>(),
@@ -327,6 +382,13 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_backward_cuda(
         grad_g.data_ptr<at::BFloat16>(),
         ngroups,
         nrows);
+    } else if (head_size == 128) {
+      tmix_lnx_backward_tiled_kernel<128><<<dim3(ngroups,nrows),64,0,stream>>>(
+        grad_xg.data_ptr<at::BFloat16>(),x.data_ptr<at::BFloat16>(),r.data_ptr<at::BFloat16>(),k.data_ptr<at::BFloat16>(),v.data_ptr<at::BFloat16>(),r_k.data_ptr<at::BFloat16>(),weight.data_ptr<at::BFloat16>(),bias.data_ptr<at::BFloat16>(),g.data_ptr<at::BFloat16>(),mean.data_ptr<float>(),rstd.data_ptr<float>(),grad_x.data_ptr<at::BFloat16>(),grad_r.data_ptr<at::BFloat16>(),grad_k.data_ptr<at::BFloat16>(),grad_v.data_ptr<at::BFloat16>(),grad_r_k_fp32.data_ptr<float>(),grad_weight_fp32.data_ptr<float>(),grad_bias_fp32.data_ptr<float>(),grad_g.data_ptr<at::BFloat16>(),ngroups);
+    } else {
+      tmix_lnx_backward_tiled_kernel<256><<<dim3(ngroups,nrows),128,0,stream>>>(
+        grad_xg.data_ptr<at::BFloat16>(),x.data_ptr<at::BFloat16>(),r.data_ptr<at::BFloat16>(),k.data_ptr<at::BFloat16>(),v.data_ptr<at::BFloat16>(),r_k.data_ptr<at::BFloat16>(),weight.data_ptr<at::BFloat16>(),bias.data_ptr<at::BFloat16>(),g.data_ptr<at::BFloat16>(),mean.data_ptr<float>(),rstd.data_ptr<float>(),grad_x.data_ptr<at::BFloat16>(),grad_r.data_ptr<at::BFloat16>(),grad_k.data_ptr<at::BFloat16>(),grad_v.data_ptr<at::BFloat16>(),grad_r_k_fp32.data_ptr<float>(),grad_weight_fp32.data_ptr<float>(),grad_bias_fp32.data_ptr<float>(),grad_g.data_ptr<at::BFloat16>(),ngroups);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     const int threads = 256;
@@ -350,4 +412,3 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_backward_cuda(
 
     return {grad_x, grad_r, grad_k, grad_v, grad_r_k, grad_weight, grad_bias, grad_g};
 }
-

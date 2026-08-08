@@ -17,9 +17,10 @@
 //   - clone, exact, seq-v2, one-cp and one-direct family symbols retained for
 //     Albatross-shaped dispatch;
 //   - Albatross half2 arithmetic, cp.async token staging and swizzled shared
-//     state staging are preserved for the canonical D=64 implementation.
-//     The upstream source has no FP16 D=128/256 family, so unsupported head
-//     sizes fail closed instead of selecting a non-canonical replacement.
+//     state staging are preserved for the canonical D=64 implementation;
+//   - D=128/256 use a local 64-key-tiled recurrent family. Each warp owns one
+//     value column, keeps only the active 64-key tile live, and updates the
+//     FP16 state pool directly; no FP32-state fallback is selected.
 //
 // vllm-rwkv at 6d683f9e49a2997e405c47edc147872c8609513b is a varlen and
 // state-layout reference only, not the primary implementation source.
@@ -272,6 +273,148 @@ __device__ __forceinline__ void fill_invalid_output(
        output_index += block_count * static_cast<int64_t>(blockDim.x)) {
     output_ptr[output_index] = invalid_value<io_t>();
   }
+}
+
+__device__ __forceinline__ float warp_sum_fp32(float value) {
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    value += __shfl_down_sync(0xffffffffu, value, offset);
+  }
+  return value;
+}
+
+// D128/D256 local extension.  One warp owns one [K] state column and the
+// launch tiles the value dimension through grid.x.  Keeping the recurrent
+// column in the FP16 state pool avoids the per-thread float[D] register array
+// used by the FP32-state family and preserves the Albatross FP16 quantization
+// and elapsed-phase contract after every token.
+template <int HeadSize>
+__global__ __launch_bounds__(32, 4) void wkv_fp16_tiled_column_kernel(
+    int num_heads,
+    int64_t output_elements,
+    const int* __restrict__ query_start_loc,
+    const int* __restrict__ state_indices,
+    const int* __restrict__ elapsed_state_ptr,
+    const int* __restrict__ metadata_status,
+    half* __restrict__ state_ptr,
+    const half* __restrict__ r_ptr,
+    const half* __restrict__ decay_ptr,
+    const half* __restrict__ decay_bias_ptr,
+    const half* __restrict__ k_ptr,
+    const half* __restrict__ v_ptr,
+    const half* __restrict__ a_ptr,
+    const half* __restrict__ b_ptr,
+    half* __restrict__ output_ptr,
+    float scale) {
+  const int value_index = static_cast<int>(blockIdx.x);
+  const int head_index = static_cast<int>(blockIdx.y);
+  const int sequence_index = static_cast<int>(blockIdx.z);
+  const int lane = static_cast<int>(threadIdx.x);
+  const int64_t block_index =
+      (static_cast<int64_t>(sequence_index) * num_heads + head_index) *
+          HeadSize +
+      value_index;
+  const int64_t block_count =
+      static_cast<int64_t>(gridDim.x) * gridDim.y * gridDim.z;
+  if (metadata_status[0] != 0) {
+    fill_invalid_output(
+        block_index, block_count, output_elements, output_ptr);
+    return;
+  }
+
+  const int state_slot = state_indices[sequence_index];
+  const int token_start = query_start_loc[sequence_index];
+  const int token_end = query_start_loc[sequence_index + 1];
+  const int elapsed_base = elapsed_state_ptr[state_slot];
+  const int64_t state_head_base =
+      (static_cast<int64_t>(state_slot) * num_heads + head_index) *
+      HeadSize * HeadSize;
+  for (int token_index = token_start; token_index < token_end; ++token_index) {
+    const int token_offset = token_index - token_start;
+    const int64_t token_base =
+        (static_cast<int64_t>(token_index) * num_heads + head_index) *
+        HeadSize;
+    float state_dot_a = 0.0f;
+    for (int key_index = lane; key_index < HeadSize; key_index += 32) {
+      const float state_value = __half2float(
+          state_ptr[state_head_base +
+                    static_cast<int64_t>(key_index) * HeadSize + value_index]);
+      state_dot_a = fmaf(
+          state_value, __half2float(a_ptr[token_base + key_index]),
+          state_dot_a);
+    }
+    state_dot_a = warp_sum_fp32(state_dot_a);
+    state_dot_a = __shfl_sync(0xffffffffu, state_dot_a, 0);
+
+    float output_value = 0.0f;
+    const float value = __half2float(v_ptr[token_base + value_index]);
+    for (int key_index = lane; key_index < HeadSize; key_index += 32) {
+      const int64_t state_index =
+          state_head_base + static_cast<int64_t>(key_index) * HeadSize +
+          value_index;
+      const float old_state = __half2float(state_ptr[state_index]);
+      float decay_input = __half2float(decay_ptr[token_base + key_index]);
+      if (decay_bias_ptr != nullptr) {
+        decay_input +=
+            __half2float(decay_bias_ptr[head_index * HeadSize + key_index]);
+      }
+      const int phase =
+          elapsed_base + head_index * HeadSize + key_index + token_offset;
+      const float delta = __half2float(
+          __float2half_rn(recurrent_fp16_delta(decay_input, phase)));
+      const float updated =
+          old_state + old_state * delta +
+          __half2float(b_ptr[token_base + key_index]) * state_dot_a +
+          __half2float(k_ptr[token_base + key_index]) * value;
+      const half quantized = __float2half_rn(updated);
+      state_ptr[state_index] = quantized;
+      output_value = fmaf(
+          __half2float(quantized), __half2float(r_ptr[token_base + key_index]),
+          output_value);
+    }
+    output_value = warp_sum_fp32(output_value);
+    if (lane == 0) {
+      output_ptr[token_base + value_index] =
+          __float2half_rn(scale * output_value);
+    }
+  }
+}
+
+template <int HeadSize>
+void launch_fp16_tiled_column(
+    int num_sequences,
+    int num_heads,
+    const torch::Tensor& query_start_loc,
+    const torch::Tensor& state_indices,
+    const torch::Tensor& elapsed_state,
+    torch::Tensor& state,
+    const torch::Tensor& r,
+    const torch::Tensor& decay_logits,
+    const torch::Tensor& decay_bias,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    torch::Tensor& output,
+    const torch::Tensor& metadata_status,
+    float scale,
+    cudaStream_t stream) {
+  wkv_fp16_tiled_column_kernel<HeadSize>
+      <<<dim3(HeadSize, num_heads, num_sequences), 32, 0, stream>>>(
+          num_heads, output.numel(), query_start_loc.data_ptr<int>(),
+          state_indices.data_ptr<int>(), elapsed_state.data_ptr<int>(),
+          metadata_status.data_ptr<int>(),
+          reinterpret_cast<half*>(state.data_ptr()),
+          reinterpret_cast<const half*>(r.data_ptr()),
+          reinterpret_cast<const half*>(decay_logits.data_ptr()),
+          decay_bias.defined()
+              ? reinterpret_cast<const half*>(decay_bias.data_ptr())
+              : nullptr,
+          reinterpret_cast<const half*>(k.data_ptr()),
+          reinterpret_cast<const half*>(v.data_ptr()),
+          reinterpret_cast<const half*>(a.data_ptr()),
+          reinterpret_cast<const half*>(b.data_ptr()),
+          reinterpret_cast<half*>(output.data_ptr()), scale);
 }
 
 // The state pool is [K,V].  Shared state is staged as [K,V/2] with the
@@ -1203,11 +1346,20 @@ void recurrent_fp16_from_decay_logits_cuda(
           state_indices, elapsed_state, state, r, decay_logits, decay_bias, k,
           v, a, b, output, metadata_status, static_cast<float>(scale), stream);
     }
+  } else if (state.size(2) == 128) {
+    launch_fp16_tiled_column<128>(
+        num_sequences, num_heads, query_start_loc, state_indices,
+        elapsed_state, state, r, decay_logits, decay_bias, k, v, a, b,
+        output, metadata_status, static_cast<float>(scale), stream);
+  } else if (state.size(2) == 256) {
+    launch_fp16_tiled_column<256>(
+        num_sequences, num_heads, query_start_loc, state_indices,
+        elapsed_state, state, r, decay_logits, decay_bias, k, v, a, b,
+        output, metadata_status, static_cast<float>(scale), stream);
   } else {
     TORCH_CHECK(
         false,
-        "canonical Albatross FP16 recurrent family supports only head size 64; "
-        "no non-canonical FP16 replacement is selected");
+        "FP16 recurrent family supports head sizes 64, 128, and 256");
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

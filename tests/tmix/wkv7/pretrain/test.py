@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 from pathlib import Path
 
@@ -15,10 +14,6 @@ from flashrwkv2.tmix.wkv7 import pretrain_recurrent_bf16
 
 ROOT = Path(__file__).resolve().parents[4]
 W_SCALE = -0.6065306597
-UPSTREAM_BODY_HASHES = {
-    "pretrain_recurrent_bf16_forward.cpp": "a3def05547be8bf79d81d76c4d4795958c712e42ef94fb5d4161a66b00b0cb74",
-    "pretrain_recurrent_bf16_forward.cu": "2f36786a261582198f3ec2deca7b2af241a364f2fae3045b19731a0149109083",
-}
 AVAILABLE = (
     torch.cuda.is_available()
     and flashrwkv2._C is not None
@@ -38,9 +33,10 @@ def _case(
     heads: int,
     *,
     requires_grad: bool = False,
+    head_size: int = 64,
 ) -> tuple[torch.Tensor, ...]:
     torch.manual_seed(20260806 + batch + tokens + heads)
-    shape = (batch, tokens, heads * 64)
+    shape = (batch, tokens, heads * head_size)
     values = tuple(
         (torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.05)
         .contiguous()
@@ -50,15 +46,15 @@ def _case(
     return values
 
 
-def _reference(values: tuple[torch.Tensor, ...]) -> torch.Tensor:
+def _reference(values: tuple[torch.Tensor, ...], head_size: int = 64) -> torch.Tensor:
     r, w, k, v, a, b = values
     batch, tokens, channels = r.shape
-    heads = channels // 64
+    heads = channels // head_size
     r4, w4, k4, v4, a4, b4 = (
-        tensor.view(batch, tokens, heads, 64).float()
+        tensor.view(batch, tokens, heads, head_size).float()
         for tensor in (r, w, k, v, a, b)
     )
-    state = torch.zeros((batch, heads, 64, 64), device=r.device)
+    state = torch.zeros((batch, heads, head_size, head_size), device=r.device)
     outputs = []
     for token in range(tokens):
         retention = torch.exp(W_SCALE / (1.0 + torch.exp(-w4[:, token])))
@@ -74,17 +70,19 @@ def _reference(values: tuple[torch.Tensor, ...]) -> torch.Tensor:
     return torch.stack(outputs, dim=1).reshape(batch, tokens, channels)
 
 
-def test_native_bodies_match_pinned_train_temp_sources() -> None:
-    native_root = ROOT / "csrc/sm90/tmix/wkv7"
-    for filename, expected_hash in UPSTREAM_BODY_HASHES.items():
-        lines = (native_root / filename).read_bytes().splitlines(keepends=True)
-        body = b"".join(lines[6:])
-        assert hashlib.sha256(body).hexdigest() == expected_hash
+def test_native_bodies_record_authority_and_local_generalization() -> None:
+    source = (ROOT / "csrc/sm90/tmix/wkv7/pretrain_recurrent_bf16_forward.cu").read_text()
+    assert "rwkv7_clampw_v3_for_h100.cu" in source
+    assert "forward_kernel_split64<128>" in source
+    assert "forward_kernel_split64<256>" in source
+    assert "backward_kernel_split64<128,2>" in source
+    assert "backward_kernel_split64<256,4>" in source
 
 
 def test_public_contract_matches_clampw_v3() -> None:
     signature = inspect.signature(pretrain_recurrent_bf16)
-    assert tuple(signature.parameters) == ("r", "w", "k", "v", "a", "b")
+    assert tuple(signature.parameters) == ("r", "w", "k", "v", "a", "b", "head_size")
+    assert signature.parameters["head_size"].default == 64
     assert flashrwkv2.pretrain_recurrent_bf16 is pretrain_recurrent_bf16
     assert "pretrain_recurrent_bf16" in flashrwkv2.__all__
     assert "pretrain_recurrent_fp32io16" not in flashrwkv2.__all__
@@ -127,6 +125,22 @@ def test_backward_matches_clampw_recurrence() -> None:
         assert torch.allclose(
             actual_gradient, expected_gradient, atol=0.03, rtol=0.05
         )
+
+
+@pytest.mark.parametrize("head_size", (128, 256))
+def test_generalized_forward_backward_matches_recurrence(head_size: int) -> None:
+    _require_cuda()
+    values = _case(1, 16, 1, requires_grad=True, head_size=head_size)
+    actual = pretrain_recurrent_bf16(*values, head_size=head_size)
+    expected_values = tuple(value.detach().clone().requires_grad_() for value in values)
+    expected = _reference(expected_values, head_size)
+    grad = torch.randn_like(actual)
+    actual.backward(grad)
+    expected.backward(grad.float())
+    assert torch.allclose(actual.float(), expected, atol=0.03, rtol=0.03)
+    for value, reference in zip(values, expected_values, strict=True):
+        assert torch.isfinite(value.grad).all()
+        assert torch.allclose(value.grad.float(), reference.grad.float(), atol=0.05, rtol=0.08)
 
 
 def test_invalid_input_contract_is_rejected() -> None:

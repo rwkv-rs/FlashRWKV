@@ -14,11 +14,14 @@ def infer_tmix_kk_a_gate_forward_varlen(
     a12: torch.Tensor,
     k_a: torch.Tensor,
     *,
+    head_size: int = 64,
     batch_size: int = 1,
     max_seqlen: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run the Albatross key/key-a gate on packed token rows."""
 
+    if head_size not in {64, 128, 256}:
+        raise ValueError("head_size must be one of 64, 128, or 256")
     tensors = (k, k_k, a0, a12, k_a)
     names = ("k", "k_k", "a0", "a12", "k_a")
     for name, tensor in zip(names, tensors, strict=True):
@@ -30,8 +33,13 @@ def infer_tmix_kk_a_gate_forward_varlen(
             raise ValueError(f"{name} must be CUDA and contiguous")
         if tensor.device != k.device:
             raise ValueError(f"{name} must share k's device")
-    if k.ndim != 2 or k.shape[0] <= 0 or k.shape[1] <= 0 or k.shape[1] % 64:
-        raise ValueError("k must have packed shape [total_tokens,H*64]")
+    if (
+        k.ndim != 2
+        or k.shape[0] <= 0
+        or k.shape[1] <= 0
+        or k.shape[1] % head_size
+    ):
+        raise ValueError("k must have packed shape [total_tokens,H*head_size]")
     if any(tensor.shape != (k.shape[1],) for tensor in (k_k, a0, k_a)):
         raise ValueError("k_k, a0 and k_a must have shape [C]")
     if a12.shape != k.shape:
@@ -52,7 +60,14 @@ def infer_tmix_kk_a_gate_forward_varlen(
         raise ValueError("max_seqlen must be a positive integer")
     return tuple(
         _extension().tmix_kk_a_gate_forward_varlen(
-            k, k_k, a0, a12, k_a, int(batch_size), int(max_seqlen)
+            k,
+            k_k,
+            a0,
+            a12,
+            k_a,
+            int(head_size),
+            int(batch_size),
+            int(max_seqlen),
         )
     )  # type: ignore[return-value]
 

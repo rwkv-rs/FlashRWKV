@@ -12,6 +12,12 @@ import torch
 
 from benchmarks.tmix.wkv7 import bench
 import flashrwkv2
+from flashrwkv2.tmix.kk_a_gate import infer_tmix_kk_a_gate_forward_varlen
+from flashrwkv2.tmix.linear import infer_tmix_linear_forward_varlen
+from flashrwkv2.tmix.lnx_rkvres_xg import (
+    infer_tmix_lnx_rkvres_xg_forward_varlen,
+)
+from flashrwkv2.tmix.mix6 import infer_tmix_mix6_forward_varlen
 from flashrwkv2.tmix.wkv7 import (
     infer_recurrent_add_vec_forward_varlen,
     infer_recurrent_fp16_advance_i32,
@@ -256,6 +262,113 @@ def _relative_rmse(actual: torch.Tensor, expected: torch.Tensor) -> float:
     difference = actual.float() - expected.float()
     baseline = expected.float().square().mean().sqrt().clamp_min(1.0e-6)
     return float((difference.square().mean().sqrt() / baseline).item())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("head_size", (64, 128, 256))
+def test_fp16_complete_tmix_chain(head_size: int) -> None:
+    """Exercise the packed FP16 chain without an FP32-state/Python WKV path."""
+
+    _require_fp16_extension()
+    torch.manual_seed(20260808 + head_size)
+    device = torch.device("cuda")
+    rows, heads, channels = 4, 2, 2 * head_size
+    cu_seqlens = torch.tensor([0, 1, rows], device=device, dtype=torch.int32)
+    state_indices = torch.tensor([1, 0], device=device, dtype=torch.int32)
+    shift_state = torch.zeros(3, channels, device=device, dtype=torch.float16)
+    state = torch.zeros(
+        3, heads, head_size, head_size, device=device, dtype=torch.float16
+    )
+    elapsed = torch.zeros(3, device=device, dtype=torch.int32)
+    x = (torch.randn(rows, channels, device=device) * 0.03).half()
+    mix_coefficients = [
+        (torch.randn(channels, device=device) * 0.05).half() for _ in range(6)
+    ]
+    mixed = infer_tmix_mix6_forward_varlen(
+        x,
+        *mix_coefficients,
+        shift_state_pool=shift_state,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        max_seqlen=3,
+    )
+    identity = torch.eye(channels, device=device, dtype=torch.float16)
+    r, decay_logits, key, value, a12, gate = [
+        infer_tmix_linear_forward_varlen(token, identity) for token in mixed
+    ]
+    key_scale = torch.ones(channels, device=device, dtype=torch.float16)
+    a0 = torch.zeros(channels, device=device, dtype=torch.float16)
+    a_scale = torch.full(
+        (channels,), 0.25, device=device, dtype=torch.float16
+    )
+    key, neg_direction, scaled_direction = infer_tmix_kk_a_gate_forward_varlen(
+        key,
+        key_scale,
+        a0,
+        a12,
+        a_scale,
+        head_size=head_size,
+        batch_size=2,
+        max_seqlen=3,
+    )
+    packed = tuple(
+        tensor.reshape(rows, heads, head_size).contiguous()
+        for tensor in (r, decay_logits, key, value, scaled_direction, neg_direction)
+    )
+    state_before = state.clone()
+    expected_wkv, expected_state = rwkv7_fp16_reference(
+        *packed,
+        state_pool=state_before,
+        elapsed_state_pool=elapsed,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+    )
+    wkv = infer_recurrent_fp16_forward_varlen(
+        *packed,
+        state_pool=state,
+        elapsed_state_pool=elapsed,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        max_seqlen=3,
+    )
+    residual_scale = torch.randn(
+        channels, device=device, dtype=torch.float16
+    ) * 0.05
+    weight = torch.ones(channels, device=device, dtype=torch.float16)
+    bias = torch.zeros(channels, device=device, dtype=torch.float16)
+    output = infer_tmix_lnx_rkvres_xg_forward_varlen(
+        wkv.reshape(rows, channels),
+        r,
+        key,
+        value,
+        residual_scale,
+        weight,
+        bias,
+        gate,
+        head_size=head_size,
+        batch_size=2,
+        max_seqlen=3,
+    )
+
+    expected_x = expected_wkv.float()
+    mean = expected_x.mean(-1, keepdim=True)
+    rstd = (expected_x.var(-1, unbiased=False, keepdim=True) + 64.0e-5).rsqrt()
+    residual = (
+        r.float().reshape(rows, heads, head_size)
+        * key.float().reshape(rows, heads, head_size)
+        * residual_scale.float().reshape(1, heads, head_size)
+    ).sum(-1, keepdim=True)
+    expected_output = (
+        (expected_x - mean) * rstd
+        + residual * value.float().reshape(rows, heads, head_size)
+    ) * gate.float().reshape(rows, heads, head_size)
+    assert torch.allclose(state.float(), expected_state.float(), atol=0.08, rtol=0.08)
+    assert torch.allclose(
+        output.float().reshape_as(expected_output),
+        expected_output,
+        atol=0.12,
+        rtol=0.12,
+    )
 
 
 def _make_case(
@@ -865,22 +978,6 @@ def test_packed_fp16_state_family_correctness(
     assert isinstance(state_indices, torch.Tensor)
     assert isinstance(decay_bias, torch.Tensor)
     initial_state = case["state_pool"].half()
-    if head_size != 64:
-        observed_state = initial_state.clone()
-        with pytest.raises(
-            RuntimeError,
-            match="canonical Albatross FP16 recurrent family supports only head size 64",
-        ):
-            infer_recurrent_fp16_forward_varlen(
-                *args,
-                state_pool=observed_state,
-                elapsed_state_pool=case["elapsed_state_pool"],
-                cu_seqlens=cu_seqlens,
-                state_indices=state_indices,
-                decay_bias=decay_bias,
-            )
-        assert torch.equal(observed_state, initial_state)
-        return
     expected_output, expected_state = rwkv7_fp16_reference(
         *args,
         state_pool=initial_state,

@@ -7,7 +7,9 @@ import torch
 from ..wkv7 import _extension
 
 
-def _check_inputs(key, key_scale, learning_rate, learning_rate_scale) -> None:
+def _check_inputs(key, key_scale, learning_rate, learning_rate_scale, head_size) -> None:
+    if head_size not in {64, 128, 256}:
+        raise ValueError("head_size must be one of 64, 128, or 256")
     tensors = {
         "key": key,
         "key_scale": key_scale,
@@ -19,8 +21,8 @@ def _check_inputs(key, key_scale, learning_rate, learning_rate_scale) -> None:
             raise TypeError(f"{name} must be a torch.Tensor")
         if tensor.dtype != torch.bfloat16 or not tensor.is_cuda or not tensor.is_contiguous():
             raise ValueError(f"{name} must be contiguous CUDA bfloat16")
-    if key.ndim != 3 or key.numel() == 0 or key.shape[-1] % 64:
-        raise ValueError("key must have non-empty shape [B,T,C], C divisible by 64")
+    if key.ndim != 3 or key.numel() == 0 or key.shape[-1] % head_size:
+        raise ValueError("key must have non-empty shape [B,T,C], C divisible by head_size")
     if learning_rate.shape != key.shape:
         raise ValueError("learning_rate must match key")
     if key_scale.shape != (key.shape[-1],) or learning_rate_scale.shape != key_scale.shape:
@@ -31,11 +33,12 @@ def _check_inputs(key, key_scale, learning_rate, learning_rate_scale) -> None:
 
 class _KKPre(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, key, key_scale, learning_rate, learning_rate_scale):
+    def forward(ctx, key, key_scale, learning_rate, learning_rate_scale, head_size):
         outputs = _extension().pretrain_tmix_kk_pre_forward(
-            key, key_scale, learning_rate, learning_rate_scale
+            key, key_scale, learning_rate, learning_rate_scale, head_size
         )
         ctx.save_for_backward(key, key_scale, learning_rate, learning_rate_scale, outputs[3])
+        ctx.head_size = head_size
         return outputs[0], outputs[1], outputs[2]
 
     @staticmethod
@@ -51,18 +54,21 @@ class _KKPre(torch.autograd.Function):
             learning_rate,
             learning_rate_scale,
             inverse_norm,
+            ctx.head_size,
         )
         return tuple(
             gradient if needed else None
-            for gradient, needed in zip(gradients, ctx.needs_input_grad, strict=True)
-        )
+            for gradient, needed in zip(gradients, ctx.needs_input_grad[:4], strict=True)
+        ) + (None,)
 
 
-def pretrain_tmix_kk_pre_bf16(key, key_scale, learning_rate, learning_rate_scale):
+def pretrain_tmix_kk_pre_bf16(
+    key, key_scale, learning_rate, learning_rate_scale, *, head_size=64
+):
     """Train-temp per-head key normalization and direction preparation."""
 
-    _check_inputs(key, key_scale, learning_rate, learning_rate_scale)
-    return _KKPre.apply(key, key_scale, learning_rate, learning_rate_scale)
+    _check_inputs(key, key_scale, learning_rate, learning_rate_scale, head_size)
+    return _KKPre.apply(key, key_scale, learning_rate, learning_rate_scale, head_size)
 
 
 __all__ = ["pretrain_tmix_kk_pre_bf16"]

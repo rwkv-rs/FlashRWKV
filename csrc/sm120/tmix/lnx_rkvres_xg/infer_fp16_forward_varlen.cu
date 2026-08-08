@@ -52,6 +52,83 @@ __device__ inline float warp_sum(float v) {
   return v;
 }
 
+template <int HeadSize>
+__global__ void tmix_lnx_rkvres_xg_generic_kernel(
+    int H,
+    const dtype* __restrict__ x,
+    const dtype* __restrict__ r,
+    const dtype* __restrict__ k,
+    const dtype* __restrict__ v,
+    const dtype* __restrict__ r_k,
+    const dtype* __restrict__ weight,
+    const dtype* __restrict__ bias,
+    const dtype* __restrict__ g,
+    dtype* __restrict__ out,
+    int64_t bth_size) {
+  constexpr int kPairs = HeadSize / 2;
+  constexpr int kWarps = kPairs / 32;
+  __shared__ float partial[kWarps];
+  const int64_t bth = static_cast<int64_t>(blockIdx.x);
+  if (bth >= bth_size) {
+    return;
+  }
+  const int pair = threadIdx.x;
+  const int lane = pair & 31;
+  const int warp = pair >> 5;
+  const int h = static_cast<int>(bth % H);
+  const int64_t offset = static_cast<int64_t>(pair) * 2;
+  const int64_t idx = bth * HeadSize + offset;
+  const int64_t c = static_cast<int64_t>(h) * HeadSize + offset;
+  const float2 xv = __half22float2(load_h2(x + idx));
+
+  float sum = warp_sum(xv.x + xv.y);
+  if (lane == 0) partial[warp] = sum;
+  __syncthreads();
+  if (warp == 0) {
+    float total = lane < kWarps ? partial[lane] : 0.0f;
+    total = warp_sum(total);
+    if (lane == 0) partial[0] = total;
+  }
+  __syncthreads();
+  const float mean = partial[0] * (1.0f / HeadSize);
+  const float d0 = xv.x - mean;
+  const float d1 = xv.y - mean;
+
+  float ss = warp_sum(d0 * d0 + d1 * d1);
+  if (lane == 0) partial[warp] = ss;
+  __syncthreads();
+  if (warp == 0) {
+    float total = lane < kWarps ? partial[lane] : 0.0f;
+    total = warp_sum(total);
+    if (lane == 0) partial[0] = total;
+  }
+  __syncthreads();
+  const float rstd = rsqrtf(partial[0] * (1.0f / HeadSize) + TMIX_LN_X_EPS);
+
+  const float2 rv = __half22float2(load_h2(r + idx));
+  const float2 kv = __half22float2(load_h2(k + idx));
+  const float2 vv = __half22float2(load_h2(v + idx));
+  const float2 rkv_weight = __half22float2(load_h2(r_k + c));
+  float dot = warp_sum(
+      rv.x * kv.x * rkv_weight.x + rv.y * kv.y * rkv_weight.y);
+  if (lane == 0) partial[warp] = dot;
+  __syncthreads();
+  if (warp == 0) {
+    float total = lane < kWarps ? partial[lane] : 0.0f;
+    total = warp_sum(total);
+    if (lane == 0) partial[0] = total;
+  }
+  __syncthreads();
+  const float rkv = partial[0];
+  const float2 ln_weight = __half22float2(load_h2(weight + c));
+  const float2 ln_bias = __half22float2(load_h2(bias + c));
+  const float2 gate = __half22float2(load_h2(g + idx));
+  store_h2(
+      out + idx,
+      (d0 * rstd * ln_weight.x + ln_bias.x + rkv * vv.x) * gate.x,
+      (d1 * rstd * ln_weight.y + ln_bias.y + rkv * vv.y) * gate.y);
+}
+
 // Exact Albatross basic lnx body; bth_size is total_tokens * heads.
 __global__ void tmix_lnx_rkvres_xg_kernel(
     int H,
@@ -230,6 +307,7 @@ void tmix_lnx_rkvres_xg_forward_varlen_cuda(
     int total_tokens,
     int channels,
     int heads,
+    int head_size,
     torch::Tensor x,
     torch::Tensor r,
     torch::Tensor k,
@@ -239,9 +317,26 @@ void tmix_lnx_rkvres_xg_forward_varlen_cuda(
     torch::Tensor bias,
     torch::Tensor g,
     torch::Tensor output) {
-  assert(channels == heads * HEAD_SIZE);
+  assert(channels == heads * head_size);
   const auto stream = at::cuda::getCurrentCUDAStream();
   const int64_t rows = static_cast<int64_t>(total_tokens) * heads;
+  if (head_size == 128) {
+    tmix_lnx_rkvres_xg_generic_kernel<128><<<rows, 64, 0, stream>>>(
+        heads, x.data_ptr<dtype>(), r.data_ptr<dtype>(), k.data_ptr<dtype>(),
+        v.data_ptr<dtype>(), r_k.data_ptr<dtype>(), weight.data_ptr<dtype>(),
+        bias.data_ptr<dtype>(), g.data_ptr<dtype>(), output.data_ptr<dtype>(), rows);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
+  if (head_size == 256) {
+    tmix_lnx_rkvres_xg_generic_kernel<256><<<rows, 128, 0, stream>>>(
+        heads, x.data_ptr<dtype>(), r.data_ptr<dtype>(), k.data_ptr<dtype>(),
+        v.data_ptr<dtype>(), r_k.data_ptr<dtype>(), weight.data_ptr<dtype>(),
+        bias.data_ptr<dtype>(), g.data_ptr<dtype>(), output.data_ptr<dtype>(), rows);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
+  assert(head_size == HEAD_SIZE);
   const int64_t head_tasks =
       static_cast<int64_t>(batch_size) * max_seqlen * heads;
 

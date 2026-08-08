@@ -166,6 +166,39 @@ void launch_replay(
 
 }  // namespace rl_infctx_replay_detail
 
+namespace rl_infctx_replay_tiled_detail {
+template<typename io_t,int HeadSize>
+__global__ void replay_columns(int num_heads,const int* starts,const int* ends,
+ const float* boundary,const io_t* r,const io_t* decay,const io_t* decay_bias,
+ const io_t* k,const io_t* v,const io_t* a,const io_t* b,io_t* output,
+ float* state_dot_a,float scale) {
+  const int value=blockIdx.x,head=blockIdx.y,chunk=blockIdx.z,lane=threadIdx.x;
+  const int64_t bb=(static_cast<int64_t>(chunk)*num_heads+head)*HeadSize*HeadSize;
+  float states[HeadSize/32];
+#pragma unroll
+  for(int q=0;q<HeadSize/32;++q){const int key=lane+q*32;states[q]=boundary[bb+static_cast<int64_t>(key)*HeadSize+value];}
+  for(int token=starts[chunk];token<ends[chunk];++token){
+    const int64_t tb=(static_cast<int64_t>(token)*num_heads+head)*HeadSize;
+    float sa=0.0f;
+    for(int q=0;q<HeadSize/32;++q){const int key=lane+q*32;sa=fmaf(static_cast<float>(a[tb+key]),states[q],sa);}
+    for(int off=16;off;off>>=1)sa+=__shfl_down_sync(0xffffffffu,sa,off);
+    sa=__shfl_sync(0xffffffffu,sa,0);
+    if(lane==0)state_dot_a[tb+value]=sa;
+    float y=0.0f;const float vv=static_cast<float>(v[tb+value]);
+    for(int q=0;q<HeadSize/32;++q){
+      const int key=lane+q*32;
+      float dl=static_cast<float>(decay[tb+key]);
+      if(decay_bias)dl+=static_cast<float>(decay_bias[head*HeadSize+key]);
+      states[q]=flashrwkv2::wkv7::recurrent_retention(dl)*states[q]+
+        static_cast<float>(b[tb+key])*sa+static_cast<float>(k[tb+key])*vv;
+      y=fmaf(static_cast<float>(r[tb+key]),states[q],y);
+    }
+    for(int off=16;off;off>>=1)y+=__shfl_down_sync(0xffffffffu,y,off);
+    if(lane==0)output[tb+value]=static_cast<io_t>(scale*y);
+  }
+}
+}
+
 
 void launch_rl_infctx_chunk_replay_fp32_from_decay_logits(
     int num_chunks,
@@ -218,9 +251,22 @@ void rl_infctx_chunk_fp32io16_backward_replay_cuda(
   const auto stream = at::cuda::getCurrentCUDAStream();
   const int num_chunks = static_cast<int>(chunk_token_starts.numel());
   const int num_heads = static_cast<int>(r.size(1));
-  launch_rl_infctx_chunk_replay_fp32_from_decay_logits(
+  const int head_size = static_cast<int>(r.size(2));
+  if (head_size == 64) {
+    launch_rl_infctx_chunk_replay_fp32_from_decay_logits(
       num_chunks, num_heads, chunk_token_starts, chunk_token_ends, boundary,
       r, decay_logits, decay_bias, k, v, a, b, output, &state_dot_a,
       static_cast<float>(scale), stream);
+  } else {
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, r.scalar_type(),
+        "flashrwkv2_rl_replay_tiled", [&] {
+          const dim3 grid(head_size, num_heads, num_chunks);
+          if (head_size == 128)
+            rl_infctx_replay_tiled_detail::replay_columns<scalar_t,128><<<grid,32,0,stream>>>(num_heads,chunk_token_starts.data_ptr<int>(),chunk_token_ends.data_ptr<int>(),boundary.data_ptr<float>(),r.data_ptr<scalar_t>(),decay_logits.data_ptr<scalar_t>(),decay_bias.defined()?decay_bias.data_ptr<scalar_t>():nullptr,k.data_ptr<scalar_t>(),v.data_ptr<scalar_t>(),a.data_ptr<scalar_t>(),b.data_ptr<scalar_t>(),output.data_ptr<scalar_t>(),state_dot_a.data_ptr<float>(),static_cast<float>(scale));
+          else
+            rl_infctx_replay_tiled_detail::replay_columns<scalar_t,256><<<grid,32,0,stream>>>(num_heads,chunk_token_starts.data_ptr<int>(),chunk_token_ends.data_ptr<int>(),boundary.data_ptr<float>(),r.data_ptr<scalar_t>(),decay_logits.data_ptr<scalar_t>(),decay_bias.defined()?decay_bias.data_ptr<scalar_t>():nullptr,k.data_ptr<scalar_t>(),v.data_ptr<scalar_t>(),a.data_ptr<scalar_t>(),b.data_ptr<scalar_t>(),output.data_ptr<scalar_t>(),state_dot_a.data_ptr<float>(),static_cast<float>(scale));
+        });
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

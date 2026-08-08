@@ -18,8 +18,6 @@ using flashrwkv2::validation::check_same_device;
 
 namespace {
 
-constexpr int64_t kHeadSize = 64;
-
 void check_replay_inputs(
     const torch::Tensor& chunk_token_starts,
     const torch::Tensor& chunk_token_ends,
@@ -54,12 +52,13 @@ void check_replay_inputs(
                   chunk_token_starts.sizes() == chunk_token_ends.sizes(),
               "chunk token metadata must have shape [C]");
   TORCH_CHECK(boundary.dim() == 4 && boundary.size(0) == chunk_token_starts.numel() &&
-                  boundary.size(1) == r.size(1) && boundary.size(2) == kHeadSize &&
-                  boundary.size(3) == kHeadSize &&
+                  boundary.size(1) == r.size(1) && boundary.size(2) == r.size(2) &&
+                  boundary.size(3) == r.size(2) &&
                   boundary.scalar_type() == torch::kFloat32,
-              "boundary must have shape [C,H,64,64] and be float32");
-  TORCH_CHECK(r.dim() == 3 && r.size(0) > 0 && r.size(2) == kHeadSize,
-              "replay token tensors must have shape [N,H,64]");
+              "boundary must have shape [C,H,D,D] and be float32");
+  TORCH_CHECK(r.dim() == 3 && r.size(0) > 0 &&
+                  (r.size(2) == 64 || r.size(2) == 128 || r.size(2) == 256),
+              "replay token tensors must have shape [N,H,D], D in {64,128,256}");
   for (const auto& item : {
            std::pair<const torch::Tensor*, const char*>{&decay_logits,
                                                         "decay_logits"},
@@ -91,10 +90,10 @@ void check_replay_inputs(
     TORCH_CHECK(decay_bias->scalar_type() == r.scalar_type(),
                 "decay_bias must match r dtype");
     TORCH_CHECK(
-        (decay_bias->dim() == 1 && decay_bias->numel() == r.size(1) * kHeadSize) ||
+        (decay_bias->dim() == 1 && decay_bias->numel() == r.size(1) * r.size(2)) ||
             (decay_bias->dim() == 2 && decay_bias->size(0) == r.size(1) &&
-             decay_bias->size(1) == kHeadSize),
-        "decay_bias must have shape [H*64] or [H,64]");
+             decay_bias->size(1) == r.size(2)),
+        "decay_bias must have shape [H*D] or [H,D]");
   }
 }
 

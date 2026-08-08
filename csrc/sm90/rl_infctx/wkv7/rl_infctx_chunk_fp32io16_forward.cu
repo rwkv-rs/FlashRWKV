@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright contributors to the FlashRWKV2 project
 // Source revision: FlashRWKV2 pre-refactor retained RL/Infctx local snapshot
 // Original path: retained RL/Infctx materialized/recompute CUDA family
-// Mechanically migrated from the retained RL/Infctx materialized affine
-// implementation; raw decay-logit contract and module-local naming only.
+// D64 is mechanically migrated from the retained RL/Infctx materialized and
+// factor-recompute implementations. D128/256 add local 64-wide tiled boundary,
+// propagation, output, and replay kernels under the same raw-logit contract.
 
 
 #include "rl_infctx_chunk_fp32io16_replay.cuh"
@@ -862,3 +863,60 @@ void materialized_chunk_fp32_from_decay_logits_cuda(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+namespace rl_infctx_tiled_detail {
+using flashrwkv2::wkv7::recurrent_retention;
+template <typename io_t, int HeadSize>
+__global__ void recurrent_columns(
+    int num_heads,const int* sequence_chunk_offsets,const int* chunk_starts,
+    const int* chunk_ends,const int* state_indices,float* state,
+    const io_t* r,const io_t* decay,const io_t* decay_bias,const io_t* k,
+    const io_t* v,const io_t* a,const io_t* b,io_t* output,float* boundary,
+    float* state_dot_a,float scale) {
+  const int value=blockIdx.x,head=blockIdx.y,sequence=blockIdx.z,lane=threadIdx.x;
+  const int slot=state_indices[sequence];
+  const int64_t state_base=(static_cast<int64_t>(slot)*num_heads+head)*HeadSize*HeadSize;
+  for(int chunk=sequence_chunk_offsets[sequence];chunk<sequence_chunk_offsets[sequence+1];++chunk){
+    const int64_t boundary_base=(static_cast<int64_t>(chunk)*num_heads+head)*HeadSize*HeadSize;
+    for(int key=lane;key<HeadSize;key+=32)
+      boundary[boundary_base+static_cast<int64_t>(key)*HeadSize+value]=state[state_base+static_cast<int64_t>(key)*HeadSize+value];
+    for(int token=chunk_starts[chunk];token<chunk_ends[chunk];++token){
+      const int64_t token_base=(static_cast<int64_t>(token)*num_heads+head)*HeadSize;
+      float sa=0.0f;
+      for(int key=lane;key<HeadSize;key+=32)
+        sa=fmaf(static_cast<float>(a[token_base+key]),state[state_base+static_cast<int64_t>(key)*HeadSize+value],sa);
+      for(int off=16;off;off>>=1)sa+=__shfl_down_sync(0xffffffffu,sa,off);
+      sa=__shfl_sync(0xffffffffu,sa,0);
+      if(lane==0&&state_dot_a)state_dot_a[token_base+value]=sa;
+      float y=0.0f; const float vv=static_cast<float>(v[token_base+value]);
+      for(int key=lane;key<HeadSize;key+=32){
+        const int64_t si=state_base+static_cast<int64_t>(key)*HeadSize+value;
+        float dl=static_cast<float>(decay[token_base+key]);
+        if(decay_bias)dl+=static_cast<float>(decay_bias[head*HeadSize+key]);
+        const float next=recurrent_retention(dl)*state[si]+
+          static_cast<float>(b[token_base+key])*sa+
+          static_cast<float>(k[token_base+key])*vv;
+        state[si]=next;y=fmaf(static_cast<float>(r[token_base+key]),next,y);
+      }
+      for(int off=16;off;off>>=1)y+=__shfl_down_sync(0xffffffffu,y,off);
+      if(lane==0)output[token_base+value]=static_cast<io_t>(scale*y);
+    }
+  }
+}
+}
+
+void tiled_chunk_fp32_from_decay_logits_cuda(
+    torch::Tensor sequence_chunk_offsets,torch::Tensor chunk_token_starts,
+    torch::Tensor chunk_token_ends,torch::Tensor state_indices,torch::Tensor state,
+    torch::Tensor r,torch::Tensor decay_logits,torch::Tensor decay_bias,
+    torch::Tensor k,torch::Tensor v,torch::Tensor a,torch::Tensor b,
+    torch::Tensor output,torch::Tensor boundary,torch::Tensor state_dot_a,double scale) {
+  const c10::cuda::CUDAGuard guard(state.device());
+  const auto stream=at::cuda::getCurrentCUDAStream();
+  const int D=state.size(2),H=state.size(1),B=state_indices.numel();
+  AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half,at::ScalarType::BFloat16,r.scalar_type(),"flashrwkv2_rl_tiled",[&]{
+    const dim3 grid(D,H,B);
+    if(D==128) rl_infctx_tiled_detail::recurrent_columns<scalar_t,128><<<grid,32,0,stream>>>(H,sequence_chunk_offsets.data_ptr<int>(),chunk_token_starts.data_ptr<int>(),chunk_token_ends.data_ptr<int>(),state_indices.data_ptr<int>(),state.data_ptr<float>(),r.data_ptr<scalar_t>(),decay_logits.data_ptr<scalar_t>(),decay_bias.defined()?decay_bias.data_ptr<scalar_t>():nullptr,k.data_ptr<scalar_t>(),v.data_ptr<scalar_t>(),a.data_ptr<scalar_t>(),b.data_ptr<scalar_t>(),output.data_ptr<scalar_t>(),boundary.data_ptr<float>(),state_dot_a.defined()?state_dot_a.data_ptr<float>():nullptr,static_cast<float>(scale));
+    else rl_infctx_tiled_detail::recurrent_columns<scalar_t,256><<<grid,32,0,stream>>>(H,sequence_chunk_offsets.data_ptr<int>(),chunk_token_starts.data_ptr<int>(),chunk_token_ends.data_ptr<int>(),state_indices.data_ptr<int>(),state.data_ptr<float>(),r.data_ptr<scalar_t>(),decay_logits.data_ptr<scalar_t>(),decay_bias.defined()?decay_bias.data_ptr<scalar_t>():nullptr,k.data_ptr<scalar_t>(),v.data_ptr<scalar_t>(),a.data_ptr<scalar_t>(),b.data_ptr<scalar_t>(),output.data_ptr<scalar_t>(),boundary.data_ptr<float>(),state_dot_a.defined()?state_dot_a.data_ptr<float>():nullptr,static_cast<float>(scale));
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}

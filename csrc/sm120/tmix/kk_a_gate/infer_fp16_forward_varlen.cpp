@@ -16,6 +16,7 @@ void tmix_kk_a_gate_forward_varlen_cuda(
     int total_tokens,
     int channels,
     int heads,
+    int head_size,
     torch::Tensor k,
     torch::Tensor k_k,
     torch::Tensor a0,
@@ -44,14 +45,18 @@ std::vector<torch::Tensor> tmix_kk_a_gate_forward_varlen(
     torch::Tensor a0,
     torch::Tensor a12,
     torch::Tensor k_a,
+    int64_t head_size,
     int64_t batch_size,
     int64_t max_seqlen) {
   check_half(k, k, "k");
-  TORCH_CHECK(k.dim() == 2 && k.size(0) > 0 && k.size(1) > 0 && k.size(1) % 64 == 0,
-              "k must have packed shape [total_tokens,H*64]");
+  TORCH_CHECK(head_size == 64 || head_size == 128 || head_size == 256,
+              "head_size must be one of 64, 128, or 256");
+  TORCH_CHECK(k.dim() == 2 && k.size(0) > 0 && k.size(1) > 0 &&
+                  k.size(1) % head_size == 0,
+              "k must have packed shape [total_tokens,H*head_size]");
   const int64_t total_tokens = k.size(0);
   const int64_t channels = k.size(1);
-  const int heads = static_cast<int>(channels / 64);
+  const int heads = static_cast<int>(channels / head_size);
   TORCH_CHECK(batch_size > 0, "batch_size must be positive");
   TORCH_CHECK(max_seqlen > 0, "max_seqlen must be positive");
   for (const auto& item : {
@@ -69,7 +74,8 @@ std::vector<torch::Tensor> tmix_kk_a_gate_forward_varlen(
   auto kka = torch::empty_like(k);
   tmix_kk_a_gate_forward_varlen_cuda(
       static_cast<int>(batch_size), static_cast<int>(max_seqlen),
-      static_cast<int>(total_tokens), static_cast<int>(channels), heads, k, k_k,
+      static_cast<int>(total_tokens), static_cast<int>(channels), heads,
+      static_cast<int>(head_size), k, k_k,
       a0, a12, k_a, new_k, neg_kk, kka);
   return {new_k, neg_kk, kka};
 }
@@ -79,5 +85,6 @@ void register_tmix_kk_a_gate_bindings(py::module_& module) {
       "tmix_kk_a_gate_forward_varlen", &tmix_kk_a_gate_forward_varlen,
       "Packed Albatross TMix key/key-a gate",
       py::arg("k"), py::arg("k_k"), py::arg("a0"), py::arg("a12"),
-      py::arg("k_a"), py::arg("batch_size"), py::arg("max_seqlen"));
+      py::arg("k_a"), py::arg("head_size") = 64,
+      py::arg("batch_size") = 1, py::arg("max_seqlen") = 1);
 }

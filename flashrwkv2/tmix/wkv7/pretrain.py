@@ -7,11 +7,14 @@ from __future__ import annotations
 import torch
 
 
-HEAD_SIZE = 64
 CHUNK_LEN = 16
 
 
-def _validate_inputs(tensors: tuple[torch.Tensor, ...]) -> tuple[int, int, int]:
+def _validate_inputs(
+    tensors: tuple[torch.Tensor, ...], head_size: int
+) -> tuple[int, int, int]:
+    if head_size not in {64, 128, 256}:
+        raise ValueError("head_size must be one of 64, 128, or 256")
     if len(tensors) != 6:
         raise ValueError("clampw requires r, w, k, v, a, and b")
     r = tensors[0]
@@ -37,8 +40,8 @@ def _validate_inputs(tensors: tuple[torch.Tensor, ...]) -> tuple[int, int, int]:
             raise ValueError(f"{name} must share the r device")
 
     batch, tokens, channels = r.shape
-    if channels % HEAD_SIZE != 0:
-        raise ValueError("C must be divisible by the canonical head size 64")
+    if channels % head_size != 0:
+        raise ValueError("C must be divisible by head_size")
     if tokens % CHUNK_LEN != 0:
         raise ValueError("T must be divisible by the canonical chunk length 16")
     return batch, tokens, channels
@@ -54,29 +57,31 @@ class _PretrainRecurrent(torch.autograd.Function):
         v: torch.Tensor,
         a: torch.Tensor,
         b: torch.Tensor,
+        head_size: int,
     ) -> torch.Tensor:
-        batch, tokens, channels = _validate_inputs((r, w, k, v, a, b))
-        heads = channels // HEAD_SIZE
+        batch, tokens, channels = _validate_inputs((r, w, k, v, a, b), head_size)
+        heads = channels // head_size
         values = tuple(
-            tensor.view(batch, tokens, heads, HEAD_SIZE)
+            tensor.view(batch, tokens, heads, head_size)
             for tensor in (r, w, k, v, a, b)
         )
         output = torch.empty_like(values[3])
         boundary = torch.empty(
-            (batch, heads, tokens // CHUNK_LEN, HEAD_SIZE, HEAD_SIZE),
+            (batch, heads, tokens // CHUNK_LEN, head_size, head_size),
             device=r.device,
             dtype=torch.float32,
         )
         state_dot_a = torch.empty(
-            (batch, tokens, heads, HEAD_SIZE),
+            (batch, tokens, heads, head_size),
             device=r.device,
             dtype=torch.float32,
         )
         torch.ops.rwkv7_clampw_v3.forward(
-            *values, output, boundary, state_dot_a
+            *values, output, boundary, state_dot_a, head_size
         )
         ctx.save_for_backward(*values, boundary, state_dot_a)
         ctx.input_shape = (batch, tokens, channels)
+        ctx.head_size = head_size
         return output.view(batch, tokens, channels)
 
     @staticmethod
@@ -86,9 +91,10 @@ class _PretrainRecurrent(torch.autograd.Function):
     ) -> tuple[torch.Tensor, ...]:
         r, w, k, v, a, b, boundary, state_dot_a = ctx.saved_tensors
         batch, tokens, channels = ctx.input_shape
-        heads = channels // HEAD_SIZE
+        head_size = ctx.head_size
+        heads = channels // head_size
         grad_output_4d = grad_output.contiguous().view(
-            batch, tokens, heads, HEAD_SIZE
+            batch, tokens, heads, head_size
         )
         gradients = tuple(torch.empty_like(tensor) for tensor in (r, w, k, v, a, b))
         torch.ops.rwkv7_clampw_v3.backward(
@@ -102,8 +108,9 @@ class _PretrainRecurrent(torch.autograd.Function):
             boundary,
             state_dot_a,
             *gradients,
+            head_size,
         )
-        return tuple(gradient.view(batch, tokens, channels) for gradient in gradients)
+        return tuple(gradient.view(batch, tokens, channels) for gradient in gradients) + (None,)
 
 
 def pretrain_recurrent_bf16(
@@ -113,11 +120,13 @@ def pretrain_recurrent_bf16(
     v: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
+    *,
+    head_size: int = 64,
 ) -> torch.Tensor:
     """Run the canonical train_temp clampw v3 H100 forward/backward family."""
 
-    _validate_inputs((r, w, k, v, a, b))
-    return _PretrainRecurrent.apply(r, w, k, v, a, b)
+    _validate_inputs((r, w, k, v, a, b), head_size)
+    return _PretrainRecurrent.apply(r, w, k, v, a, b, head_size)
 
 
 __all__ = ["pretrain_recurrent_bf16"]

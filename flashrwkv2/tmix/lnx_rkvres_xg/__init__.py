@@ -17,11 +17,14 @@ def infer_tmix_lnx_rkvres_xg_forward_varlen(
     bias: torch.Tensor,
     g: torch.Tensor,
     *,
+    head_size: int = 64,
     batch_size: int = 1,
     max_seqlen: int | None = None,
 ) -> torch.Tensor:
     """Run Albatross TMix LN/rkv-residual/gate on packed rows."""
 
+    if head_size not in {64, 128, 256}:
+        raise ValueError("head_size must be one of 64, 128, or 256")
     tensors = (x, r, k, v, g)
     names = ("x", "r", "k", "v", "g")
     for name, tensor in zip(names, tensors, strict=True):
@@ -33,8 +36,13 @@ def infer_tmix_lnx_rkvres_xg_forward_varlen(
             raise ValueError(f"{name} must be CUDA and contiguous")
         if tensor.device != x.device:
             raise ValueError(f"{name} must share x's device")
-    if x.ndim != 2 or x.shape[0] <= 0 or x.shape[1] <= 0 or x.shape[1] % 64:
-        raise ValueError("x must have packed shape [total_tokens,H*64]")
+    if (
+        x.ndim != 2
+        or x.shape[0] <= 0
+        or x.shape[1] <= 0
+        or x.shape[1] % head_size
+    ):
+        raise ValueError("x must have packed shape [total_tokens,H*head_size]")
     if any(tensor.shape != x.shape for tensor in (r, k, v, g)):
         raise ValueError("r, k, v and g must match x's packed shape")
     channels = x.shape[1]
@@ -60,7 +68,17 @@ def infer_tmix_lnx_rkvres_xg_forward_varlen(
     ):
         raise ValueError("max_seqlen must be a positive integer")
     return _extension().tmix_lnx_rkvres_xg_forward_varlen(
-        x, r, k, v, r_k, weight, bias, g, int(batch_size), int(max_seqlen)
+        x,
+        r,
+        k,
+        v,
+        r_k,
+        weight,
+        bias,
+        g,
+        int(head_size),
+        int(batch_size),
+        int(max_seqlen),
     )
 
 

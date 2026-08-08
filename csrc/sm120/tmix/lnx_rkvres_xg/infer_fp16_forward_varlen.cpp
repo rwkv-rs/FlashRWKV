@@ -15,6 +15,7 @@ void tmix_lnx_rkvres_xg_forward_varlen_cuda(
     int total_tokens,
     int channels,
     int heads,
+    int head_size,
     torch::Tensor x,
     torch::Tensor r,
     torch::Tensor k,
@@ -47,14 +48,18 @@ torch::Tensor tmix_lnx_rkvres_xg_forward_varlen(
     torch::Tensor weight,
     torch::Tensor bias,
     torch::Tensor g,
+    int64_t head_size,
     int64_t batch_size,
     int64_t max_seqlen) {
   check_half(x, x, "x");
-  TORCH_CHECK(x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0 && x.size(1) % 64 == 0,
-              "x must have packed shape [total_tokens,H*64]");
+  TORCH_CHECK(head_size == 64 || head_size == 128 || head_size == 256,
+              "head_size must be one of 64, 128, or 256");
+  TORCH_CHECK(x.dim() == 2 && x.size(0) > 0 && x.size(1) > 0 &&
+                  x.size(1) % head_size == 0,
+              "x must have packed shape [total_tokens,H*head_size]");
   const int64_t total_tokens = x.size(0);
   const int64_t channels = x.size(1);
-  const int heads = static_cast<int>(channels / 64);
+  const int heads = static_cast<int>(channels / head_size);
   TORCH_CHECK(batch_size > 0, "batch_size must be positive");
   TORCH_CHECK(max_seqlen > 0, "max_seqlen must be positive");
   for (const auto& item : {
@@ -77,6 +82,7 @@ torch::Tensor tmix_lnx_rkvres_xg_forward_varlen(
   tmix_lnx_rkvres_xg_forward_varlen_cuda(
       static_cast<int>(batch_size), static_cast<int>(max_seqlen),
       static_cast<int>(total_tokens), static_cast<int>(channels), heads,
+      static_cast<int>(head_size),
       x, r, k, v, r_k, weight, bias, g, output);
   return output;
 }
@@ -84,5 +90,9 @@ torch::Tensor tmix_lnx_rkvres_xg_forward_varlen(
 void register_tmix_lnx_rkvres_xg_bindings(py::module_& module) {
   module.def(
       "tmix_lnx_rkvres_xg_forward_varlen", &tmix_lnx_rkvres_xg_forward_varlen,
-      "Packed Albatross TMix lnx/rkv-residual/gate");
+      "Packed Albatross TMix lnx/rkv-residual/gate",
+      py::arg("x"), py::arg("r"), py::arg("k"), py::arg("v"),
+      py::arg("r_k"), py::arg("weight"), py::arg("bias"), py::arg("g"),
+      py::arg("head_size") = 64, py::arg("batch_size") = 1,
+      py::arg("max_seqlen") = 1);
 }

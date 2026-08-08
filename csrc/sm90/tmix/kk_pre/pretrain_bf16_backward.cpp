@@ -36,7 +36,10 @@ void check_inputs(
     const torch::Tensor& key_scale,
     const torch::Tensor& learning_rate,
     const torch::Tensor& learning_rate_scale,
-    const torch::Tensor& inverse_norm) {
+    const torch::Tensor& inverse_norm,
+    int64_t head_size) {
+  TORCH_CHECK(head_size == 64 || head_size == 128 || head_size == 256,
+              "head_size must be one of 64, 128, or 256");
   for (const auto& item : {
            std::pair<const torch::Tensor*, const char*>{
                &grad_new_key, "grad_new_key"},
@@ -50,8 +53,8 @@ void check_inputs(
     check_bf16_cuda(*item.first, item.second);
   }
   TORCH_CHECK(
-      key.dim() == 3 && key.size(2) > 0 && key.size(2) % 64 == 0,
-      "key must have shape [B,T,C] with C divisible by 64");
+      key.dim() == 3 && key.size(2) > 0 && key.size(2) % head_size == 0,
+      "key must have shape [B,T,C] with C divisible by head_size");
   TORCH_CHECK(grad_new_key.sizes() == key.sizes() &&
                   grad_negative_direction.sizes() == key.sizes() &&
                   grad_scaled_direction.sizes() == key.sizes() &&
@@ -63,10 +66,10 @@ void check_inputs(
   TORCH_CHECK(
       inverse_norm.dim() == 3 && inverse_norm.size(0) == key.size(0) &&
           inverse_norm.size(1) == key.size(1) &&
-          inverse_norm.size(2) == key.size(2) / 64 &&
+          inverse_norm.size(2) == key.size(2) / head_size &&
           inverse_norm.scalar_type() == torch::kFloat32 &&
           inverse_norm.is_cuda() && inverse_norm.is_contiguous(),
-      "inverse_norm must be contiguous CUDA float32 [B,T,C/64]");
+      "inverse_norm must be contiguous CUDA float32 [B,T,C/head_size]");
   TORCH_CHECK(
       key.device() == key_scale.device() &&
           key.device() == learning_rate.device() &&
@@ -85,13 +88,14 @@ std::vector<torch::Tensor> pretrain_tmix_kk_pre_backward(
     torch::Tensor key_scale,
     torch::Tensor learning_rate,
     torch::Tensor learning_rate_scale,
-    torch::Tensor inverse_norm) {
+    torch::Tensor inverse_norm,
+    int64_t head_size) {
   check_inputs(
       grad_new_key, grad_negative_direction, grad_scaled_direction, key,
-      key_scale, learning_rate, learning_rate_scale, inverse_norm);
+      key_scale, learning_rate, learning_rate_scale, inverse_norm, head_size);
   return pretrain_tmix_kk_pre_backward_cuda(
       grad_new_key, grad_negative_direction, grad_scaled_direction, key,
-      key_scale, learning_rate, learning_rate_scale, inverse_norm, 64);
+      key_scale, learning_rate, learning_rate_scale, inverse_norm, head_size);
 }
 
 void register_pretrain_tmix_kk_pre_backward_bindings(py::module_& module) {
@@ -101,5 +105,6 @@ void register_pretrain_tmix_kk_pre_backward_bindings(py::module_& module) {
       py::arg("grad_new_key"), py::arg("grad_negative_direction"),
       py::arg("grad_scaled_direction"), py::arg("key"),
       py::arg("key_scale"), py::arg("learning_rate"),
-      py::arg("learning_rate_scale"), py::arg("inverse_norm"));
+      py::arg("learning_rate_scale"), py::arg("inverse_norm"),
+      py::arg("head_size") = 64);
 }

@@ -87,7 +87,7 @@ chunk metadata and returns a new final pool rather than mutating the input pool.
 - Import: `from flashrwkv2 import infer_recurrent_fp16_forward_varlen`
 - Owner: `flashrwkv2.tmix.wkv7`
 - Signature: `infer_recurrent_fp16_forward_varlen(r, decay_logits, k, v, a, b, *, state_pool, elapsed_state_pool, cu_seqlens, state_indices, scale=1.0, decay_bias=None, max_seqlen=None, validated_metadata=None) -> torch.Tensor`
-- Contract: matching packed `[N,H,D]` token tensors, FP16 `state_pool [slots,H,D,D]`, and contiguous CUDA `int32 elapsed_state_pool [slots]`. The current canonical FP16 family supports `D=64` and fails closed outside its native specialization.
+- Contract: matching packed `[N,H,D]` token tensors, FP16 `state_pool [slots,H,D,D]`, and contiguous CUDA `int32 elapsed_state_pool [slots]`, with `D` in `{64,128,256}`. `D=64` preserves the Albatross clone/exact/seq-v2/one-cp/one-direct dispatch. `D=128/256` use the local 64-key-tiled FP16 recurrent family and never select an FP32-state fallback.
 - Result and mutation: returns output shaped like `v` and updates selected state slots. Elapsed-state advancement remains explicit. No custom autograd.
 
 ### `infer_chunk_bf16_forward_varlen`
@@ -160,16 +160,16 @@ chunk metadata and returns a new final pool rather than mutating the input pool.
 
 - Import: `from flashrwkv2 import infer_tmix_kk_a_gate_forward_varlen`
 - Owner: `flashrwkv2.tmix.kk_a_gate`
-- Signature: `infer_tmix_kk_a_gate_forward_varlen(k, k_k, a0, a12, k_a, *, batch_size=1, max_seqlen=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
-- Contract: FP16 `k` and `a12 [N,C]`, vectors `k_k`, `a0`, and `k_a [C]`, with `C` divisible by 64. Batch and maximum sequence lengths are positive.
+- Signature: `infer_tmix_kk_a_gate_forward_varlen(k, k_k, a0, a12, k_a, *, head_size=64, batch_size=1, max_seqlen=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
+- Contract: FP16 `k` and `a12 [N,C]`, vectors `k_k`, `a0`, and `k_a [C]`; `head_size` is one of 64, 128, or 256 and divides `C`. Batch and maximum sequence lengths are positive. D64 retains the original launch, while D128/D256 use 2/4-warp head reductions.
 - Result and mutation: returns the gated key, negative normalized key, and gated normalized key, each `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_lnx_rkvres_xg_forward_varlen`
 
 - Import: `from flashrwkv2 import infer_tmix_lnx_rkvres_xg_forward_varlen`
 - Owner: `flashrwkv2.tmix.lnx_rkvres_xg`
-- Signature: `infer_tmix_lnx_rkvres_xg_forward_varlen(x, r, k, v, r_k, weight, bias, g, *, batch_size=1, max_seqlen=None) -> torch.Tensor`
-- Contract: FP16 packed `x`, `r`, `k`, `v`, and `g [N,C]`; vectors `r_k`, `weight`, and `bias [C]`; `C` is divisible by 64. Automatic dispatch exposes only the basic and warp families. Albatross's forced warp-2D family is retained as disabled `#if 0` reference code because this API has no forced head-grid selector.
+- Signature: `infer_tmix_lnx_rkvres_xg_forward_varlen(x, r, k, v, r_k, weight, bias, g, *, head_size=64, batch_size=1, max_seqlen=None) -> torch.Tensor`
+- Contract: FP16 packed `x`, `r`, `k`, `v`, and `g [N,C]`; vectors `r_k`, `weight`, and `bias [C]`; `head_size` is one of 64, 128, or 256 and divides `C`. D64 preserves the Albatross dispatch; D128/D256 use 2/4-warp reductions for head normalization and the residual dot product.
 - Result and mutation: returns fused head-wise normalization/residual/gate output `[N,C]`; inputs are not mutated.
 
 ### `infer_tmix_vres_gate_forward_varlen`
@@ -448,8 +448,8 @@ outputs for their floating-point inputs unless an entry states otherwise.
 
 - Import: `from flashrwkv2 import pretrain_recurrent_bf16`
 - Owner: `flashrwkv2.tmix.wkv7.pretrain`
-- Signature: `pretrain_recurrent_bf16(r, w, k, v, a, b) -> torch.Tensor`
-- Contract: six matching contiguous CUDA BF16 tensors `[B,T,C]`; `C` is divisible by the canonical head size 64 and `T` by the canonical chunk length 16. `w` is the clampw-v3 input, not raw `decay_logits`.
+- Signature: `pretrain_recurrent_bf16(r, w, k, v, a, b, *, head_size=64) -> torch.Tensor`
+- Contract: six matching contiguous CUDA BF16 tensors `[B,T,C]`; `head_size` is one of 64, 128, or 256 and divides `C`; `T` is divisible by the canonical chunk length 16. `w` is the clampw-v3 input, not raw `decay_logits`. D64 retains clampw-v3, D128 follows RWKV-LM `rwkv7_clampw128_v2`, and D256 is a local four-segment generalization of the same recurrence and storage contract.
 - Result and autograd: returns BF16 `[B,T,C]` and supplies gradients for all six inputs. No caller-owned state is mutated.
 
 ### `pretrain_tmix_a_gate_bf16`
@@ -479,16 +479,16 @@ outputs for their floating-point inputs unless an entry states otherwise.
 
 - Import: `from flashrwkv2 import pretrain_tmix_kk_pre_bf16`
 - Owner: `flashrwkv2.tmix.kk_pre`
-- Signature: `pretrain_tmix_kk_pre_bf16(key, key_scale, learning_rate, learning_rate_scale)`
-- Contract: BF16 `key` and `learning_rate [B,T,C]`; BF16 scale vectors `[C]`; `C` is divisible by 64.
+- Signature: `pretrain_tmix_kk_pre_bf16(key, key_scale, learning_rate, learning_rate_scale, *, head_size=64)`
+- Contract: BF16 `key` and `learning_rate [B,T,C]`; BF16 scale vectors `[C]`; `head_size` is one of 64, 128, or 256 and divides `C`.
 - Result and autograd: returns `(new_key, negative_direction, scaled_direction)`, each `[B,T,C]`, with gradients for all inputs.
 
 ### `pretrain_tmix_lnx_rkvres_xg_bf16`
 
 - Import: `from flashrwkv2 import pretrain_tmix_lnx_rkvres_xg_bf16`
 - Owner: `flashrwkv2.tmix.lnx_rkvres_xg.pretrain`
-- Signature: `pretrain_tmix_lnx_rkvres_xg_bf16(x, r, k, v, residual_scale, weight, bias, g)`
-- Contract: matching BF16 `x`, `r`, `k`, `v`, and `g [B,T,C]`; `C` divisible by 64; `residual_scale [C/64,64]`; affine vectors `[C]`.
+- Signature: `pretrain_tmix_lnx_rkvres_xg_bf16(x, r, k, v, residual_scale, weight, bias, g, *, head_size=64)`
+- Contract: matching BF16 `x`, `r`, `k`, `v`, and `g [B,T,C]`; `head_size` is one of 64, 128, or 256 and divides `C`; `residual_scale [C/head_size,head_size]`; affine vectors `[C]`.
 - Result and autograd: returns fused `[B,T,C]` output with gradients for requested floating inputs.
 
 ### `pretrain_cmix_bf16`
@@ -532,7 +532,7 @@ outputs for their floating-point inputs unless an entry states otherwise.
 - Import: `from flashrwkv2 import rl_infctx_chunk_fp32io16`
 - Owner: `flashrwkv2.rl_infctx.wkv7`
 - Signature: `rl_infctx_chunk_fp32io16(r, decay_logits, k, v, a, b, *, state_pool=None, cu_seqlens, state_indices=None, chunk_size=16, strategy='recompute', scale=1.0, decay_bias=None)`
-- Contract: matching FP16 or BF16 packed tensors `[N,H,D]`, with `D` in `{64,128,256}`; packed offsets; `chunk_size` in `{16,32,64}`; strategy `materialized` or `recompute`; finite scale. Optional decay bias matches token dtype and is `[H,D]` or `[H*D]`. Missing state indices default to `0..B-1`; missing state pool allocates zero FP32 state.
+- Contract: matching FP16 or BF16 packed tensors `[N,H,D]`, with `D` in `{64,128,256}`; packed offsets; `chunk_size` in `{16,32,64}`; strategy `materialized` or `recompute`; finite scale. Optional decay bias matches token dtype and is `[H,D]` or `[H*D]`. Missing state indices default to `0..B-1`; missing state pool allocates zero FP32 state. D64 retains the existing chunk selection. D128/D256 use 64-wide state tiles for boundary/state propagation and backward replay; no D256-by-D256 shared allocation is used.
 - Result and mutation: returns `(output, final_pool)`. The output matches token shape; `final_pool` is a cloned FP32 pool with selected slots replaced. The input `state_pool` is not mutated. This forward-only wrapper does not define custom autograd.
 
 ### `rl_infctx_chunk_fp32io16_factor_recompute`

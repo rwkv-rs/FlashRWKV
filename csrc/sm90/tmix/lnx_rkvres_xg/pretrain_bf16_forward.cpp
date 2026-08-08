@@ -16,7 +16,8 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_cuda(
     torch::Tensor residual_scale,
     torch::Tensor weight,
     torch::Tensor bias,
-    torch::Tensor g);
+    torch::Tensor g,
+    int64_t head_size);
 
 namespace {
 
@@ -35,7 +36,10 @@ void check_inputs(
     const torch::Tensor& residual_scale,
     const torch::Tensor& weight,
     const torch::Tensor& bias,
-    const torch::Tensor& g) {
+    const torch::Tensor& g,
+    int64_t head_size) {
+  TORCH_CHECK(head_size == 64 || head_size == 128 || head_size == 256,
+              "head_size must be one of 64, 128, or 256");
   for (const auto& item : {
            std::pair<const torch::Tensor*, const char*>{&x, "x"},
            {&r, "r"}, {&k, "k"}, {&v, "v"}, {&residual_scale, "residual_scale"},
@@ -45,16 +49,16 @@ void check_inputs(
   }
   TORCH_CHECK(
       x.dim() == 3 && x.size(0) > 0 && x.size(1) > 0 && x.size(2) > 0 &&
-          x.size(2) % 64 == 0,
-      "x must have shape [B,T,C] with C divisible by 64");
+          x.size(2) % head_size == 0,
+      "x must have shape [B,T,C] with C divisible by head_size");
   for (const auto& item : {&r, &k, &v, &g}) {
     TORCH_CHECK(item->sizes() == x.sizes(), "token tensors must match x");
   }
-  const int64_t heads = x.size(2) / 64;
+  const int64_t heads = x.size(2) / head_size;
   TORCH_CHECK(
       residual_scale.dim() == 2 && residual_scale.size(0) == heads &&
-          residual_scale.size(1) == 64,
-      "residual_scale must have shape [C/64,64]");
+          residual_scale.size(1) == head_size,
+      "residual_scale must have shape [C/head_size,head_size]");
   TORCH_CHECK(weight.dim() == 1 && bias.dim() == 1 &&
                   weight.size(0) == x.size(2) && bias.size(0) == x.size(2),
               "weight and bias must have shape [C]");
@@ -76,10 +80,11 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_forward(
     torch::Tensor residual_scale,
     torch::Tensor weight,
     torch::Tensor bias,
-    torch::Tensor g) {
-  check_inputs(x, r, k, v, residual_scale, weight, bias, g);
+    torch::Tensor g,
+    int64_t head_size) {
+  check_inputs(x, r, k, v, residual_scale, weight, bias, g, head_size);
   return pretrain_tmix_lnx_rkvres_xg_cuda(
-      x, r, k, v, residual_scale, weight, bias, g);
+      x, r, k, v, residual_scale, weight, bias, g, head_size);
 }
 
 void register_pretrain_tmix_lnx_rkvres_xg_forward_bindings(py::module_& module) {
@@ -89,5 +94,5 @@ void register_pretrain_tmix_lnx_rkvres_xg_forward_bindings(py::module_& module) 
       "RWKV-7 train_temp fused LN/residual/gate forward",
       py::arg("x"), py::arg("r"), py::arg("k"), py::arg("v"),
       py::arg("residual_scale"), py::arg("weight"), py::arg("bias"),
-      py::arg("g"));
+      py::arg("g"), py::arg("head_size") = 64);
 }

@@ -39,6 +39,20 @@ __device__ inline float warp_sum(float v) {
     return v;
 }
 
+template <int HeadSize>
+__device__ inline float block_sum(float value) {
+    __shared__ float warp_sums[HeadSize / 64];
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    value = warp_sum(value);
+    if (lane == 0) warp_sums[warp] = value;
+    __syncthreads();
+    value = lane < HeadSize / 64 ? warp_sums[lane] : 0.0f;
+    value = __shfl_sync(0xffffffffu, warp_sum(value), 0);
+    __syncthreads();
+    return value;
+}
+
 __device__ inline void atomic_add_float2(float* ptr, float x0, float x1) {
     atomicAdd(reinterpret_cast<float2*>(ptr), make_float2(x0, x1));
 }
@@ -176,6 +190,59 @@ __global__ void tmix_kk_pre_backward64_v5_kernel(
     atomic_add_float2(grad_k_a + c, gnew0 * kv0 * (av0 - 1.0f), gnew1 * kv1 * (av1 - 1.0f));
 }
 
+template <int HeadSize>
+__global__ void tmix_kk_pre_backward_tiled_kernel(
+    const at::BFloat16* __restrict__ grad_new_k,
+    const at::BFloat16* __restrict__ grad_neg_kk,
+    const at::BFloat16* __restrict__ grad_kka,
+    const at::BFloat16* __restrict__ k,
+    const at::BFloat16* __restrict__ k_k,
+    const at::BFloat16* __restrict__ a,
+    const at::BFloat16* __restrict__ k_a,
+    const float* __restrict__ inv_d_buf,
+    at::BFloat16* __restrict__ grad_k,
+    float* __restrict__ grad_k_k,
+    at::BFloat16* __restrict__ grad_a,
+    float* __restrict__ grad_k_a,
+    int64_t h_size) {
+    const int64_t bth = blockIdx.x;
+    const int pair = threadIdx.x;
+    const int64_t h = bth % h_size;
+    const int64_t idx = bth * HeadSize + pair * 2;
+    const int64_t c = h * HeadSize + pair * 2;
+    const float inv_d = inv_d_buf[bth];
+    const __nv_bfloat162 kv2 = load_bf16x2(k + idx);
+    const __nv_bfloat162 ks2 = load_bf16x2(k_k + c);
+    const __nv_bfloat162 av2 = load_bf16x2(a + idx);
+    const __nv_bfloat162 gn2 = load_bf16x2(grad_neg_kk + idx);
+    const __nv_bfloat162 ga2 = load_bf16x2(grad_kka + idx);
+    const float kv0 = __low2float(kv2), kv1 = __high2float(kv2);
+    const float ks0 = __low2float(ks2), ks1 = __high2float(ks2);
+    const float av0 = __low2float(av2), av1 = __high2float(av2);
+    const float kk0 = kv0 * ks0 * inv_d, kk1 = kv1 * ks1 * inv_d;
+    const float gka0 = __low2float(ga2), gka1 = __high2float(ga2);
+    const float g0 = -__low2float(gn2) + gka0 * av0;
+    const float g1 = -__high2float(gn2) + gka1 * av1;
+    const float dot = block_sum<HeadSize>(g0 * kk0 + g1 * kk1);
+    float gu0 = g0 * inv_d, gu1 = g1 * inv_d;
+    if (inv_d < kInvNormalizeEps) {
+      gu0 = (g0 - kk0 * dot) * inv_d;
+      gu1 = (g1 - kk1 * dot) * inv_d;
+    }
+    const __nv_bfloat162 ka2 = load_bf16x2(k_a + c);
+    const __nv_bfloat162 gnew2 = load_bf16x2(grad_new_k + idx);
+    const float ka0 = __low2float(ka2), ka1 = __high2float(ka2);
+    const float gnew0 = __low2float(gnew2), gnew1 = __high2float(gnew2);
+    store_bf16x2(grad_k + idx,
+      gnew0 * fmaf(av0, ka0, 1.0f - ka0) + gu0 * ks0,
+      gnew1 * fmaf(av1, ka1, 1.0f - ka1) + gu1 * ks1);
+    store_bf16x2(grad_a + idx, gnew0 * kv0 * ka0 + gka0 * kk0,
+                  gnew1 * kv1 * ka1 + gka1 * kk1);
+    atomic_add_float2(grad_k_k + c, gu0 * kv0, gu1 * kv1);
+    atomic_add_float2(grad_k_a + c, gnew0 * kv0 * (av0 - 1.0f),
+                       gnew1 * kv1 * (av1 - 1.0f));
+}
+
 __global__ void cast_float_to_bf16_kernel(
     const float* __restrict__ src,
     at::BFloat16* __restrict__ dst,
@@ -198,7 +265,6 @@ std::vector<torch::Tensor> pretrain_tmix_kk_pre_backward_cuda(
     torch::Tensor k_a,
     torch::Tensor inv_d,
     int64_t head_size) {
-    (void)head_size;
     auto grad_k = torch::empty_like(k);
     auto grad_a = torch::empty_like(a);
     auto grad_k_k_fp32 = torch::zeros({k.size(2)}, k.options().dtype(torch::kFloat32));
@@ -207,11 +273,12 @@ std::vector<torch::Tensor> pretrain_tmix_kk_pre_backward_cuda(
     auto grad_k_a = torch::empty_like(k_a);
 
     const int64_t c_size = k.size(2);
-    const int64_t h_size = c_size / kHeadSize;
+    const int64_t h_size = c_size / head_size;
     const int64_t bth_size = k.size(0) * k.size(1) * h_size;
     const int blocks = static_cast<int>(ceil_div(bth_size, static_cast<int64_t>(kWarpsPerBlock)));
     auto stream = at::cuda::getCurrentCUDAStream();
-    tmix_kk_pre_backward64_v5_kernel<<<blocks, kWarpsPerBlock * 32, 0, stream>>>(
+    if (head_size == 64) {
+      tmix_kk_pre_backward64_v5_kernel<<<blocks, kWarpsPerBlock * 32, 0, stream>>>(
         grad_new_k.data_ptr<at::BFloat16>(),
         grad_neg_kk.data_ptr<at::BFloat16>(),
         grad_kka.data_ptr<at::BFloat16>(),
@@ -226,6 +293,23 @@ std::vector<torch::Tensor> pretrain_tmix_kk_pre_backward_cuda(
         grad_k_a_fp32.data_ptr<float>(),
         bth_size,
         h_size);
+    } else if (head_size == 128) {
+      tmix_kk_pre_backward_tiled_kernel<128><<<bth_size, 64, 0, stream>>>(
+        grad_new_k.data_ptr<at::BFloat16>(), grad_neg_kk.data_ptr<at::BFloat16>(),
+        grad_kka.data_ptr<at::BFloat16>(), k.data_ptr<at::BFloat16>(),
+        k_k.data_ptr<at::BFloat16>(), a.data_ptr<at::BFloat16>(),
+        k_a.data_ptr<at::BFloat16>(), inv_d.data_ptr<float>(),
+        grad_k.data_ptr<at::BFloat16>(), grad_k_k_fp32.data_ptr<float>(),
+        grad_a.data_ptr<at::BFloat16>(), grad_k_a_fp32.data_ptr<float>(), h_size);
+    } else {
+      tmix_kk_pre_backward_tiled_kernel<256><<<bth_size, 128, 0, stream>>>(
+        grad_new_k.data_ptr<at::BFloat16>(), grad_neg_kk.data_ptr<at::BFloat16>(),
+        grad_kka.data_ptr<at::BFloat16>(), k.data_ptr<at::BFloat16>(),
+        k_k.data_ptr<at::BFloat16>(), a.data_ptr<at::BFloat16>(),
+        k_a.data_ptr<at::BFloat16>(), inv_d.data_ptr<float>(),
+        grad_k.data_ptr<at::BFloat16>(), grad_k_k_fp32.data_ptr<float>(),
+        grad_a.data_ptr<at::BFloat16>(), grad_k_a_fp32.data_ptr<float>(), h_size);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     constexpr int threads = 256;
@@ -243,4 +327,3 @@ std::vector<torch::Tensor> pretrain_tmix_kk_pre_backward_cuda(
 
     return {grad_k, grad_k_k, grad_a, grad_k_a};
 }
-

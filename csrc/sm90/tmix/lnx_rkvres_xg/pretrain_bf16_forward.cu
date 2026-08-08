@@ -43,6 +43,19 @@ __device__ inline float warp_sum(float v) {
     return v;
 }
 
+template<int HeadSize>
+__device__ inline float block_sum(float value) {
+    __shared__ float sums[HeadSize / 64];
+    const int lane=threadIdx.x&31, warp=threadIdx.x>>5;
+    value=warp_sum(value);
+    if(lane==0) sums[warp]=value;
+    __syncthreads();
+    value=lane<HeadSize/64?sums[lane]:0.0f;
+    value=__shfl_sync(0xffffffffu,warp_sum(value),0);
+    __syncthreads();
+    return value;
+}
+
 inline int64_t ceil_div(int64_t n, int64_t d) {
     return (n + d - 1) / d;
 }
@@ -109,6 +122,34 @@ __global__ void tmix_lnx_rkvres_xg_v1_forward_kernel(
     const float y0 = d0 * rstd_val * __low2float(w2) + __low2float(b2) + scale_val * __low2float(vv2);
     const float y1 = d1 * rstd_val * __high2float(w2) + __high2float(b2) + scale_val * __high2float(vv2);
     store_bf16x2(xg + idx, y0 * __low2float(g2), y1 * __high2float(g2));
+}
+
+template<int HeadSize>
+__global__ void tmix_lnx_forward_tiled_kernel(
+    const at::BFloat16* x,const at::BFloat16* r,const at::BFloat16* k,
+    const at::BFloat16* v,const at::BFloat16* r_k,const at::BFloat16* weight,
+    const at::BFloat16* bias,const at::BFloat16* g,at::BFloat16* xg,
+    float* mean,float* rstd,int64_t ngroups) {
+    const int64_t group=blockIdx.x,row=blockIdx.y;
+    const int pair=threadIdx.x;
+    const int64_t c0=group*HeadSize,c=c0+pair*2;
+    const int64_t idx=row*(ngroups*HeadSize)+c;
+    const int64_t ng=row*ngroups+group;
+    const __nv_bfloat162 xv=load_bf16x2(x+idx);
+    const float x0=__low2float(xv),x1=__high2float(xv);
+    const float m=block_sum<HeadSize>(x0+x1)/HeadSize;
+    const float d0=x0-m,d1=x1-m;
+    const float rs=rsqrtf(block_sum<HeadSize>(d0*d0+d1*d1)/HeadSize+kLnXEps);
+    const __nv_bfloat162 rv=load_bf16x2(r+idx),kv=load_bf16x2(k+idx),rk=load_bf16x2(r_k+c);
+    const float scale=block_sum<HeadSize>(
+      __low2float(rv)*__low2float(kv)*__low2float(rk)+
+      __high2float(rv)*__high2float(kv)*__high2float(rk));
+    if(pair==0){mean[ng]=m;rstd[ng]=rs;}
+    const __nv_bfloat162 vv=load_bf16x2(v+idx),wv=load_bf16x2(weight+c);
+    const __nv_bfloat162 bv=load_bf16x2(bias+c),gv=load_bf16x2(g+idx);
+    const float y0=d0*rs*__low2float(wv)+__low2float(bv)+scale*__low2float(vv);
+    const float y1=d1*rs*__high2float(wv)+__high2float(bv)+scale*__high2float(vv);
+    store_bf16x2(xg+idx,y0*__low2float(gv),y1*__high2float(gv));
 }
 
 __global__ void tmix_lnx_rkvres_xg_v1_backward_kernel(
@@ -282,18 +323,20 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_cuda(
     torch::Tensor r_k,
     torch::Tensor weight,
     torch::Tensor bias,
-    torch::Tensor g) {
+    torch::Tensor g,
+    int64_t head_size) {
     auto xg = torch::empty_like(x);
     const int64_t b = x.size(0);
     const int64_t t = x.size(1);
     const int64_t c = x.size(2);
-    const int64_t ngroups = c / kHeadSize;
+    const int64_t ngroups = c / head_size;
     auto mean = torch::empty({b, t, ngroups}, x.options().dtype(torch::kFloat32));
     auto rstd = torch::empty({b, t, ngroups}, x.options().dtype(torch::kFloat32));
 
     auto stream = at::cuda::getCurrentCUDAStream();
-    const dim3 blocks(static_cast<unsigned int>(ngroups), static_cast<unsigned int>(ceil_div(b * t, static_cast<int64_t>(kRowsPerBlock))));
-    tmix_lnx_rkvres_xg_v1_forward_kernel<<<blocks, kThreads, 0, stream>>>(
+    if (head_size == 64) {
+      const dim3 blocks(static_cast<unsigned int>(ngroups), static_cast<unsigned int>(ceil_div(b * t, static_cast<int64_t>(kRowsPerBlock))));
+      tmix_lnx_rkvres_xg_v1_forward_kernel<<<blocks, kThreads, 0, stream>>>(
         x.data_ptr<at::BFloat16>(),
         r.data_ptr<at::BFloat16>(),
         k.data_ptr<at::BFloat16>(),
@@ -307,8 +350,13 @@ std::vector<torch::Tensor> pretrain_tmix_lnx_rkvres_xg_cuda(
         rstd.data_ptr<float>(),
         ngroups,
         b * t);
+    } else if (head_size == 128) {
+      tmix_lnx_forward_tiled_kernel<128><<<dim3(ngroups,b*t),64,0,stream>>>(
+        x.data_ptr<at::BFloat16>(),r.data_ptr<at::BFloat16>(),k.data_ptr<at::BFloat16>(),v.data_ptr<at::BFloat16>(),r_k.data_ptr<at::BFloat16>(),weight.data_ptr<at::BFloat16>(),bias.data_ptr<at::BFloat16>(),g.data_ptr<at::BFloat16>(),xg.data_ptr<at::BFloat16>(),mean.data_ptr<float>(),rstd.data_ptr<float>(),ngroups);
+    } else {
+      tmix_lnx_forward_tiled_kernel<256><<<dim3(ngroups,b*t),128,0,stream>>>(
+        x.data_ptr<at::BFloat16>(),r.data_ptr<at::BFloat16>(),k.data_ptr<at::BFloat16>(),v.data_ptr<at::BFloat16>(),r_k.data_ptr<at::BFloat16>(),weight.data_ptr<at::BFloat16>(),bias.data_ptr<at::BFloat16>(),g.data_ptr<at::BFloat16>(),xg.data_ptr<at::BFloat16>(),mean.data_ptr<float>(),rstd.data_ptr<float>(),ngroups);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {xg, mean, rstd};
 }
-
-

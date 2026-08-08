@@ -80,12 +80,13 @@ def _chunk_metadata(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_rl_infctx_ragged_materialized_and_recompute() -> None:
+@pytest.mark.parametrize("d", (64, 128, 256))
+def test_rl_infctx_ragged_materialized_and_recompute(d: int) -> None:
     torch.manual_seed(37)
     device = torch.device("cuda")
     lengths = (2, 5)
     total = sum(lengths)
-    h, d = 1, 64
+    h = 1
     inputs = [
         (torch.randn(total, h, d, device=device) * 0.01).to(torch.float16)
         for _ in range(6)
@@ -134,11 +135,12 @@ def test_rl_infctx_ragged_materialized_and_recompute() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_rl_infctx_bf16_chunk_sizes_and_tail_match_reference() -> None:
+@pytest.mark.parametrize("d", (64, 128, 256))
+def test_rl_infctx_bf16_chunk_sizes_and_tail_match_reference(d: int) -> None:
     torch.manual_seed(43)
     device = torch.device("cuda")
     total = 65
-    h, d = 1, 64
+    h = 1
     inputs = [
         (torch.randn(total, h, d, device=device) * 0.01).to(torch.bfloat16)
         for _ in range(6)
@@ -158,7 +160,7 @@ def test_rl_infctx_bf16_chunk_sizes_and_tail_match_reference() -> None:
     )
 
     results = []
-    for chunk_size in (32, 64):
+    for chunk_size in (16, 32, 64):
         for strategy in ("materialized", "recompute"):
             output, final_pool = rl_infctx_chunk_fp32io16(
                 *inputs,
@@ -188,12 +190,13 @@ def test_rl_infctx_bf16_chunk_sizes_and_tail_match_reference() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_rl_infctx_replay_stage_matches_reference() -> None:
+@pytest.mark.parametrize("d", (64, 128, 256))
+def test_rl_infctx_replay_stage_matches_reference(d: int) -> None:
     torch.manual_seed(41)
     device = torch.device("cuda")
     lengths = (3, 2)
     total = sum(lengths)
-    h, d = 1, 64
+    h = 1
     inputs = [
         (torch.randn(total, h, d, device=device) * 0.01).to(torch.float16)
         for _ in range(6)

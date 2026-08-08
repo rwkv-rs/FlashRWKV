@@ -29,15 +29,18 @@ void check_inputs(
     const torch::Tensor& key,
     const torch::Tensor& key_scale,
     const torch::Tensor& learning_rate,
-    const torch::Tensor& learning_rate_scale) {
+    const torch::Tensor& learning_rate_scale,
+    int64_t head_size) {
+  TORCH_CHECK(head_size == 64 || head_size == 128 || head_size == 256,
+              "head_size must be one of 64, 128, or 256");
   check_bf16_cuda(key, "key");
   check_bf16_cuda(key_scale, "key_scale");
   check_bf16_cuda(learning_rate, "learning_rate");
   check_bf16_cuda(learning_rate_scale, "learning_rate_scale");
   TORCH_CHECK(
       key.dim() == 3 && key.size(0) > 0 && key.size(1) > 0 &&
-          key.size(2) > 0 && key.size(2) % 64 == 0,
-      "key must have shape [B,T,C] with C divisible by 64");
+          key.size(2) > 0 && key.size(2) % head_size == 0,
+      "key must have shape [B,T,C] with C divisible by head_size");
   TORCH_CHECK(learning_rate.sizes() == key.sizes(),
               "learning_rate must match key");
   TORCH_CHECK(key_scale.dim() == 1 && key_scale.size(0) == key.size(2),
@@ -59,10 +62,11 @@ std::vector<torch::Tensor> pretrain_tmix_kk_pre(
     torch::Tensor key,
     torch::Tensor key_scale,
     torch::Tensor learning_rate,
-    torch::Tensor learning_rate_scale) {
-  check_inputs(key, key_scale, learning_rate, learning_rate_scale);
+    torch::Tensor learning_rate_scale,
+    int64_t head_size) {
+  check_inputs(key, key_scale, learning_rate, learning_rate_scale, head_size);
   return pretrain_tmix_kk_pre_cuda(
-      key, key_scale, learning_rate, learning_rate_scale, 64);
+      key, key_scale, learning_rate, learning_rate_scale, head_size);
 }
 
 void register_pretrain_tmix_kk_pre_bindings(py::module_& module) {
@@ -70,5 +74,5 @@ void register_pretrain_tmix_kk_pre_bindings(py::module_& module) {
       "pretrain_tmix_kk_pre_forward", &pretrain_tmix_kk_pre,
       "RWKV-7 train_temp per-head key preparation",
       py::arg("key"), py::arg("key_scale"), py::arg("learning_rate"),
-      py::arg("learning_rate_scale"));
+      py::arg("learning_rate_scale"), py::arg("head_size") = 64);
 }
